@@ -13,6 +13,9 @@ endif
 if ENABLE_SWTOK
 include usr/lib/soft_stdll/soft_stdll.mk
 endif
+if ENABLE_NCMPTOK
+include usr/lib/ncmp_stdll/ncmp_stdll.mk
+endif
 if ENABLE_TPMTOK
 include usr/lib/tpm_stdll/tpm_stdll.mk
 endif

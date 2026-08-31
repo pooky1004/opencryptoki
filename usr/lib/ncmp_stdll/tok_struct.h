@@ -1,0 +1,75 @@
+/*
+ * Token NCMP - opencryptoki STDLL identity + token_specific SPI table.
+ *
+ * NCMP is a USB proxy token (Cypress FX3 reached via the ncmpd daemon), so it
+ * follows the EP11/ICSF "remote backend" pattern: only lifecycle hooks are
+ * populated here; cryptographic operations are forwarded to the physical token
+ * and are wired in incrementally. Any NULL function pointer makes the common
+ * layer report CKR_MECHANISM_INVALID / CKR_FUNCTION_NOT_SUPPORTED.
+ *
+ * NOTE: unlike the other tokens (which use positional initializers over ~150
+ * fields), this table uses C99 designated initializers. It is functionally
+ * identical but robust to field reordering/additions in token_spec_struct.h -
+ * a deliberate choice for a table that starts almost entirely NULL.
+ */
+#ifndef __NCMP_TOK_STRUCT_H
+#define __NCMP_TOK_STRUCT_H
+
+#include <pkcs11types.h>
+
+#include "tok_spec_struct.h"
+
+#ifndef NCMP_CONFIG_PATH
+#ifndef CONFIG_PATH
+#warning CONFIG_PATH not set, using default (/usr/local/var/lib/opencryptoki)
+#define CONFIG_PATH "/usr/local/var/lib/opencryptoki"
+#endif
+#define NCMP_CONFIG_PATH CONFIG_PATH "/ncmptok"
+#endif
+
+token_spec_t token_specific = {
+    .token_directory = NCMP_CONFIG_PATH,
+    .token_subdir = "ncmptok",
+    .secure_key_token = FALSE,
+    .data_store = {
+        .per_user = FALSE,
+        .use_master_key = TRUE,
+        .encryption_algorithm = CKM_DES3_CBC,
+        .pin_initial_vector = (CK_BYTE *)"12345678",
+        .obj_initial_vector = (CK_BYTE *)"10293847",
+    },
+
+    /* Lifecycle: connect to / disconnect from the ncmpd multiplexer. */
+    .t_init = &token_specific_init,
+    .t_final = &token_specific_final,
+
+    /* First forwarded crypto operation: RNG (NCMP_CMD_RNG over the wire). */
+    .t_rng = &token_specific_rng,
+
+    /* One-shot digest forwarding (NCMP_CMD_DIGEST). Multipart update/final is
+     * added later once token-side context handles are wired. */
+    .t_sha_init = &token_specific_sha_init,
+    .t_sha = &token_specific_sha,
+    .t_sha_update = &token_specific_sha_update,
+    .t_sha_final = &token_specific_sha_final,
+
+    /* Multi-buffer symmetric ops: AES-CBC, AES-ECB, and AES-GCM (AEAD). */
+    .t_aes_cbc = &token_specific_aes_cbc,
+    .t_aes_ecb = &token_specific_aes_ecb,
+    .t_aes_gcm_init = &token_specific_aes_gcm_init,
+    .t_aes_gcm = &token_specific_aes_gcm,
+
+    /* Asymmetric ops: RSA sign and EC (ECDSA) sign. */
+    .t_rsa_sign = &token_specific_rsa_sign,
+    .t_ec_sign = &token_specific_ec_sign,
+
+    /* Token/mechanism reporting. */
+    .t_get_token_info = &token_specific_get_token_info,
+    .t_get_mechanism_list = &token_specific_get_mechanism_list,
+    .t_get_mechanism_info = &token_specific_get_mechanism_info,
+
+    /* All cryptographic operations are proxied to the FX3 token via ncmpd and
+     * are added incrementally; leaving them NULL is intentional. */
+};
+
+#endif /* __NCMP_TOK_STRUCT_H */

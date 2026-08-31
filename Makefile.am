@@ -147,6 +147,18 @@ if ENABLE_SWTOK
 	$(CHGRP) $(pkcs_group) $(DESTDIR)$(lockdir)/swtok
 	$(CHMOD) 0770 $(DESTDIR)$(lockdir)/swtok
 endif
+if ENABLE_NCMPTOK
+	cd $(DESTDIR)$(libdir)/opencryptoki/stdll && \
+		ln -fs libpkcs11_ncmp.$(SHLIBEXT) PKCS11_NCMP.$(SHLIBEXT)
+	$(MKDIR_P) $(DESTDIR)$(localstatedir)/lib/opencryptoki/ncmptok/TOK_OBJ
+	$(CHGRP) $(pkcs_group) $(DESTDIR)$(localstatedir)/lib/opencryptoki/ncmptok/TOK_OBJ
+	$(CHGRP) $(pkcs_group) $(DESTDIR)$(localstatedir)/lib/opencryptoki/ncmptok
+	$(CHMOD) 0770 $(DESTDIR)$(localstatedir)/lib/opencryptoki/ncmptok/TOK_OBJ
+	$(CHMOD) 0770 $(DESTDIR)$(localstatedir)/lib/opencryptoki/ncmptok
+	$(MKDIR_P) $(DESTDIR)$(lockdir)/ncmptok
+	$(CHGRP) $(pkcs_group) $(DESTDIR)$(lockdir)/ncmptok
+	$(CHMOD) 0770 $(DESTDIR)$(lockdir)/ncmptok
+endif
 if ENABLE_TPMTOK
 	$(MKDIR_P) $(DESTDIR)$(localstatedir)/lib/opencryptoki/tpm
 	cd $(DESTDIR)$(libdir)/opencryptoki/stdll && \
@@ -224,6 +236,11 @@ if ENABLE_SWTOK
 	if test -d $(DESTDIR)$(libdir)/opencryptoki/stdll; then \
 		cd $(DESTDIR)$(libdir)/opencryptoki/stdll && \
 		rm -f PKCS11_SW.$(SHLIBEXT); fi
+endif
+if ENABLE_NCMPTOK
+	if test -d $(DESTDIR)$(libdir)/opencryptoki/stdll; then \
+		cd $(DESTDIR)$(libdir)/opencryptoki/stdll && \
+		rm -f PKCS11_NCMP.$(SHLIBEXT); fi
 endif
 if ENABLE_TPMTOK
 	if test -d $(DESTDIR)$(libdir)/opencryptoki/stdll; then \

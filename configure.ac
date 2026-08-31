@@ -132,6 +132,12 @@ AC_ARG_ENABLE([swtok],
 	[],
 	[enable_swtok=yes])
 
+dnl --- ncmp token (USB proxy token via the ncmpd daemon; off by default)
+AC_ARG_ENABLE([ncmptok],
+	AS_HELP_STRING([--enable-ncmptok],[build ncmp USB token @<:@default=disabled@:>@]),
+	[],
+	[enable_ncmptok=no])
+
 dnl --- EP11 token
 AC_ARG_ENABLE([ep11tok],
     AS_HELP_STRING([--enable-ep11tok],[build ep11 token @<:@default=enabled
@@ -672,6 +678,16 @@ else
 fi
 AM_CONDITIONAL([ENABLE_SWTOK], [test "x$enable_swtok" = "xyes"])
 
+dnl --- enable_ncmptok (default off; when requested, needs OpenSSL like swtok
+dnl     because it links the same common crypto sources)
+if test "x$enable_ncmptok" = "xyes"; then
+	if test "x$with_openssl" != "xyes"; then
+		AC_MSG_ERROR([ncmp token build requested but OpenSSL development files not found])
+		enable_ncmptok=no
+	fi
+fi
+AM_CONDITIONAL([ENABLE_NCMPTOK], [test "x$enable_ncmptok" = "xyes"])
+
 dnl --- enable_ep11tok
 if test "x$enable_ep11tok" = "xyes"; then
 	AC_CHECK_HEADER([ica_api.h], [], [
@@ -875,6 +891,7 @@ echo "Enabled token types:"
 echo "	ICA token:		$enable_icatok"
 echo "	CCA token:		$enable_ccatok"
 echo "	Software token:		$enable_swtok"
+echo "	NCMP token:		$enable_ncmptok"
 echo "	EP11 token:		$enable_ep11tok"
 echo "	TPM token:		$enable_tpmtok"
 echo "	ICSF token:		$enable_icsftok"

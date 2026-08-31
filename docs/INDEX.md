@@ -5,6 +5,8 @@
 | 문서 | 언제 읽나 |
 |------|-----------|
 | [`../CLAUDE.md`](../CLAUDE.md) | 항상. 규칙·한계값·빌드/테스트 명령 요약. |
+| [`SUMMARY.md`](SUMMARY.md) | **먼저 읽기**. 한 일·남은 과제·현황 지표·빌드/테스트 명령 요약본. |
+| [`STATUS.md`](STATUS.md) | 단계별 상세 진행 로그(무엇을 어떻게 구현·검증했는지). |
 | [`architecture.md`](architecture.md) | 설계 세부가 필요할 때. 시스템 개요, 와이어 프로토콜, SHM, 동시성, in-flight 통계, 데이터 흐름, opencryptoki 통합. |
 
 ## 핵심 소스 진입점

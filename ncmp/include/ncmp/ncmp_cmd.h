@@ -30,12 +30,41 @@ enum ncmp_opcode {
     NCMP_CMD_DIGEST_INIT   = 0x0004, /**< param0=mech -> resp param0=ctx_id. */
     NCMP_CMD_DIGEST_UPDATE = 0x0005, /**< params [ctx_id|data] -> (no output). */
     NCMP_CMD_DIGEST_FINAL  = 0x0006, /**< param0=ctx_id -> resp param0=digest. */
+    NCMP_CMD_HMAC_SIGN   = 0x0007, /**< [mech|key|data] -> [mac]. */
+    NCMP_CMD_HMAC_VERIFY = 0x0008, /**< [mech|key|data|mac] -> (ack). */
     NCMP_CMD_AES_CBC = 0x0010, /**< AES-CBC: params [flags|key|iv|data]->[out]. */
     NCMP_CMD_AES_ECB = 0x0011, /**< AES-ECB: params [flags|key|data]->[out]. */
     NCMP_CMD_AES_GCM = 0x0012, /**< AES-GCM: [flags|key|iv|aad|taglen|data]->[out]. */
+    NCMP_CMD_AES_CTR = 0x0013, /**< AES-CTR: [flags|key|ctr|data]->[out] (stream). */
+    NCMP_CMD_AES_OFB = 0x0014, /**< AES-OFB: [flags|key|iv|data]->[out] (stream). */
+    NCMP_CMD_AES_CFB = 0x0015, /**< AES-CFB: [flags|key|iv|data]->[out] (stream). */
     NCMP_CMD_RSA_SIGN = 0x0020, /**< RSA sign: params [mod|priv_exp|data]->[sig]. */
-    NCMP_CMD_EC_SIGN = 0x0021 /**< EC sign: params [ec_params|priv|data]->[sig]. */
+    NCMP_CMD_RSA_VERIFY = 0x0022, /**< RSA verify: [mod|pub_exp|data|sig]->(ack). */
+    NCMP_CMD_EC_SIGN = 0x0021, /**< EC sign: params [ec_params|priv|data]->[sig]. */
+    NCMP_CMD_EC_VERIFY = 0x0023, /**< EC verify: [ec_params|ec_point|data|sig]->(ack). */
+    /* Key-pair generation (token generates and returns key components). */
+    NCMP_CMD_RSA_KEYGEN = 0x0024, /**< [modbits|pub_exp] -> [n|d|p|q|dp|dq|qinv]. */
+    NCMP_CMD_EC_KEYGEN = 0x0025, /**< [ec_params] -> [ec_point|priv_value]. */
+    NCMP_CMD_RSA_OAEP_ENC = 0x0026, /**< [mod|pub_exp|data] -> [ciphertext]. */
+    NCMP_CMD_RSA_OAEP_DEC = 0x0027, /**< [mod|priv_exp|ct] -> [plaintext]. */
+    NCMP_CMD_DH_DERIVE = 0x0028, /**< [prime|priv|peer_pub] -> [shared secret]. */
+    NCMP_CMD_ECDH_DERIVE = 0x0029 /**< [ec_params|priv|peer_point] -> [secret]. */
+    /* RSA-PSS reuses NCMP_CMD_RSA_SIGN / NCMP_CMD_RSA_VERIFY (same marshalling;
+     * the mock signature is deterministic regardless of PSS vs PKCS padding). */
 };
+
+/** HMAC output size (bytes) for @p mech (CKM_*_HMAC), or 0 if unsupported. */
+static inline uint32_t ncmp_hmac_size(uint32_t mech)
+{
+    switch (mech) {
+    case 0x00000221u: return 20; /* CKM_SHA_1_HMAC   */
+    case 0x00000256u: return 28; /* CKM_SHA224_HMAC  */
+    case 0x00000251u: return 32; /* CKM_SHA256_HMAC  */
+    case 0x00000261u: return 48; /* CKM_SHA384_HMAC  */
+    case 0x00000271u: return 64; /* CKM_SHA512_HMAC  */
+    default:          return 0;
+    }
+}
 
 /** Sentinel for "no token-side digest context allocated yet". */
 #define NCMP_DIGEST_CTX_NONE 0xFFFFFFFFu

@@ -35,8 +35,17 @@ int test_client_digest_multipart(void);
 int test_client_aes_cbc_forward(void);
 int test_client_aes_ecb_forward(void);
 int test_client_aes_gcm_forward(void);
+int test_client_aes_stream_forward(void);
 int test_client_rsa_sign_forward(void);
+int test_client_rsa_verify_forward(void);
 int test_client_ec_sign_forward(void);
+int test_client_ec_verify_forward(void);
+int test_client_rsa_keygen_forward(void);
+int test_client_ec_keygen_forward(void);
+int test_client_hmac_forward(void);
+int test_client_rsa_oaep_forward(void);
+int test_client_dh_derive_forward(void);
+int test_client_ecdh_derive_forward(void);
 
 int main(void)
 {
@@ -63,8 +72,17 @@ int main(void)
     NCMP_RUN(test_client_aes_cbc_forward);
     NCMP_RUN(test_client_aes_ecb_forward);
     NCMP_RUN(test_client_aes_gcm_forward);
+    NCMP_RUN(test_client_aes_stream_forward);
     NCMP_RUN(test_client_rsa_sign_forward);
+    NCMP_RUN(test_client_rsa_verify_forward);
     NCMP_RUN(test_client_ec_sign_forward);
+    NCMP_RUN(test_client_ec_verify_forward);
+    NCMP_RUN(test_client_rsa_keygen_forward);
+    NCMP_RUN(test_client_ec_keygen_forward);
+    NCMP_RUN(test_client_hmac_forward);
+    NCMP_RUN(test_client_rsa_oaep_forward);
+    NCMP_RUN(test_client_dh_derive_forward);
+    NCMP_RUN(test_client_ecdh_derive_forward);
 
     fprintf(stderr, "\n%s (%d failure%s)\n",
             failures ? "SUITE FAILED" : "SUITE PASSED",

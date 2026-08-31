@@ -53,15 +53,42 @@ token_spec_t token_specific = {
     .t_sha_update = &token_specific_sha_update,
     .t_sha_final = &token_specific_sha_final,
 
-    /* Multi-buffer symmetric ops: AES-CBC, AES-ECB, and AES-GCM (AEAD). */
+    /* Symmetric AES: block modes (CBC/ECB), AEAD (GCM), stream (CTR/OFB/CFB). */
     .t_aes_cbc = &token_specific_aes_cbc,
     .t_aes_ecb = &token_specific_aes_ecb,
     .t_aes_gcm_init = &token_specific_aes_gcm_init,
     .t_aes_gcm = &token_specific_aes_gcm,
+    .t_aes_ctr = &token_specific_aes_ctr,
+    .t_aes_ofb = &token_specific_aes_ofb,
+    .t_aes_cfb = &token_specific_aes_cfb,
 
-    /* Asymmetric ops: RSA sign and EC (ECDSA) sign. */
+    /* Asymmetric ops: RSA and EC (ECDSA) sign + verify; RSA-OAEP enc/dec. */
     .t_rsa_sign = &token_specific_rsa_sign,
+    .t_rsa_verify = &token_specific_rsa_verify,
     .t_ec_sign = &token_specific_ec_sign,
+    .t_ec_verify = &token_specific_ec_verify,
+    .t_rsa_oaep_encrypt = &token_specific_rsa_oaep_encrypt,
+    .t_rsa_oaep_decrypt = &token_specific_rsa_oaep_decrypt,
+    .t_rsa_pss_sign = &token_specific_rsa_pss_sign,
+    .t_rsa_pss_verify = &token_specific_rsa_pss_verify,
+
+    /* Key agreement: Diffie-Hellman and ECDH derive. */
+    .t_dh_pkcs_derive = &token_specific_dh_pkcs_derive,
+    .t_ecdh_pkcs_derive = &token_specific_ecdh_pkcs_derive,
+
+    /* Keyed MAC: HMAC sign + verify (one-shot). */
+    .t_hmac_sign_init = &token_specific_hmac_sign_init,
+    .t_hmac_sign = &token_specific_hmac_sign,
+    .t_hmac_verify_init = &token_specific_hmac_verify_init,
+    .t_hmac_verify = &token_specific_hmac_verify,
+
+    /* Key generation: symmetric (AES/DES/3DES/generic-secret) + RSA/EC key
+     * pairs (token generates; the STDLL populates the PKCS#11 templates). */
+    .t_aes_key_gen = &token_specific_aes_key_gen,
+    .t_des_key_gen = &token_specific_des_key_gen,
+    .t_generic_secret_key_gen = &token_specific_generic_secret_key_gen,
+    .t_rsa_generate_keypair = &token_specific_rsa_generate_keypair,
+    .t_ec_generate_keypair = &token_specific_ec_generate_keypair,
 
     /* Token/mechanism reporting. */
     .t_get_token_info = &token_specific_get_token_info,

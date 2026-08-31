@@ -374,11 +374,13 @@ int test_client_rsa_sign_forward(void)
     NCMP_CHECK(memcmp(sig, sig2, sizeof(sig)) != 0);
     data[0] ^= 0xFF;
 
-    /* Key-sensitive: different private exponent -> different signature. */
-    exp[0] ^= 0xFF;
+    /* Key-sensitive: different modulus -> different signature (the modulus is
+     * the key component both sign and verify fold). */
+    mod[0] ^= 0xFF;
     NCMP_CHECK(ncmp_client_command_mp(&c, 0, NCMP_CMD_RSA_SIGN, parts, lens, 3,
                                       sig2, sizeof(sig2), &rsp) == NCMP_OK);
     NCMP_CHECK(memcmp(sig, sig2, sizeof(sig)) != 0);
+    mod[0] ^= 0xFF;
 
     NCMP_CHECK(ncmp_client_fini(&c) == NCMP_OK);
     harness_down(&hz);
@@ -434,6 +436,51 @@ int test_client_aes_gcm_forward(void)
     NCMP_CHECK(ncmp_client_command_mp(&c, 0, NCMP_CMD_AES_GCM, parts, lens, 6,
                                       pt, sizeof(pt), &rsp) == NCMP_OK);
     NCMP_CHECK(rsp.header.ack == 0x40u); /* CKR_ENCRYPTED_DATA_INVALID */
+
+    NCMP_CHECK(ncmp_client_fini(&c) == NCMP_OK);
+    harness_down(&hz);
+    return 0;
+}
+
+int test_client_aes_stream_forward(void)
+{
+    harness_t hz;
+    ncmp_client_t c;
+    const uint32_t modes[3] = { NCMP_CMD_AES_CTR, NCMP_CMD_AES_OFB,
+                                NCMP_CMD_AES_CFB };
+    uint8_t key[16], iv[16], data[20], ct[20], pt[20], flags[4];
+    const uint8_t *parts[4];
+    uint32_t lens[4];
+    NCMP_Message rsp;
+
+    NCMP_CHECK(harness_up(&hz) == 0);
+    NCMP_CHECK(client_connect_retry(&c) == NCMP_OK);
+
+    for (int i = 0; i < 16; ++i) { key[i] = (uint8_t)(i + 8); iv[i] = (uint8_t)(0xB0 + i); }
+    for (int i = 0; i < 20; ++i) data[i] = (uint8_t)(i * 13 + 2); /* non-block-multiple */
+
+    parts[1] = key; lens[1] = sizeof(key);
+    parts[2] = iv;  lens[2] = sizeof(iv);
+
+    for (int m = 0; m < 3; ++m) {
+        /* Encrypt a 20-byte (non-block-aligned) buffer. */
+        ncmp_wr_u32le(flags, NCMP_AES_FLAG_ENCRYPT);
+        parts[0] = flags; lens[0] = 4;
+        parts[3] = data;  lens[3] = sizeof(data);
+        NCMP_CHECK(ncmp_client_command_mp(&c, 0, modes[m], parts, lens, 4,
+                                          ct, sizeof(ct), &rsp) == NCMP_OK);
+        NCMP_CHECK(rsp.header.ack == NCMP_CKR_OK);
+        NCMP_CHECK(rsp.param_len[0] == sizeof(data)); /* stream: out len == in */
+        NCMP_CHECK(memcmp(ct, data, sizeof(data)) != 0);
+
+        /* Decrypt -> recover the plaintext. */
+        ncmp_wr_u32le(flags, 0u);
+        parts[0] = flags; lens[0] = 4;
+        parts[3] = ct;    lens[3] = sizeof(ct);
+        NCMP_CHECK(ncmp_client_command_mp(&c, 0, modes[m], parts, lens, 4,
+                                          pt, sizeof(pt), &rsp) == NCMP_OK);
+        NCMP_CHECK(memcmp(pt, data, sizeof(data)) == 0);
+    }
 
     NCMP_CHECK(ncmp_client_fini(&c) == NCMP_OK);
     harness_down(&hz);
@@ -512,10 +559,297 @@ int test_client_ec_sign_forward(void)
     NCMP_CHECK(memcmp(sig, sig2, sizeof(sig)) != 0);
     data[0] ^= 0xFF;
 
-    priv[0] ^= 0xFF;                                          /* key-sensitive */
+    ecp[0] ^= 0xFF;                                  /* curve-sensitive (mock) */
     NCMP_CHECK(ncmp_client_command_mp(&c, 0, NCMP_CMD_EC_SIGN, parts, lens, 3,
                                       sig2, sizeof(sig2), &rsp) == NCMP_OK);
     NCMP_CHECK(memcmp(sig, sig2, sizeof(sig)) != 0);
+    ecp[0] ^= 0xFF;
+
+    NCMP_CHECK(ncmp_client_fini(&c) == NCMP_OK);
+    harness_down(&hz);
+    return 0;
+}
+
+int test_client_rsa_verify_forward(void)
+{
+    harness_t hz;
+    ncmp_client_t c;
+    uint8_t mod[256], exp[256], data[32], sig[256];
+    const uint8_t *parts[4];
+    uint32_t lens[4];
+    NCMP_Message rsp;
+
+    NCMP_CHECK(harness_up(&hz) == 0);
+    NCMP_CHECK(client_connect_retry(&c) == NCMP_OK);
+
+    for (int i = 0; i < 256; ++i) { mod[i] = (uint8_t)(i ^ 0x33); exp[i] = (uint8_t)(i + 1); }
+    for (int i = 0; i < 32; ++i) data[i] = (uint8_t)(i * 3 + 5);
+
+    /* Sign to obtain a valid signature. */
+    parts[0] = mod;  lens[0] = sizeof(mod);
+    parts[1] = exp;  lens[1] = sizeof(exp);
+    parts[2] = data; lens[2] = sizeof(data);
+    NCMP_CHECK(ncmp_client_command_mp(&c, 0, NCMP_CMD_RSA_SIGN, parts, lens, 3,
+                                      sig, sizeof(sig), &rsp) == NCMP_OK);
+    NCMP_CHECK(rsp.header.ack == NCMP_CKR_OK);
+
+    /* Verify: [modulus | pub_exp | data | sig] -> CKR_OK. */
+    parts[3] = sig; lens[3] = sizeof(sig);
+    NCMP_CHECK(ncmp_client_command_mp(&c, 0, NCMP_CMD_RSA_VERIFY, parts, lens, 4,
+                                      NULL, 0, &rsp) == NCMP_OK);
+    NCMP_CHECK(rsp.header.ack == NCMP_CKR_OK);
+
+    /* Tampered signature -> CKR_SIGNATURE_INVALID. */
+    sig[0] ^= 0xFF;
+    NCMP_CHECK(ncmp_client_command_mp(&c, 0, NCMP_CMD_RSA_VERIFY, parts, lens, 4,
+                                      NULL, 0, &rsp) == NCMP_OK);
+    NCMP_CHECK(rsp.header.ack == 0xC0u); /* CKR_SIGNATURE_INVALID */
+
+    NCMP_CHECK(ncmp_client_fini(&c) == NCMP_OK);
+    harness_down(&hz);
+    return 0;
+}
+
+int test_client_ec_verify_forward(void)
+{
+    harness_t hz;
+    ncmp_client_t c;
+    uint8_t ecp[10], priv[32], point[20], data[32], sig[64];
+    const uint8_t *parts[4];
+    uint32_t lens[4];
+    NCMP_Message rsp;
+
+    NCMP_CHECK(harness_up(&hz) == 0);
+    NCMP_CHECK(client_connect_retry(&c) == NCMP_OK);
+
+    for (int i = 0; i < 10; ++i) ecp[i] = (uint8_t)(0x30 + i);
+    for (int i = 0; i < 20; ++i) point[i] = (uint8_t)(0x40 + i);
+    for (int i = 0; i < 32; ++i) { priv[i] = (uint8_t)(i * 5 + 7); data[i] = (uint8_t)(i + 2); }
+
+    /* Sign: [ec_params | priv | data]. */
+    parts[0] = ecp;  lens[0] = sizeof(ecp);
+    parts[1] = priv; lens[1] = sizeof(priv);
+    parts[2] = data; lens[2] = sizeof(data);
+    NCMP_CHECK(ncmp_client_command_mp(&c, 0, NCMP_CMD_EC_SIGN, parts, lens, 3,
+                                      sig, sizeof(sig), &rsp) == NCMP_OK);
+    NCMP_CHECK(rsp.header.ack == NCMP_CKR_OK);
+
+    /* Verify: [ec_params | ec_point | data | sig] -> CKR_OK. */
+    parts[1] = point; lens[1] = sizeof(point);
+    parts[3] = sig;   lens[3] = sizeof(sig);
+    NCMP_CHECK(ncmp_client_command_mp(&c, 0, NCMP_CMD_EC_VERIFY, parts, lens, 4,
+                                      NULL, 0, &rsp) == NCMP_OK);
+    NCMP_CHECK(rsp.header.ack == NCMP_CKR_OK);
+
+    /* Tampered signature -> CKR_SIGNATURE_INVALID. */
+    sig[0] ^= 0xFF;
+    NCMP_CHECK(ncmp_client_command_mp(&c, 0, NCMP_CMD_EC_VERIFY, parts, lens, 4,
+                                      NULL, 0, &rsp) == NCMP_OK);
+    NCMP_CHECK(rsp.header.ack == 0xC0u); /* CKR_SIGNATURE_INVALID */
+
+    NCMP_CHECK(ncmp_client_fini(&c) == NCMP_OK);
+    harness_down(&hz);
+    return 0;
+}
+
+int test_client_rsa_keygen_forward(void)
+{
+    harness_t hz;
+    ncmp_client_t c;
+    uint8_t bits[4], pubexp[3] = { 0x01, 0x00, 0x01 };
+    static uint8_t out[8192];
+    const uint8_t *parts[2];
+    uint32_t lens[2];
+    NCMP_Message rsp;
+    const uint32_t mod_bits = 2048, nbytes = 256, hbytes = 128;
+
+    NCMP_CHECK(harness_up(&hz) == 0);
+    NCMP_CHECK(client_connect_retry(&c) == NCMP_OK);
+
+    ncmp_wr_u32le(bits, mod_bits);
+    parts[0] = bits;   lens[0] = 4;
+    parts[1] = pubexp; lens[1] = sizeof(pubexp);
+    NCMP_CHECK(ncmp_client_command_mp(&c, 0, NCMP_CMD_RSA_KEYGEN, parts, lens, 2,
+                                      out, sizeof(out), &rsp) == NCMP_OK);
+    NCMP_CHECK(rsp.header.ack == NCMP_CKR_OK);
+    /* Components n, d, p, q, dp, dq, qinv with the expected sizes. */
+    NCMP_CHECK(rsp.param_len[0] == nbytes); /* modulus */
+    NCMP_CHECK(rsp.param_len[1] == nbytes); /* private exponent */
+    NCMP_CHECK(rsp.param_len[2] == hbytes); /* prime1 */
+    NCMP_CHECK(rsp.param_len[3] == hbytes); /* prime2 */
+    NCMP_CHECK(rsp.param_len[4] == hbytes); /* exp1 */
+    NCMP_CHECK(rsp.param_len[5] == hbytes); /* exp2 */
+    NCMP_CHECK(rsp.param_len[6] == hbytes); /* coefficient */
+
+    NCMP_CHECK(ncmp_client_fini(&c) == NCMP_OK);
+    harness_down(&hz);
+    return 0;
+}
+
+int test_client_ec_keygen_forward(void)
+{
+    harness_t hz;
+    ncmp_client_t c;
+    uint8_t ecp[10], out[256];
+    const uint8_t *parts[1];
+    uint32_t lens[1];
+    NCMP_Message rsp;
+
+    NCMP_CHECK(harness_up(&hz) == 0);
+    NCMP_CHECK(client_connect_retry(&c) == NCMP_OK);
+
+    for (int i = 0; i < 10; ++i) ecp[i] = (uint8_t)(0x30 + i);
+    parts[0] = ecp; lens[0] = sizeof(ecp);
+    NCMP_CHECK(ncmp_client_command_mp(&c, 0, NCMP_CMD_EC_KEYGEN, parts, lens, 1,
+                                      out, sizeof(out), &rsp) == NCMP_OK);
+    NCMP_CHECK(rsp.header.ack == NCMP_CKR_OK);
+    NCMP_CHECK(rsp.param_len[0] == 65); /* uncompressed EC point (P-256) */
+    NCMP_CHECK(rsp.param_len[1] == 32); /* private scalar */
+
+    NCMP_CHECK(ncmp_client_fini(&c) == NCMP_OK);
+    harness_down(&hz);
+    return 0;
+}
+
+int test_client_hmac_forward(void)
+{
+    harness_t hz;
+    ncmp_client_t c;
+    uint8_t mechbuf[4], key[32], data[40], mac[32];
+    const uint8_t *parts[4];
+    uint32_t lens[4];
+    NCMP_Message rsp;
+
+    NCMP_CHECK(harness_up(&hz) == 0);
+    NCMP_CHECK(client_connect_retry(&c) == NCMP_OK);
+
+    for (int i = 0; i < 32; ++i) key[i] = (uint8_t)(i + 11);
+    for (int i = 0; i < 40; ++i) data[i] = (uint8_t)(i * 3 + 1);
+    ncmp_wr_u32le(mechbuf, 0x00000251u); /* CKM_SHA256_HMAC -> 32-byte MAC */
+
+    parts[0] = mechbuf; lens[0] = 4;
+    parts[1] = key;     lens[1] = sizeof(key);
+    parts[2] = data;    lens[2] = sizeof(data);
+    NCMP_CHECK(ncmp_client_command_mp(&c, 0, NCMP_CMD_HMAC_SIGN, parts, lens, 3,
+                                      mac, sizeof(mac), &rsp) == NCMP_OK);
+    NCMP_CHECK(rsp.header.ack == NCMP_CKR_OK && rsp.param_len[0] == 32);
+
+    /* Verify: [mech | key | data | mac] -> CKR_OK. */
+    parts[3] = mac; lens[3] = sizeof(mac);
+    NCMP_CHECK(ncmp_client_command_mp(&c, 0, NCMP_CMD_HMAC_VERIFY, parts, lens,
+                                      4, NULL, 0, &rsp) == NCMP_OK);
+    NCMP_CHECK(rsp.header.ack == NCMP_CKR_OK);
+
+    /* Tampered MAC -> CKR_SIGNATURE_INVALID. */
+    mac[0] ^= 0xFF;
+    NCMP_CHECK(ncmp_client_command_mp(&c, 0, NCMP_CMD_HMAC_VERIFY, parts, lens,
+                                      4, NULL, 0, &rsp) == NCMP_OK);
+    NCMP_CHECK(rsp.header.ack == 0xC0u); /* CKR_SIGNATURE_INVALID */
+
+    NCMP_CHECK(ncmp_client_fini(&c) == NCMP_OK);
+    harness_down(&hz);
+    return 0;
+}
+
+int test_client_rsa_oaep_forward(void)
+{
+    harness_t hz;
+    ncmp_client_t c;
+    uint8_t mod[256], exp[3] = { 0x01, 0x00, 0x01 }, data[32];
+    static uint8_t ct[256], pt[256];
+    const uint8_t *parts[3];
+    uint32_t lens[3];
+    NCMP_Message rsp;
+
+    NCMP_CHECK(harness_up(&hz) == 0);
+    NCMP_CHECK(client_connect_retry(&c) == NCMP_OK);
+
+    for (int i = 0; i < 256; ++i) mod[i] = (uint8_t)(i ^ 0x77);
+    for (int i = 0; i < 32; ++i) data[i] = (uint8_t)(i * 9 + 4);
+
+    /* Encrypt: [modulus | pub_exp | data] -> ciphertext (modulus length). */
+    parts[0] = mod;  lens[0] = sizeof(mod);
+    parts[1] = exp;  lens[1] = sizeof(exp);
+    parts[2] = data; lens[2] = sizeof(data);
+    NCMP_CHECK(ncmp_client_command_mp(&c, 0, NCMP_CMD_RSA_OAEP_ENC, parts, lens,
+                                      3, ct, sizeof(ct), &rsp) == NCMP_OK);
+    NCMP_CHECK(rsp.header.ack == NCMP_CKR_OK);
+    NCMP_CHECK(rsp.param_len[0] == sizeof(mod)); /* 256 */
+    NCMP_CHECK(memcmp(ct, data, sizeof(data)) != 0);
+
+    /* Decrypt: [modulus | priv_exp | ciphertext] -> recover plaintext. */
+    parts[2] = ct; lens[2] = sizeof(ct);
+    NCMP_CHECK(ncmp_client_command_mp(&c, 0, NCMP_CMD_RSA_OAEP_DEC, parts, lens,
+                                      3, pt, sizeof(pt), &rsp) == NCMP_OK);
+    NCMP_CHECK(rsp.header.ack == NCMP_CKR_OK);
+    NCMP_CHECK(rsp.param_len[0] == sizeof(data)); /* 32 */
+    NCMP_CHECK(memcmp(pt, data, sizeof(data)) == 0);
+
+    NCMP_CHECK(ncmp_client_fini(&c) == NCMP_OK);
+    harness_down(&hz);
+    return 0;
+}
+
+int test_client_dh_derive_forward(void)
+{
+    harness_t hz;
+    ncmp_client_t c;
+    uint8_t prime[128], priv[128], pub[128], secret[128], secret2[128];
+    const uint8_t *parts[3];
+    uint32_t lens[3];
+    NCMP_Message rsp;
+
+    NCMP_CHECK(harness_up(&hz) == 0);
+    NCMP_CHECK(client_connect_retry(&c) == NCMP_OK);
+
+    for (int i = 0; i < 128; ++i) {
+        prime[i] = (uint8_t)(0x80 + i); priv[i] = (uint8_t)(i * 3 + 1);
+        pub[i] = (uint8_t)(i * 5 + 2);
+    }
+    parts[0] = prime; lens[0] = sizeof(prime);
+    parts[1] = priv;  lens[1] = sizeof(priv);
+    parts[2] = pub;   lens[2] = sizeof(pub);
+
+    NCMP_CHECK(ncmp_client_command_mp(&c, 0, NCMP_CMD_DH_DERIVE, parts, lens, 3,
+                                      secret, sizeof(secret), &rsp) == NCMP_OK);
+    NCMP_CHECK(rsp.header.ack == NCMP_CKR_OK);
+    NCMP_CHECK(rsp.param_len[0] == sizeof(prime)); /* secret == prime length */
+
+    /* Deterministic: same inputs -> same shared secret. */
+    NCMP_CHECK(ncmp_client_command_mp(&c, 0, NCMP_CMD_DH_DERIVE, parts, lens, 3,
+                                      secret2, sizeof(secret2), &rsp) == NCMP_OK);
+    NCMP_CHECK(memcmp(secret, secret2, sizeof(secret)) == 0);
+
+    NCMP_CHECK(ncmp_client_fini(&c) == NCMP_OK);
+    harness_down(&hz);
+    return 0;
+}
+
+int test_client_ecdh_derive_forward(void)
+{
+    harness_t hz;
+    ncmp_client_t c;
+    uint8_t oid[10], priv[32], pub[65], secret[64];
+    const uint8_t *parts[3];
+    uint32_t lens[3];
+    NCMP_Message rsp;
+
+    NCMP_CHECK(harness_up(&hz) == 0);
+    NCMP_CHECK(client_connect_retry(&c) == NCMP_OK);
+
+    for (int i = 0; i < 10; ++i) oid[i] = (uint8_t)(0x30 + i);
+    for (int i = 0; i < 32; ++i) priv[i] = (uint8_t)(i * 7 + 3);
+    pub[0] = 0x04; /* uncompressed point */
+    for (int i = 1; i < 65; ++i) pub[i] = (uint8_t)(i * 2 + 1);
+
+    parts[0] = oid;  lens[0] = sizeof(oid);
+    parts[1] = priv; lens[1] = sizeof(priv);
+    parts[2] = pub;  lens[2] = sizeof(pub);
+    NCMP_CHECK(ncmp_client_command_mp(&c, 0, NCMP_CMD_ECDH_DERIVE, parts, lens,
+                                      3, secret, sizeof(secret), &rsp)
+               == NCMP_OK);
+    NCMP_CHECK(rsp.header.ack == NCMP_CKR_OK);
+    NCMP_CHECK(rsp.param_len[0] == 32); /* field size = (65-1)/2 */
 
     NCMP_CHECK(ncmp_client_fini(&c) == NCMP_OK);
     harness_down(&hz);

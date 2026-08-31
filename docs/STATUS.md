@@ -14,10 +14,12 @@
   컴포넌트 추출) + 슬롯 매핑(`__builtin_ctz(slot_mask)`)**.
   → **4대 전송 패턴 모두 확립**: 무상태-단일버퍼(RNG)·무상태-다중버퍼(AES/digest)·
   상태형-컨텍스트(멀티파트)·비대칭-다중키(RSA). 나머지 연산은 이 패턴들의 반복.
-  **+ 연산 확장(AES-ECB, AES-GCM AEAD, EC 서명)** → 5대 패턴 커버(위 4대 + AEAD-tag).
+  **+ 연산 확장**: AES 전 모드(CBC/ECB/GCM/CTR/OFB/CFB), RSA(sign/verify/OAEP/
+  **PSS**), EC(sign/verify), HMAC(sign/verify), 키 생성 전종류, **DH/ECDH 키 합의**
+  → PKCS#11 전 연산 카테고리 커버.
   다음은 **STEP ⑩(실 FX3 하드웨어 브링업: VID/PID/EP 확정 + `pkcsconf` 런타임 검증)** —
-  하드웨어 필요. 현 시점 standalone **23/23 통과 + TSan 클린**, opencryptoki STDLL
-  `.so`에 crypto 훅 10종(RNG·SHA×4·AES-CBC/ECB/GCM·RSA/EC 서명) 링크 검증 완료.
+  하드웨어 필요. 현 시점 standalone **32/32 통과 + TSan 클린**, opencryptoki STDLL
+  `.so`에 **36개 `token_specific_*` 훅**(crypto 30종) 링크 검증 완료.
 
 ---
 
@@ -153,10 +155,54 @@
     `object_mgr_find_in_map1`로 키 추출 + 파라미터 읽어 포워딩(암호화=ct‖tag,
     복호화=tag 검증 후 평문). mock은 가역 keystream XOR + 결정론적 tag(변조 시
     `CKR_ENCRYPTED_DATA_INVALID`). `t_aes_gcm_init`은 프록시라 무상태(검증만).
+  - **RSA/EC 서명 검증(sign/verify 왕복)**: opcode `NCMP_CMD_RSA_VERIFY`
+    `[mod|pub_exp|data|sig]`, `NCMP_CMD_EC_VERIFY` `[ec_params|point|data|sig]`.
+    `token_specific_rsa_verify`/`_ec_verify`가 **공개 키**(RSA=modulus+pub_exp,
+    EC=ec_params+ec_point) 추출→포워딩, ACK로 `CKR_OK`/`CKR_SIGNATURE_INVALID`.
+    mock은 서명을 재계산(공유 컴포넌트 modulus/ec_params + data fold, `mock_sig_expand`
+    공유)→비교. sign도 동일 공유 컴포넌트만 fold하도록 재설계하여 **sign→verify
+    왕복 일치 + 변조 시 SIGNATURE_INVALID** 검증. (private 값은 포워딩되나 mock
+    출력엔 미반영 — mock 한계.)
+  - **AES 키 생성**: `token_specific_aes_key_gen`이 `NCMP_CMD_RNG`로 keysize 바이트
+    생성→키 재료(`is_opaque=FALSE`). 키 생성 = 토큰 RNG 포워딩 패턴.
+  - **RSA/EC 키페어 생성(템플릿 조작 패턴)**: opcode `NCMP_CMD_RSA_KEYGEN`
+    `[modbits|pub_exp]→[n|d|p|q|dp|dq|qinv]`(7 컴포넌트), `NCMP_CMD_EC_KEYGEN`
+    `[ec_params]→[ec_point|priv]`. 어댑터가 `template_attribute_get_ulong`
+    (`CKA_MODULUS_BITS`)로 키 크기 추출→토큰 생성 요청→응답 컴포넌트를
+    `build_attribute`+`template_update_attribute`로 공개/개인 템플릿에 채움
+    (`ncmp_tmpl_add` 헬퍼, build_attribute 단일 블록 할당 확인 후 실패 시 free).
+    mock은 크기 규격에 맞는 결정론적 컴포넌트 생성(실 키페어는 하드웨어). — 연산 확장
+  - **AES 스트림 모드(CTR/OFB/CFB)**: opcode `NCMP_CMD_AES_CTR/OFB/CFB`
+    `[flags|key|iv|data]→[out]`(블록 정합 불필요, 출력=입력 길이). 어댑터 공유
+    헬퍼 `ncmp_aes_stream`(OFB/CFB는 `out_len` 인자 없음 — 출력=입력 길이).
+    mock은 세 모드 모두 동일 가역 keystream XOR(공유 `mock_aes_stream`).
+    CTR counter_width·CFB cfb_len은 mock 미반영(실 HW 처리). — 연산 확장
+  - **HMAC(대칭 MAC)**: opcode `NCMP_CMD_HMAC_SIGN` `[mech|key|data]→[mac]`,
+    `NCMP_CMD_HMAC_VERIFY` `[mech|key|data|mac]→(ack)`. 어댑터가 `sess->sign_ctx`
+    /`verify_ctx`에서 키 핸들+mech 추출→키 해석→포워딩. `ncmp_hmac_size(mech)`로
+    출력 크기(HMAC-SHA*). sign/verify가 같은 키 fold→왕복 일치·변조 시
+    `CKR_SIGNATURE_INVALID`. — 연산 확장
+  - **RSA-OAEP(비대칭 암복호)**: opcode `NCMP_CMD_RSA_OAEP_ENC`
+    `[mod|pub_exp|data]→[ct]`(모듈러스 길이), `_DEC` `[mod|priv_exp|ct]→[plain]`.
+    어댑터가 `ctx->key` 해석→공개/개인 키 컴포넌트 포워딩(OAEP label hash는 mock
+    무시). mock은 `[len|data|pad]`를 모듈러스 유도 keystream XOR로 인코딩→복호 시
+    복원(암호화∘복호=원문). — 연산 확장
+  - **대칭 키 생성 전종류**: 공유 헬퍼 `ncmp_gen_random`(RNG 포워딩) +
+    `ncmp_symkey_gen`으로 `token_specific_aes_key_gen`/`des_key_gen`(DES 8·3DES 24
+    바이트) 통일. `token_specific_generic_secret_key_gen`은 `CKA_VALUE_LEN` 읽어
+    랜덤 생성→`ncmp_tmpl_add`로 `CKA_VALUE` 템플릿 삽입(전방 선언으로 순서 해결). — 연산 확장
+  - **RSA-PSS 서명/검증**: `SIGN_VERIFY_CONTEXT*`에서 `ctx->key` 해석→공개/개인 키
+    컴포넌트 추출→**RSA_SIGN/VERIFY opcode 재사용**(마샬링 동일, mock은 PSS/PKCS
+    구분 없이 결정론적). modlen을 object_put 전 캡처(use-after-release 회피). — 연산 확장
+  - **DH/ECDH 키 합의**: opcode `NCMP_CMD_DH_DERIVE` `[prime|priv|peer_pub]→[secret]`,
+    `NCMP_CMD_ECDH_DERIVE` `[ec_params|priv|peer_point]→[secret]`. 원시 바이트 배열
+    입력(오브젝트 해석 불필요). 어댑터가 그대로 포워딩→`*secret_len`을 응답 길이로.
+    mock은 세 입력을 fold→결정론적 shared secret(DH=prime 길이, ECDH=필드 길이
+    =(point-1)/2). 실 modexp/스칼라곱은 하드웨어. — 연산 확장
 
 ### 1.6 검증
 - cmake 미설치 → gcc 직접 컴파일. 전 모듈 `-Wall -Wextra -Wshadow` 클린.
-- 테스트 스위트 실행: **23/23 PASS (`SUITE PASSED, 0 failures`)**.
+- 테스트 스위트 실행: **32/32 PASS (`SUITE PASSED, 0 failures`)**.
   - 통과: 와이어 3, 큐 CAS 3, 세션 상한 1, SHM 왕복·교차매핑 2, mock 루프백
     echo 1, in-flight 통계 1, 멀티스레드 동시성 1, **STDLL 클라이언트 왕복 1,
     ACK 오류 전파 1**.
@@ -292,8 +338,12 @@
       AES-CBC(`t_aes_cbc`, OBJECT 키 추출, 왕복 검증). — STEP ⑧
 - [x] 멀티파트 digest(update/final) + 토큰-측 컨텍스트 핸들. — STEP ⑨
 - [x] RSA 서명(비대칭 다중 키 컴포넌트 마샬링) + 슬롯 매핑. — STEP ⑨
-- [ ] EC 서명·나머지 AES 모드(ECB/CTR/GCM)·키 생성 등 확장(기존 4대 패턴의
-      기계적 반복 — 각 연산마다 opcode+마샬링+mock 처리 추가). — 후속
+- [x] AES 전 모드(ECB/GCM/CTR/OFB/CFB), EC 서명, RSA/EC **검증**,
+      **RSA/EC 키페어 생성(템플릿 조작)**, **HMAC(sign/verify)**,
+      **RSA-OAEP(enc/dec)**, **키 생성 전종류(AES/DES/3DES/generic-secret)**,
+      **RSA-PSS(sign/verify)**, **DH/ECDH 키 합의** 확장. — 연산 확장
+- [ ] 나머지 순수 반복: HMAC 멀티파트(update/final), 다이제스트-then-sign
+      (RSA/ECDSA with hash), DH/EC 키페어 생성 등. — 후속(패턴 동일)
 - [ ] opencryptoki 슬롯 번호 ↔ NCMP 물리 슬롯 매핑(현재 slot 0 고정).
 - [ ] 세션/오브젝트 핸들의 토큰-호스트 정합(상태형 연산 대비).
 

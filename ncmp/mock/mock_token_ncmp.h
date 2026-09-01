@@ -13,6 +13,7 @@
 #include <stdint.h>
 
 #include "ncmp/ncmp_limits.h"
+#include "ncmp/ncmp_cmd.h"
 
 /**
  * Test hook: if this bit is set in a request's command_id, the emulator
@@ -43,6 +44,8 @@ typedef struct mock_device {
     mock_container_t  container[NCMP_DEV_CONTAINER_COUNT];
     uint32_t          rr_cursor; /**< Round-robin scheduler position. */
     mock_digest_ctx_t digest_ctx[NCMP_MOCK_DIGEST_CTX_MAX];
+    uint8_t           vd_mem[NCMP_VD_MEM_SIZE]; /**< Vendor scratch RAM. */
+    uint32_t          epoch;     /**< Bumped on selftest; vendor PING readback. */
 } mock_device_t;
 
 /**

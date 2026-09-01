@@ -14,8 +14,14 @@ hook into, `pkcsslotd` — it is a separate pipe/proxy daemon.
 - **A — `ncmpd`** (`ncmp/daemon/`): system daemon; owns SHM + USB; 1 connection
   thread, up to 4 comm threads (1 per active slot). Must run before the STDLL
   loads.
-- **B — `libpkcs11_ncmp.so`** (`ncmp/stdll/`): PKCS#11 STDLL; connects to
-  `ncmpd`, attaches SHM, enqueues commands, waits for responses.
+- **B — `libpkcs11_ncmp.so`**: two build shapes of the same name.
+  - *STDLL* (`usr/lib/ncmp_stdll/`): opencryptoki token; C_* API comes from
+    opencryptoki `new_host.c`, crypto from `token_specific` (ncmp_specific.c).
+  - *Self-contained provider* (`ncmp/pkcs11/`, p11_*.c): directly dlopen-able;
+    exports `C_GetFunctionList`/`C_GetInterfaceList`/`C_GetInterface` with
+    2.40/3.0/3.2 tables + the **NCMP Vendor** interface (`ncmp_vendor.h`), and
+    forwards to `ncmpd`. Separate target (avoids C_* symbol clash with new_host).
+  Both share the transport in `ncmp/stdll/` (ncmp_client/session/ckr).
 - **C — `mock_token_ncmp`** (`ncmp/mock/`): SW emulator of the FX3 datapath;
   enabled with `-DENABLE_MOCK_TOKEN=ON`.
 - **D — tests** (`ncmp/tests/`): C suite for APIs, concurrency, limits, stats,
@@ -34,10 +40,20 @@ include/ncmp/   ncmp_limits.h ncmp_wire.h ncmp_mutex.h ncmp_queue.h
 common/         ncmp_mutex.c ncmp_queue.c ncmp_wire.c ncmp_shm.c
 daemon/         main.c conn_thread.c comm_thread.c usb_transport.c  (Module A)
 stdll/          ncmp_specific.c ncmp_client.c ncmp_session.c        (Module B)
+pkcs11/         p11_*.c ncmp_vendor.h   (self-contained PKCS#11 provider, B')
 mock/           mock_main.c fx3_dma.c container.c mcu_scheduler.c   (Module C)
 tests/          test_*.c + ncmp_test.h                              (Module D)
 cmake/          FindLibUSB.cmake
 ```
+
+## Self-contained PKCS#11 provider (`ncmp/pkcs11/`)
+- Per-process state (sessions/objects/login) under one fast mutex; the lock is
+  released around every token round-trip so threads run concurrently through the
+  lock-free transport. Cross-process session ceiling via the SHM robust counter.
+- Slot map: `ncmptok.conf` (env `NCMP_TOK_CONF`) or `NCMP_SLOT_BASE` maps CK
+  slot ids to physical ncmpd slots; keep it in sync with `opencryptoki.conf`.
+- Vendor callbacks (loopback / mem read·write·fill·crc / ping / selftest / fw /
+  inflight / slotmap / loglevel) via wire opcodes 0x0100+.
 
 ## Build & test
 ```bash

@@ -15,12 +15,13 @@
 
 | 지표 | 값 |
 |------|-----|
-| 진행 단계 | STEP ①~⑨ 완료 + 연산 확장 (소프트웨어 기능 완성) |
-| standalone 테스트 | **32/32 통과**, ThreadSanitizer 0 races, 20~30회 반복 안정 |
+| 진행 단계 | STEP ①~⑨ + 연산 확장 + **자체 PKCS#11 프로바이더 계층** 완성 |
+| standalone 테스트 | **49/49 통과** (전송 32 + PKCS#11 API 17), ThreadSanitizer 0 races |
 | opencryptoki STDLL | `libpkcs11_ncmp.so.0.0.0` **실제 빌드 성공** (strict `-pedantic -Werror -std=c99`) |
 | `token_specific` 훅 | **36종** 배선 (crypto 30 + 라이프사이클/리포팅 6) |
-| 와이어 opcode | 20종 |
-| 소스 규모 | `ncmp/` 서브트리 52파일 + opencryptoki 통합 3파일 |
+| **자체 PKCS#11 프로바이더** | `C_GetFunctionList`/`C_GetInterfaceList`/`C_GetInterface` + **2.40/3.0/3.2 함수테이블**; 전 카테고리 C_* 구현; **NCMP Vendor 인터페이스(콜백 13종, loopback·mem R/W 포함)** |
+| 와이어 opcode | 20종 + 벤더 8종 (loopback/mem read·write·fill·crc/ping/selftest/fw) |
+| 소스 규모 | `ncmp/` 서브트리 63파일 (신규 `pkcs11/` 11파일) + opencryptoki 통합 4파일 |
 | **미완(하드웨어 필요)** | 실 FX3 브링업 (VID/PID/EP 확정, `pkcsconf` 런타임 검증, 실 암호 정합성) |
 
 ---
@@ -71,6 +72,32 @@ param) / `ncmp_client_command_mp`(다중 param). **아키텍처 패턴 8종 확�
 > sign→verify, 변조→오류)·크기·키/입력 민감성을 검증해 **포워딩 정확성**을 보장.
 > 실제 암호값 정합성은 하드웨어 몫.
 
+### 2.4 자체 PKCS#11 프로바이더 계층 (`ncmp/pkcs11/`, 신규)
+`libpkcs11_ncmp.so`를 애플리케이션이 **직접 dlopen** 후 `C_GetFunctionList`로
+함수테이블을 얻어 사용할 수 있는 **완전 자립형 프로바이더**. opencryptoki
+`new_host.c`에 의존하는 STDLL 경로(`usr/lib/ncmp_stdll`)와 **별개 빌드 타깃**(C_*
+심볼 충돌 회피).
+- **버전별 API 매핑**: `C_GetFunctionList`(2.40) + `C_GetInterfaceList`/
+  `C_GetInterface`가 **`CK_FUNCTION_LIST` 2.40 / 3.0 / 3.2** 및 **NCMP Vendor**
+  인터페이스를 반환. 이름/버전 매칭, 기본은 최신(3.2).
+- **전 카테고리 구현**: general / slot·token / session / object / encrypt·decrypt
+  (+message-based) / digest / sign·MAC (+message-based) / verify (+message-based)
+  / dual-function / key mgmt(gen·keypair·wrap·unwrap·derive) / RNG / parallel /
+  callback. 3.2 async·encapsulate 등 미지원분은 `CKR_FUNCTION_NOT_SUPPORTED`로
+  올바르게 배선.
+- **Vendor-defined 콜백 13종**: `NCMP_Loopback`, `NCMP_MemWrite`/`MemRead`/
+  `MemFill`/`MemCRC`, `NCMP_Ping`, `NCMP_SelfTest`, `NCMP_FirmwareInfo`,
+  `NCMP_GetInFlight`, `NCMP_GetSlotMap`, `NCMP_SetLogLevel`/`GetLogLevel`,
+  `NCMP_HostEcho`.
+- **다중 스레드·다중 프로세스 안전**: 프로세스 전역 상태는 빠른 per-process
+  뮤텍스로 보호하되 **토큰 왕복 중에는 락 해제**(lock-free 전송으로 진짜 동시성).
+  프로세스 간 세션 상한은 SHM robust 카운터(`ncmp_session_open`)로 강제. TSan 무결.
+- **슬롯 매핑**: `ncmptok.conf`(env `NCMP_TOK_CONF`) 또는 `NCMP_SLOT_BASE`로
+  opencryptoki 슬롯번호 ↔ ncmpd 물리 슬롯 매핑. opencryptoki.conf와 정합.
+- **테스트**: 버전매핑·벤더 스모크 + **복합 시나리오 5(S1~S5)** + **멀티슬롯/멀티
+  세션 시나리오 10(M1~M10)** — 동시성·격리·영속/백업복원·키랩핑·예외복구·
+  Zeroization·세션상한 등. 함수테이블 포인터로 호출해 API 계약 검증.
+
 ---
 
 ## 3. 남은 과제 (TODO)
@@ -104,12 +131,19 @@ autoreconf --force --install
 make opencryptoki/stdll/libpkcs11_ncmp.la     # -> libpkcs11_ncmp.so
 
 # (B) ncmp 서브트리 standalone 테스트 (하드웨어/데몬 불필요, mock 루프백)
-cd ncmp
-gcc -std=c11 -O2 -Wall -Wextra -D_GNU_SOURCE -Iinclude -Itests -Imock -Idaemon \
-    tests/*.c common/*.c stdll/ncmp_session.c stdll/ncmp_client.c stdll/ncmp_ckr.c \
-    daemon/comm_thread.c daemon/conn_thread.c mock/mock_transport.c mock/fx3_dma.c \
-    mock/container.c mock/mcu_scheduler.c -lpthread -lrt -o /tmp/ncmp_tests
-/tmp/ncmp_tests                                # -> SUITE PASSED (32/32)
+#     PKCS#11 프로바이더 포함: pkcs11/*.c 와 usr/include(PKCS#11 헤더) 추가.
+cd /home/pooky/workspace/opencryptoki
+gcc -std=c11 -O2 -Wall -Wextra -D_GNU_SOURCE \
+    -Iusr/include -Incmp/include -Incmp/tests -Incmp/mock -Incmp/daemon -Incmp/pkcs11 \
+    ncmp/tests/*.c ncmp/common/*.c \
+    ncmp/stdll/ncmp_session.c ncmp/stdll/ncmp_client.c ncmp/stdll/ncmp_ckr.c \
+    ncmp/daemon/comm_thread.c ncmp/daemon/conn_thread.c \
+    ncmp/mock/mock_transport.c ncmp/mock/fx3_dma.c ncmp/mock/container.c \
+    ncmp/mock/mcu_scheduler.c ncmp/pkcs11/*.c -lpthread -lrt -o /tmp/ncmp_tests
+/tmp/ncmp_tests                                # -> SUITE PASSED (49/49)
+
+# ThreadSanitizer (ASLR off + 새로 빌드한 바이너리 필수):
+#   위 명령에 -fsanitize=thread 추가 후:  setarch $(uname -m) -R /tmp/ncmp_tests
 
 # CMake 설치 시: cd ncmp && cmake -S . -B build -DENABLE_MOCK_TOKEN=ON && ctest --test-dir build
 ```

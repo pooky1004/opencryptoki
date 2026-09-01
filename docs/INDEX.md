@@ -21,8 +21,13 @@
 | 데몬 comm/통계 | `ncmp/daemon/comm_thread.c` |
 | 2단계 USB 수신 | `ncmp/daemon/usb_transport.c` |
 | STDLL 세션 상한 | `ncmp/stdll/ncmp_session.c` |
+| **자체 PKCS#11 프로바이더** | `ncmp/pkcs11/` (p11_*.c) |
+| 프로바이더 내부 상태/헤더 | `ncmp/pkcs11/p11_provider.h`, `p11_state.c` |
+| 함수테이블(2.40/3.0/3.2) | `ncmp/pkcs11/p11_functionlist.c` |
+| 벤더 인터페이스(공개 헤더) | `ncmp/pkcs11/ncmp_vendor.h`, `p11_vendor.c` |
+| 슬롯 매핑 | `ncmp/pkcs11/p11_slotmap.c`, `usr/lib/ncmp_stdll/ncmptok.conf` |
 | 목 데이터패스 | `ncmp/mock/` |
-| 테스트 스위트 | `ncmp/tests/` |
+| 테스트 스위트 | `ncmp/tests/` (PKCS#11 API: `test_pkcs11_api.c`) |
 
 ## 작업 마무리 규약
 작업을 끝낼 때마다 진행 상황과 남은 과제를 `.md` 상태 파일로 요약할 것을

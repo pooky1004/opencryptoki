@@ -12,6 +12,7 @@
 #include "ncmp/ncmp_slot.h"
 #include "ncmp/ncmp_transport.h"
 #include "ncmp/ncmp_wire.h"
+#include "ncmp/ncmp_cmd.h"
 #include "ncmp/ncmp_errno.h"
 #include "ncmpd.h"
 #include "ncmp_test.h"
@@ -25,7 +26,9 @@ static void build_req(NCMP_Message *m, uint8_t *payload, uint32_t session,
     memset(m, 0, sizeof(*m));
     m->header.session_id = session;
     m->header.sequence_id = seq;
-    m->header.command_id = 0x100u + seq;
+    /* Echo/keepalive opcode: distinct sequence_ids correlate the responses,
+     * while the opcode itself stays the collision-free NOP. */
+    m->header.command_id = NCMP_CMD_NOP;
     memcpy(payload, "PING", 4);
     m->param_len[0] = 4;
     m->payload = payload;

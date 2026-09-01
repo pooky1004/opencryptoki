@@ -741,6 +741,140 @@ static void mock_exec_command(mock_device_t *dev, NCMP_Message *msg)
         msg->header.ack = MOCK_CKR_OK;
         break;
     }
+    case NCMP_CMD_VD_LOOPBACK:
+        /* Echo param0 verbatim (payload already holds it). */
+        msg->header.ack = MOCK_CKR_OK;
+        break;
+    case NCMP_CMD_VD_MEM_WRITE: {
+        /* [addr(LE u32) | bytes] -> ack. Stores into the vendor scratch RAM. */
+        const uint8_t *pa, *pb;
+        uint32_t la, lb, addr;
+
+        if (ncmp_msg_param(msg, 0, &pa, &la) != NCMP_OK || la < 4 ||
+            ncmp_msg_param(msg, 1, &pb, &lb) != NCMP_OK) {
+            msg->param_len[0] = 0;
+            msg->header.ack = MOCK_CKR_FUNCTION_FAILED;
+            break;
+        }
+        addr = ncmp_rd_u32le(pa);
+        if ((uint64_t)addr + lb > NCMP_VD_MEM_SIZE) {
+            msg->param_len[0] = 0;
+            msg->header.ack = MOCK_CKR_DEVICE_MEMORY;
+            break;
+        }
+        memcpy(dev->vd_mem + addr, pb, lb);
+        for (int i = 0; i < NCMP_MAX_PARAM_COUNT; ++i)
+            msg->param_len[i] = 0;
+        msg->header.ack = MOCK_CKR_OK;
+        break;
+    }
+    case NCMP_CMD_VD_MEM_READ: {
+        /* [addr(LE u32) | len(LE u32)] -> bytes from vendor scratch RAM. */
+        const uint8_t *pa, *pl;
+        uint32_t la, ll, addr, len;
+
+        if (ncmp_msg_param(msg, 0, &pa, &la) != NCMP_OK || la < 4 ||
+            ncmp_msg_param(msg, 1, &pl, &ll) != NCMP_OK || ll < 4) {
+            msg->param_len[0] = 0;
+            msg->header.ack = MOCK_CKR_FUNCTION_FAILED;
+            break;
+        }
+        addr = ncmp_rd_u32le(pa);
+        len = ncmp_rd_u32le(pl);
+        if (len > NCMP_MAX_PARAM_SIZE ||
+            (uint64_t)addr + len > NCMP_VD_MEM_SIZE) {
+            msg->param_len[0] = 0;
+            msg->header.ack = MOCK_CKR_DEVICE_MEMORY;
+            break;
+        }
+        memmove(msg->payload, dev->vd_mem + addr, len);
+        msg->param_len[0] = len;
+        for (int i = 1; i < NCMP_MAX_PARAM_COUNT; ++i)
+            msg->param_len[i] = 0;
+        msg->header.ack = MOCK_CKR_OK;
+        break;
+    }
+    case NCMP_CMD_VD_MEM_FILL: {
+        /* [addr | len | byte] -> ack. */
+        const uint8_t *pa, *pl, *pv;
+        uint32_t la, ll, lv, addr, len;
+
+        if (ncmp_msg_param(msg, 0, &pa, &la) != NCMP_OK || la < 4 ||
+            ncmp_msg_param(msg, 1, &pl, &ll) != NCMP_OK || ll < 4 ||
+            ncmp_msg_param(msg, 2, &pv, &lv) != NCMP_OK || lv < 1) {
+            msg->param_len[0] = 0;
+            msg->header.ack = MOCK_CKR_FUNCTION_FAILED;
+            break;
+        }
+        addr = ncmp_rd_u32le(pa);
+        len = ncmp_rd_u32le(pl);
+        if ((uint64_t)addr + len > NCMP_VD_MEM_SIZE) {
+            msg->param_len[0] = 0;
+            msg->header.ack = MOCK_CKR_DEVICE_MEMORY;
+            break;
+        }
+        memset(dev->vd_mem + addr, pv[0], len);
+        for (int i = 0; i < NCMP_MAX_PARAM_COUNT; ++i)
+            msg->param_len[i] = 0;
+        msg->header.ack = MOCK_CKR_OK;
+        break;
+    }
+    case NCMP_CMD_VD_MEM_CRC: {
+        /* [addr | len] -> crc32 (LE u32) over vendor scratch RAM. */
+        const uint8_t *pa, *pl;
+        uint32_t la, ll, addr, len, crc = 0xFFFFFFFFu;
+
+        if (ncmp_msg_param(msg, 0, &pa, &la) != NCMP_OK || la < 4 ||
+            ncmp_msg_param(msg, 1, &pl, &ll) != NCMP_OK || ll < 4) {
+            msg->param_len[0] = 0;
+            msg->header.ack = MOCK_CKR_FUNCTION_FAILED;
+            break;
+        }
+        addr = ncmp_rd_u32le(pa);
+        len = ncmp_rd_u32le(pl);
+        if ((uint64_t)addr + len > NCMP_VD_MEM_SIZE) {
+            msg->param_len[0] = 0;
+            msg->header.ack = MOCK_CKR_DEVICE_MEMORY;
+            break;
+        }
+        for (uint32_t i = 0; i < len; ++i) {
+            crc ^= dev->vd_mem[addr + i];
+            for (int b = 0; b < 8; ++b)
+                crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t)(-(int)(crc & 1u)));
+        }
+        crc ^= 0xFFFFFFFFu;
+        ncmp_wr_u32le(msg->payload, crc);
+        msg->param_len[0] = 4;
+        for (int i = 1; i < NCMP_MAX_PARAM_COUNT; ++i)
+            msg->param_len[i] = 0;
+        msg->header.ack = MOCK_CKR_OK;
+        break;
+    }
+    case NCMP_CMD_VD_PING:
+        ncmp_wr_u32le(msg->payload, dev->epoch);
+        msg->param_len[0] = 4;
+        for (int i = 1; i < NCMP_MAX_PARAM_COUNT; ++i)
+            msg->param_len[i] = 0;
+        msg->header.ack = MOCK_CKR_OK;
+        break;
+    case NCMP_CMD_VD_SELFTEST:
+        dev->epoch++; /* self-test bumps the epoch a PING can observe. */
+        ncmp_wr_u32le(msg->payload, 0u); /* 0 == all subsystems OK */
+        msg->param_len[0] = 4;
+        for (int i = 1; i < NCMP_MAX_PARAM_COUNT; ++i)
+            msg->param_len[i] = 0;
+        msg->header.ack = MOCK_CKR_OK;
+        break;
+    case NCMP_CMD_VD_FW_INFO:
+        ncmp_wr_u32le(msg->payload + 0, 1u);   /* major */
+        ncmp_wr_u32le(msg->payload + 4, 0u);   /* minor */
+        ncmp_wr_u32le(msg->payload + 8, 0u);   /* patch */
+        ncmp_wr_u32le(msg->payload + 12, 0x0FC3u); /* build tag (FX3) */
+        msg->param_len[0] = 16;
+        for (int i = 1; i < NCMP_MAX_PARAM_COUNT; ++i)
+            msg->param_len[i] = 0;
+        msg->header.ack = MOCK_CKR_OK;
+        break;
     case NCMP_CMD_NOP:
     default:
         /* Echo: identity and payload unchanged. */

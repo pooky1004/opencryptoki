@@ -17,6 +17,10 @@ add_compile_options(-Wall -Wextra -Wshadow -Wpointer-arith -Wcast-qual)
 # Robust process-shared mutexes need the GNU/POSIX-2008 feature set on glibc.
 add_compile_definitions(_GNU_SOURCE)
 
+# Static libraries are linked into the shared PKCS#11 provider, so build all
+# objects position-independent.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 option(ENABLE_MOCK_TOKEN
        "Build the software mock token and route the daemon transport to it"
        OFF)
@@ -34,6 +38,7 @@ add_subdirectory(common)
 add_subdirectory(mock)
 add_subdirectory(daemon)
 add_subdirectory(stdll)
+add_subdirectory(pkcs11)
 add_subdirectory(tests)
 
 message(STATUS "Token NCMP: ENABLE_MOCK_TOKEN=${ENABLE_MOCK_TOKEN}")

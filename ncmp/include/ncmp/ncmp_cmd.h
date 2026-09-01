@@ -48,10 +48,28 @@ enum ncmp_opcode {
     NCMP_CMD_RSA_OAEP_ENC = 0x0026, /**< [mod|pub_exp|data] -> [ciphertext]. */
     NCMP_CMD_RSA_OAEP_DEC = 0x0027, /**< [mod|priv_exp|ct] -> [plaintext]. */
     NCMP_CMD_DH_DERIVE = 0x0028, /**< [prime|priv|peer_pub] -> [shared secret]. */
-    NCMP_CMD_ECDH_DERIVE = 0x0029 /**< [ec_params|priv|peer_point] -> [secret]. */
+    NCMP_CMD_ECDH_DERIVE = 0x0029, /**< [ec_params|priv|peer_point] -> [secret]. */
     /* RSA-PSS reuses NCMP_CMD_RSA_SIGN / NCMP_CMD_RSA_VERIFY (same marshalling;
      * the mock signature is deterministic regardless of PSS vs PKCS padding). */
+
+    /*
+     * Vendor-defined opcodes (0x0100+). Exposed to applications through the
+     * "NCMP Vendor" PKCS#11 interface (see ncmp/pkcs11/ncmp_vendor.h). They do
+     * not correspond to any standard PKCS#11 function; they exercise the token
+     * datapath and query device-side state.
+     */
+    NCMP_CMD_VD_LOOPBACK  = 0x0100, /**< Echo param0 back verbatim. */
+    NCMP_CMD_VD_MEM_WRITE = 0x0101, /**< [addr(LE u32)|bytes] -> (ack). */
+    NCMP_CMD_VD_MEM_READ  = 0x0102, /**< [addr(LE u32)|len(LE u32)] -> [bytes]. */
+    NCMP_CMD_VD_PING      = 0x0103, /**< No payload -> [token epoch LE u32]. */
+    NCMP_CMD_VD_SELFTEST  = 0x0104, /**< No payload -> [status LE u32 (0=ok)]. */
+    NCMP_CMD_VD_FW_INFO   = 0x0105, /**< No payload -> [major|minor|patch|build]. */
+    NCMP_CMD_VD_MEM_FILL  = 0x0106, /**< [addr|len|byte] -> (ack). */
+    NCMP_CMD_VD_MEM_CRC   = 0x0107  /**< [addr|len] -> [crc32 LE u32]. */
 };
+
+/** Size (bytes) of the mock token's vendor scratch memory region. */
+#define NCMP_VD_MEM_SIZE (4u * 1024u)
 
 /** HMAC output size (bytes) for @p mech (CKM_*_HMAC), or 0 if unsupported. */
 static inline uint32_t ncmp_hmac_size(uint32_t mech)

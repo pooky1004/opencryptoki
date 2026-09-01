@@ -16,8 +16,10 @@ hook into, `pkcsslotd` — it is a separate pipe/proxy daemon.
   loads.
 - **B — `libpkcs11_ncmp.so`** (STDLL, `usr/lib/ncmp_stdll/`): opencryptoki
   token; C_* API comes from opencryptoki `new_host.c`, crypto from
-  `token_specific` (ncmp_specific.c). Transport lives in `ncmp/stdll/`
-  (ncmp_client/session/ckr).
+  `token_specific` (`usr/lib/ncmp_stdll/ncmp_specific.c` + `tok_struct.h`).
+  Each callback extracts key material from OBJECT templates and forwards through
+  the pure-buffer `ncmp_crypto` marshalling adapter. Transport + adapter live in
+  `ncmp/stdll/` (ncmp_client/session/ckr/crypto).
 - **C — `mock_token_ncmp`** (`ncmp/mock/`): SW emulator of the FX3 datapath;
   enabled with `-DENABLE_MOCK_TOKEN=ON`.
 - **D — tests** (`ncmp/tests/`): C suite for APIs, concurrency, limits, stats,
@@ -35,7 +37,9 @@ include/ncmp/   ncmp_limits.h ncmp_wire.h ncmp_mutex.h ncmp_queue.h
                 ncmp_shm.h ncmp_ipc.h ncmp_errno.h   (shared public headers)
 common/         ncmp_mutex.c ncmp_queue.c ncmp_wire.c ncmp_shm.c
 daemon/         main.c conn_thread.c comm_thread.c usb_transport.c  (Module A)
-stdll/          ncmp_specific.c ncmp_client.c ncmp_session.c        (Module B)
+stdll/          ncmp_client.c ncmp_session.c ncmp_ckr.c ncmp_crypto.c (Module B
+                transport + crypto adapter; token_specific SPI is in
+                usr/lib/ncmp_stdll/)
 mock/           mock_main.c fx3_dma.c container.c mcu_scheduler.c   (Module C)
 tests/          test_*.c + ncmp_test.h                              (Module D)
 cmake/          FindLibUSB.cmake

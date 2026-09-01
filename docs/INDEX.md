@@ -22,11 +22,12 @@
 | 데몬 comm/통계 | `ncmp/daemon/comm_thread.c` |
 | 단발 USB 수신(최대 버퍼) | `ncmp/daemon/usb_transport.c` |
 | STDLL 세션 상한 | `ncmp/stdll/ncmp_session.c` |
-| STDLL 크립토 훅(token_specific) | `ncmp/stdll/ncmp_specific.c` |
+| STDLL 크립토 훅(token_specific) | `usr/lib/ncmp_stdll/ncmp_specific.c`, `tok_struct.h` |
+| 크립토 마샬링 어댑터(순수 버퍼) | `ncmp/stdll/ncmp_crypto.c`, `ncmp/include/ncmp/ncmp_crypto.h` |
 | 슬롯 매핑 | `usr/lib/ncmp_stdll/ncmptok.conf` |
 | 벤더 와이어 opcode(0x0100+) | `ncmp/include/ncmp/ncmp_cmd.h`, `ncmp/mock/mcu_scheduler.c` |
 | 목 데이터패스 | `ncmp/mock/` |
-| 테스트 스위트 | `ncmp/tests/` |
+| 테스트 스위트 | `ncmp/tests/` (어댑터: `test_crypto.c`) |
 
 ## 작업 마무리 규약
 작업을 끝낼 때마다 진행 상황과 남은 과제를 `.md` 상태 파일로 요약할 것을

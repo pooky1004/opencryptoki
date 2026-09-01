@@ -16,7 +16,7 @@
 | 지표 | 값 |
 |------|-----|
 | 진행 단계 | STEP ①~⑨ + 연산 확장 완성 |
-| standalone 테스트 | **32/32 통과** (전송 계층), ThreadSanitizer 0 races |
+| standalone 테스트 | **47/47 통과** (전송 32 + 크립토 어댑터 15), ThreadSanitizer 0 races |
 | opencryptoki STDLL | `libpkcs11_ncmp.so.0.0.0` **실제 빌드 성공** (strict `-pedantic -Werror -std=c99`) |
 | `token_specific` 훅 | **36종** 배선 (crypto 30 + 라이프사이클/리포팅 6) |
 | 와이어 opcode | 20종 + 벤더 8종 (loopback/mem read·write·fill·crc/ping/selftest/fw) |
@@ -118,10 +118,11 @@ gcc -std=c11 -O2 -Wall -Wextra -D_GNU_SOURCE \
     -Iusr/include -Incmp/include -Incmp/tests -Incmp/mock -Incmp/daemon \
     ncmp/tests/*.c ncmp/common/*.c \
     ncmp/stdll/ncmp_session.c ncmp/stdll/ncmp_client.c ncmp/stdll/ncmp_ckr.c \
+    ncmp/stdll/ncmp_crypto.c \
     ncmp/daemon/comm_thread.c ncmp/daemon/conn_thread.c \
     ncmp/mock/mock_transport.c ncmp/mock/fx3_dma.c ncmp/mock/container.c \
     ncmp/mock/mcu_scheduler.c -lpthread -lrt -o /tmp/ncmp_tests
-/tmp/ncmp_tests                                # -> SUITE PASSED (32/32)
+/tmp/ncmp_tests                                # -> SUITE PASSED (47/47)
 
 # ThreadSanitizer (ASLR off + 새로 빌드한 바이너리 필수):
 #   위 명령에 -fsanitize=thread 추가 후:  setarch $(uname -m) -R /tmp/ncmp_tests

@@ -400,8 +400,28 @@ cd ncmp && gcc -std=c11 -Wall -Wextra -Wshadow -D_GNU_SOURCE -Iinclude -Itests \
 자립형 PKCS#11 프로바이더 계층은 STDLL(new_host 기반) 경로로 일원화하면서
 **제거**되었다. 관련 소스·`test_pkcs11_api.c`·빌드 배선(`add_subdirectory(pkcs11)`)을
 모두 삭제. 애플리케이션은 opencryptoki 표준 3층 경로(API → new_host → token_specific
-= `ncmp/stdll/ncmp_specific.c`)만 사용한다.
+= `usr/lib/ncmp_stdll/ncmp_specific.c`)만 사용한다.
 
 벤더 와이어 opcode(0x0100+, `VD_LOOPBACK/MEM_*/PING/SELFTEST/FW_INFO`)는 프로바이더와
 무관한 토큰 datapath 기능이므로 유지된다 — 정의는 `ncmp/include/ncmp/ncmp_cmd.h`,
 목 실행부는 `ncmp/mock/mcu_scheduler.c`.
+
+---
+
+## 6. 크립토 마샬링 어댑터 + STDLL 테스트 (2026-09-02)
+
+`token_specific_*` 콜백들이 각자 인라인으로 하던 와이어 마샬링(파라미터 패킹 +
+`ncmp_client_command[_mp]` + ack/에러 처리)을 순수-버퍼 어댑터
+**`ncmp/stdll/ncmp_crypto.{c,h}`**로 분리했다. 콜백은 OBJECT 템플릿에서 키 소재를
+뽑아 `ncmp_crypto_*`를 호출하고, 어댑터가 마샬링/전송/토큰 ack 반환을 담당한다
+(rng·digest 1shot/멀티파트·AES ecb/cbc/stream/gcm·RSA sign/verify/OAEP·EC
+sign/verify·HMAC·RSA/EC keygen·DH/ECDH 총 23개 호출).
+
+- **테스트**: `ncmp/tests/test_crypto.c` — 어댑터의 모든 op를 목 토큰 대상으로
+  end-to-end 검증(정상 왕복 + 변조/길이 실패 신호). standalone 스위트는 32→
+  **47개**(전송 32 + 어댑터 15)로 확대, 100% 통과.
+- **검증**: standalone CMake 스위트 통과 + opencryptoki 오토툴즈로
+  `libpkcs11_ncmp.so` 전체 링크 성공(리팩터된 `ncmp_specific.c` + `ncmp_crypto.c`,
+  `-Wl,-z,defs` 하 심볼 전부 해석).
+- **정리**: 빌드되지 않던 죽은 중복본 `ncmp/stdll/ncmp_specific.c`·`tok_struct.h`
+  삭제.

@@ -23,8 +23,9 @@
 #include "tok_struct.h"
 #include "trace.h"
 
-/* NCMP client + error-mapping API (ncmp/ subtree). */
+/* NCMP client + crypto adapter + error-mapping API (ncmp/ subtree). */
 #include "ncmp/ncmp_client.h"
+#include "ncmp/ncmp_crypto.h"
 #include "ncmp/ncmp_ckr.h"
 #include "ncmp/ncmp_cmd.h"
 #include "ncmp/ncmp_limits.h"
@@ -188,28 +189,16 @@ CK_RV token_specific_rng(STDLL_TokData_t *tokdata, CK_BYTE *output,
     if (priv == NULL)
         return CKR_FUNCTION_FAILED;
 
-    /* Forward to the token in <=32KB parameter-sized chunks. */
+    /* Forward to the token in <=32KB parameter-sized chunks. The adapter checks
+     * for a short response and maps transport errors. */
     while (done < bytes) {
         CK_ULONG remaining = bytes - done;
         uint32_t chunk = (remaining > NCMP_MAX_PARAM_SIZE)
                              ? NCMP_MAX_PARAM_SIZE : (uint32_t)remaining;
-        uint8_t lenbuf[4];
-        uint32_t out_len = 0;
-        uint32_t ack = 0;
-        int nrc;
-
-        ncmp_wr_u32le(lenbuf, chunk);
-        nrc = ncmp_client_command(&priv->client, priv->ncmp_slot,
-                                  NCMP_CMD_RNG, lenbuf, sizeof(lenbuf),
-                                  (uint8_t *)output + done, chunk,
-                                  &out_len, &ack);
-        if (nrc != NCMP_OK)
-            return ncmp_err_to_ckr(nrc);
-        if (ack != NCMP_CKR_OK)
-            return (CK_RV)ack;          /* token-reported failure */
-        if (out_len != chunk)
-            return CKR_FUNCTION_FAILED;  /* short RNG response */
-
+        CK_RV rv = ncmp_crypto_rng(&priv->client, priv->ncmp_slot,
+                                   (uint8_t *)output + done, chunk);
+        if (rv != CKR_OK)
+            return rv;
         done += chunk;
     }
 
@@ -262,30 +251,21 @@ static CK_RV ncmp_digest_ensure_ctx(struct ncmp_private_data *priv,
                                     DIGEST_CONTEXT *ctx, uint32_t *out_id)
 {
     uint32_t *idp = (uint32_t *)ctx->context;
-    uint8_t mechbuf[4];
-    uint8_t idbuf[4];
-    uint32_t out_len = 0;
-    uint32_t ack = 0;
-    int nrc;
+    uint32_t id = 0;
+    CK_RV rv;
 
     if (*idp != NCMP_DIGEST_CTX_NONE) {
         *out_id = *idp;
         return CKR_OK;
     }
 
-    ncmp_wr_u32le(mechbuf, (uint32_t)ctx->mech.mechanism);
-    nrc = ncmp_client_command(&priv->client, priv->ncmp_slot,
-                              NCMP_CMD_DIGEST_INIT, mechbuf, sizeof(mechbuf),
-                              idbuf, sizeof(idbuf), &out_len, &ack);
-    if (nrc != NCMP_OK)
-        return ncmp_err_to_ckr(nrc);
-    if (ack != NCMP_CKR_OK)
-        return (CK_RV)ack;
-    if (out_len != 4)
-        return CKR_FUNCTION_FAILED;
+    rv = ncmp_crypto_digest_init(&priv->client, priv->ncmp_slot,
+                                 (uint32_t)ctx->mech.mechanism, &id);
+    if (rv != CKR_OK)
+        return rv;
 
-    *idp = ncmp_rd_u32le(idbuf);
-    *out_id = *idp;
+    *idp = id;
+    *out_id = id;
     return CKR_OK;
 }
 
@@ -308,22 +288,10 @@ CK_RV token_specific_sha_update(STDLL_TokData_t *tokdata, DIGEST_CONTEXT *ctx,
         CK_ULONG remaining = in_data_len - done;
         uint32_t chunk = (remaining > NCMP_MAX_PARAM_SIZE)
                              ? NCMP_MAX_PARAM_SIZE : (uint32_t)remaining;
-        const uint8_t *parts[2];
-        uint32_t lens[2];
-        uint8_t idbuf[4];
-        NCMP_Message rsp;
-        int nrc;
-
-        ncmp_wr_u32le(idbuf, id);
-        parts[0] = idbuf;          lens[0] = sizeof(idbuf);
-        parts[1] = in_data + done; lens[1] = chunk;
-        nrc = ncmp_client_command_mp(&priv->client, priv->ncmp_slot,
-                                     NCMP_CMD_DIGEST_UPDATE, parts, lens, 2,
-                                     NULL, 0, &rsp);
-        if (nrc != NCMP_OK)
-            return ncmp_err_to_ckr(nrc);
-        if (rsp.header.ack != NCMP_CKR_OK)
-            return (CK_RV)rsp.header.ack;
+        CK_RV rv = ncmp_crypto_digest_update(&priv->client, priv->ncmp_slot, id,
+                                             in_data + done, chunk);
+        if (rv != CKR_OK)
+            return rv;
         done += chunk;
     }
 
@@ -338,10 +306,7 @@ CK_RV token_specific_sha_final(STDLL_TokData_t *tokdata, DIGEST_CONTEXT *ctx,
     uint32_t hsize = ncmp_digest_size(mech);
     uint32_t id;
     uint32_t out_len = 0;
-    uint32_t ack = 0;
-    uint8_t idbuf[4];
     CK_RV rc;
-    int nrc;
 
     if (priv == NULL || hsize == 0)
         return CKR_FUNCTION_FAILED;
@@ -355,14 +320,10 @@ CK_RV token_specific_sha_final(STDLL_TokData_t *tokdata, DIGEST_CONTEXT *ctx,
     if (rc != CKR_OK)
         return rc;
 
-    ncmp_wr_u32le(idbuf, id);
-    nrc = ncmp_client_command(&priv->client, priv->ncmp_slot,
-                              NCMP_CMD_DIGEST_FINAL, idbuf, sizeof(idbuf),
-                              out_data, (uint32_t)*out_data_len, &out_len, &ack);
-    if (nrc != NCMP_OK)
-        return ncmp_err_to_ckr(nrc);
-    if (ack != NCMP_CKR_OK)
-        return (CK_RV)ack;
+    rc = ncmp_crypto_digest_final(&priv->client, priv->ncmp_slot, id, out_data,
+                                  (uint32_t)*out_data_len, &out_len);
+    if (rc != CKR_OK)
+        return rc;
     if (out_len != hsize)
         return CKR_FUNCTION_FAILED;
 
@@ -379,11 +340,8 @@ CK_RV token_specific_sha(STDLL_TokData_t *tokdata, DIGEST_CONTEXT *ctx,
     struct ncmp_private_data *priv = tokdata->private_data;
     uint32_t mech = (uint32_t)ctx->mech.mechanism;
     uint32_t hsize = ncmp_digest_size(mech);
-    uint32_t req_len;
     uint32_t out_len = 0;
-    uint32_t ack = 0;
-    uint8_t *req;
-    int nrc;
+    CK_RV rc;
 
     if (priv == NULL || hsize == 0)
         return CKR_FUNCTION_FAILED;
@@ -392,22 +350,10 @@ CK_RV token_specific_sha(STDLL_TokData_t *tokdata, DIGEST_CONTEXT *ctx,
     if ((CK_ULONG)4 + in_data_len > NCMP_MAX_PARAM_SIZE)
         return CKR_DATA_LEN_RANGE;
 
-    req_len = 4 + (uint32_t)in_data_len;
-    req = (uint8_t *)malloc(req_len);
-    if (req == NULL)
-        return CKR_HOST_MEMORY;
-    ncmp_wr_u32le(req, mech);
-    if (in_data_len > 0)
-        memcpy(req + 4, in_data, in_data_len);
-
-    nrc = ncmp_client_command(&priv->client, priv->ncmp_slot, NCMP_CMD_DIGEST,
-                              req, req_len, out_data, hsize, &out_len, &ack);
-    free(req);
-
-    if (nrc != NCMP_OK)
-        return ncmp_err_to_ckr(nrc);
-    if (ack != NCMP_CKR_OK)
-        return (CK_RV)ack;
+    rc = ncmp_crypto_digest(&priv->client, priv->ncmp_slot, mech, in_data,
+                            (uint32_t)in_data_len, out_data, hsize, &out_len);
+    if (rc != CKR_OK)
+        return rc;
     if (out_len != hsize)
         return CKR_FUNCTION_FAILED;
 
@@ -422,12 +368,8 @@ CK_RV token_specific_aes_cbc(STDLL_TokData_t *tokdata, SESSION *sess,
 {
     struct ncmp_private_data *priv = tokdata->private_data;
     CK_ATTRIBUTE *key_attr = NULL;
-    NCMP_Message rsp;
-    const uint8_t *parts[4];
-    uint32_t lens[4];
-    uint8_t flags[4];
+    uint32_t out_len = 0;
     CK_RV rc;
-    int nrc;
 
     UNUSED(sess);
 
@@ -445,20 +387,14 @@ CK_RV token_specific_aes_cbc(STDLL_TokData_t *tokdata, SESSION *sess,
     if (rc != CKR_OK)
         return rc;
 
-    ncmp_wr_u32le(flags, encrypt ? NCMP_AES_FLAG_ENCRYPT : 0u);
-    parts[0] = flags;             lens[0] = sizeof(flags);
-    parts[1] = key_attr->pValue;  lens[1] = (uint32_t)key_attr->ulValueLen;
-    parts[2] = init_v;            lens[2] = NCMP_AES_BLOCK;
-    parts[3] = in_data;           lens[3] = (uint32_t)in_data_len;
-
-    nrc = ncmp_client_command_mp(&priv->client, priv->ncmp_slot,
-                                 NCMP_CMD_AES_CBC, parts, lens, 4,
-                                 out_data, (uint32_t)*out_data_len, &rsp);
-    if (nrc != NCMP_OK)
-        return ncmp_err_to_ckr(nrc);
-    if (rsp.header.ack != NCMP_CKR_OK)
-        return (CK_RV)rsp.header.ack;
-    if (rsp.param_len[0] != in_data_len)
+    rc = ncmp_crypto_aes_cbc(&priv->client, priv->ncmp_slot, encrypt,
+                             key_attr->pValue, (uint32_t)key_attr->ulValueLen,
+                             init_v, NCMP_AES_BLOCK, in_data,
+                             (uint32_t)in_data_len, out_data,
+                             (uint32_t)*out_data_len, &out_len);
+    if (rc != CKR_OK)
+        return rc;
+    if (out_len != in_data_len)
         return CKR_FUNCTION_FAILED;
 
     *out_data_len = in_data_len;
@@ -473,11 +409,8 @@ CK_RV token_specific_rsa_sign(STDLL_TokData_t *tokdata, SESSION *sess,
     struct ncmp_private_data *priv = tokdata->private_data;
     CK_ATTRIBUTE *mod_attr = NULL;
     CK_ATTRIBUTE *exp_attr = NULL;
-    NCMP_Message rsp;
-    const uint8_t *parts[3];
-    uint32_t lens[3];
+    uint32_t out_len = 0;
     CK_RV rc;
-    int nrc;
 
     UNUSED(sess);
 
@@ -498,18 +431,14 @@ CK_RV token_specific_rsa_sign(STDLL_TokData_t *tokdata, SESSION *sess,
         return CKR_BUFFER_TOO_SMALL;
     }
 
-    parts[0] = mod_attr->pValue; lens[0] = (uint32_t)mod_attr->ulValueLen;
-    parts[1] = exp_attr->pValue; lens[1] = (uint32_t)exp_attr->ulValueLen;
-    parts[2] = in_data;          lens[2] = (uint32_t)in_data_len;
-
-    nrc = ncmp_client_command_mp(&priv->client, priv->ncmp_slot,
-                                 NCMP_CMD_RSA_SIGN, parts, lens, 3,
-                                 out_data, (uint32_t)*out_data_len, &rsp);
-    if (nrc != NCMP_OK)
-        return ncmp_err_to_ckr(nrc);
-    if (rsp.header.ack != NCMP_CKR_OK)
-        return (CK_RV)rsp.header.ack;
-    if (rsp.param_len[0] != mod_attr->ulValueLen)
+    rc = ncmp_crypto_rsa_sign(&priv->client, priv->ncmp_slot,
+                              mod_attr->pValue, (uint32_t)mod_attr->ulValueLen,
+                              exp_attr->pValue, (uint32_t)exp_attr->ulValueLen,
+                              in_data, (uint32_t)in_data_len, out_data,
+                              (uint32_t)*out_data_len, &out_len);
+    if (rc != CKR_OK)
+        return rc;
+    if (out_len != mod_attr->ulValueLen)
         return CKR_FUNCTION_FAILED;
 
     *out_data_len = mod_attr->ulValueLen;
@@ -523,12 +452,8 @@ CK_RV token_specific_aes_ecb(STDLL_TokData_t *tokdata, SESSION *sess,
 {
     struct ncmp_private_data *priv = tokdata->private_data;
     CK_ATTRIBUTE *key_attr = NULL;
-    NCMP_Message rsp;
-    const uint8_t *parts[3];
-    uint32_t lens[3];
-    uint8_t flags[4];
+    uint32_t out_len = 0;
     CK_RV rc;
-    int nrc;
 
     UNUSED(sess);
 
@@ -545,19 +470,13 @@ CK_RV token_specific_aes_ecb(STDLL_TokData_t *tokdata, SESSION *sess,
     if (rc != CKR_OK)
         return rc;
 
-    ncmp_wr_u32le(flags, encrypt ? NCMP_AES_FLAG_ENCRYPT : 0u);
-    parts[0] = flags;            lens[0] = sizeof(flags);
-    parts[1] = key_attr->pValue; lens[1] = (uint32_t)key_attr->ulValueLen;
-    parts[2] = in_data;          lens[2] = (uint32_t)in_data_len;
-
-    nrc = ncmp_client_command_mp(&priv->client, priv->ncmp_slot,
-                                 NCMP_CMD_AES_ECB, parts, lens, 3,
-                                 out_data, (uint32_t)*out_data_len, &rsp);
-    if (nrc != NCMP_OK)
-        return ncmp_err_to_ckr(nrc);
-    if (rsp.header.ack != NCMP_CKR_OK)
-        return (CK_RV)rsp.header.ack;
-    if (rsp.param_len[0] != in_data_len)
+    rc = ncmp_crypto_aes_ecb(&priv->client, priv->ncmp_slot, encrypt,
+                             key_attr->pValue, (uint32_t)key_attr->ulValueLen,
+                             in_data, (uint32_t)in_data_len, out_data,
+                             (uint32_t)*out_data_len, &out_len);
+    if (rc != CKR_OK)
+        return rc;
+    if (out_len != in_data_len)
         return CKR_FUNCTION_FAILED;
 
     *out_data_len = in_data_len;
@@ -592,15 +511,10 @@ CK_RV token_specific_aes_gcm(STDLL_TokData_t *tokdata, SESSION *sess,
     CK_GCM_PARAMS *gcm = (CK_GCM_PARAMS *)ctx->mech.pParameter;
     OBJECT *key_obj = NULL;
     CK_ATTRIBUTE *key_attr = NULL;
-    NCMP_Message rsp;
-    const uint8_t *parts[6];
-    uint32_t lens[6];
-    uint8_t flags[4];
-    uint8_t tlbuf[4];
     uint32_t taglen;
+    uint32_t out_len = 0;
     CK_ULONG expected_out;
     CK_RV rc;
-    int nrc;
 
     UNUSED(sess);
 
@@ -631,25 +545,17 @@ CK_RV token_specific_aes_gcm(STDLL_TokData_t *tokdata, SESSION *sess,
         return rc;
     }
 
-    ncmp_wr_u32le(flags, encrypt ? NCMP_AES_FLAG_ENCRYPT : 0u);
-    ncmp_wr_u32le(tlbuf, taglen);
-    parts[0] = flags;            lens[0] = sizeof(flags);
-    parts[1] = key_attr->pValue; lens[1] = (uint32_t)key_attr->ulValueLen;
-    parts[2] = gcm->pIv;         lens[2] = (uint32_t)gcm->ulIvLen;
-    parts[3] = gcm->pAAD;        lens[3] = (uint32_t)gcm->ulAADLen;
-    parts[4] = tlbuf;            lens[4] = sizeof(tlbuf);
-    parts[5] = in_data;          lens[5] = (uint32_t)in_data_len;
-
-    nrc = ncmp_client_command_mp(&priv->client, priv->ncmp_slot,
-                                 NCMP_CMD_AES_GCM, parts, lens, 6,
-                                 out_data, (uint32_t)*out_data_len, &rsp);
+    rc = ncmp_crypto_aes_gcm(&priv->client, priv->ncmp_slot, encrypt,
+                             key_attr->pValue, (uint32_t)key_attr->ulValueLen,
+                             gcm->pIv, (uint32_t)gcm->ulIvLen, gcm->pAAD,
+                             (uint32_t)gcm->ulAADLen, taglen, in_data,
+                             (uint32_t)in_data_len, out_data,
+                             (uint32_t)*out_data_len, &out_len);
     object_put(tokdata, key_obj, TRUE);
 
-    if (nrc != NCMP_OK)
-        return ncmp_err_to_ckr(nrc);
-    if (rsp.header.ack != NCMP_CKR_OK)
-        return (CK_RV)rsp.header.ack;
-    if (rsp.param_len[0] != expected_out)
+    if (rc != CKR_OK)
+        return rc;
+    if (out_len != expected_out)
         return CKR_FUNCTION_FAILED;
 
     *out_data_len = expected_out;
@@ -664,31 +570,22 @@ static CK_RV ncmp_aes_stream(struct ncmp_private_data *priv, uint32_t opcode,
                              CK_ULONG out_cap)
 {
     CK_ATTRIBUTE *key_attr = NULL;
-    NCMP_Message rsp;
-    const uint8_t *parts[4];
-    uint32_t lens[4];
-    uint8_t flags[4];
+    uint32_t out_len = 0;
     CK_RV rc;
-    int nrc;
 
     rc = template_attribute_get_non_empty(key->template, CKA_VALUE, &key_attr);
     if (rc != CKR_OK)
         return rc;
 
-    ncmp_wr_u32le(flags, encrypt ? NCMP_AES_FLAG_ENCRYPT : 0u);
-    parts[0] = flags;            lens[0] = sizeof(flags);
-    parts[1] = key_attr->pValue; lens[1] = (uint32_t)key_attr->ulValueLen;
-    parts[2] = iv;               lens[2] = (uint32_t)iv_len;
-    parts[3] = in_data;          lens[3] = (uint32_t)in_data_len;
-
-    nrc = ncmp_client_command_mp(&priv->client, priv->ncmp_slot, opcode,
-                                 parts, lens, 4, out_data, (uint32_t)out_cap,
-                                 &rsp);
-    if (nrc != NCMP_OK)
-        return ncmp_err_to_ckr(nrc);
-    if (rsp.header.ack != NCMP_CKR_OK)
-        return (CK_RV)rsp.header.ack;
-    if (rsp.param_len[0] != in_data_len)
+    rc = ncmp_crypto_aes_stream(&priv->client, priv->ncmp_slot, opcode, encrypt,
+                                key_attr->pValue,
+                                (uint32_t)key_attr->ulValueLen, iv,
+                                (uint32_t)iv_len, in_data,
+                                (uint32_t)in_data_len, out_data,
+                                (uint32_t)out_cap, &out_len);
+    if (rc != CKR_OK)
+        return rc;
+    if (out_len != in_data_len)
         return CKR_FUNCTION_FAILED;
     return CKR_OK;
 }
@@ -757,12 +654,9 @@ CK_RV token_specific_ec_sign(STDLL_TokData_t *tokdata, SESSION *sess,
     struct ncmp_private_data *priv = tokdata->private_data;
     CK_ATTRIBUTE *params_attr = NULL;
     CK_ATTRIBUTE *val_attr = NULL;
-    NCMP_Message rsp;
-    const uint8_t *parts[3];
-    uint32_t lens[3];
+    uint32_t out_len = 0;
     CK_ULONG siglen;
     CK_RV rc;
-    int nrc;
 
     UNUSED(sess);
 
@@ -785,18 +679,15 @@ CK_RV token_specific_ec_sign(STDLL_TokData_t *tokdata, SESSION *sess,
         return CKR_BUFFER_TOO_SMALL;
     }
 
-    parts[0] = params_attr->pValue; lens[0] = (uint32_t)params_attr->ulValueLen;
-    parts[1] = val_attr->pValue;    lens[1] = (uint32_t)val_attr->ulValueLen;
-    parts[2] = in_data;             lens[2] = (uint32_t)in_data_len;
-
-    nrc = ncmp_client_command_mp(&priv->client, priv->ncmp_slot,
-                                 NCMP_CMD_EC_SIGN, parts, lens, 3,
-                                 out_data, (uint32_t)*out_data_len, &rsp);
-    if (nrc != NCMP_OK)
-        return ncmp_err_to_ckr(nrc);
-    if (rsp.header.ack != NCMP_CKR_OK)
-        return (CK_RV)rsp.header.ack;
-    if (rsp.param_len[0] != siglen)
+    rc = ncmp_crypto_ec_sign(&priv->client, priv->ncmp_slot,
+                             params_attr->pValue,
+                             (uint32_t)params_attr->ulValueLen,
+                             val_attr->pValue, (uint32_t)val_attr->ulValueLen,
+                             in_data, (uint32_t)in_data_len, out_data,
+                             (uint32_t)*out_data_len, &out_len);
+    if (rc != CKR_OK)
+        return rc;
+    if (out_len != siglen)
         return CKR_FUNCTION_FAILED;
 
     *out_data_len = siglen;
@@ -811,11 +702,7 @@ CK_RV token_specific_rsa_verify(STDLL_TokData_t *tokdata, SESSION *sess,
     struct ncmp_private_data *priv = tokdata->private_data;
     CK_ATTRIBUTE *mod_attr = NULL;
     CK_ATTRIBUTE *exp_attr = NULL;
-    NCMP_Message rsp;
-    const uint8_t *parts[4];
-    uint32_t lens[4];
     CK_RV rc;
-    int nrc;
 
     UNUSED(sess);
 
@@ -831,18 +718,14 @@ CK_RV token_specific_rsa_verify(STDLL_TokData_t *tokdata, SESSION *sess,
     if (rc != CKR_OK)
         return rc;
 
-    parts[0] = mod_attr->pValue; lens[0] = (uint32_t)mod_attr->ulValueLen;
-    parts[1] = exp_attr->pValue; lens[1] = (uint32_t)exp_attr->ulValueLen;
-    parts[2] = in_data;          lens[2] = (uint32_t)in_data_len;
-    parts[3] = signature;        lens[3] = (uint32_t)sig_len;
-
-    nrc = ncmp_client_command_mp(&priv->client, priv->ncmp_slot,
-                                 NCMP_CMD_RSA_VERIFY, parts, lens, 4,
-                                 NULL, 0, &rsp);
-    if (nrc != NCMP_OK)
-        return ncmp_err_to_ckr(nrc);
-    /* The token reports CKR_OK or CKR_SIGNATURE_INVALID in the ACK. */
-    return (CK_RV)rsp.header.ack;
+    /* The adapter returns CKR_OK or the token's CKR_SIGNATURE_INVALID ACK. */
+    return ncmp_crypto_rsa_verify(&priv->client, priv->ncmp_slot,
+                                  mod_attr->pValue,
+                                  (uint32_t)mod_attr->ulValueLen,
+                                  exp_attr->pValue,
+                                  (uint32_t)exp_attr->ulValueLen, in_data,
+                                  (uint32_t)in_data_len, signature,
+                                  (uint32_t)sig_len);
 }
 
 CK_RV token_specific_ec_verify(STDLL_TokData_t *tokdata, SESSION *sess,
@@ -853,11 +736,7 @@ CK_RV token_specific_ec_verify(STDLL_TokData_t *tokdata, SESSION *sess,
     struct ncmp_private_data *priv = tokdata->private_data;
     CK_ATTRIBUTE *params_attr = NULL;
     CK_ATTRIBUTE *point_attr = NULL;
-    NCMP_Message rsp;
-    const uint8_t *parts[4];
-    uint32_t lens[4];
     CK_RV rc;
-    int nrc;
 
     UNUSED(sess);
 
@@ -874,17 +753,13 @@ CK_RV token_specific_ec_verify(STDLL_TokData_t *tokdata, SESSION *sess,
     if (rc != CKR_OK)
         return rc;
 
-    parts[0] = params_attr->pValue; lens[0] = (uint32_t)params_attr->ulValueLen;
-    parts[1] = point_attr->pValue;  lens[1] = (uint32_t)point_attr->ulValueLen;
-    parts[2] = in_data;             lens[2] = (uint32_t)in_data_len;
-    parts[3] = signature;           lens[3] = (uint32_t)sig_len;
-
-    nrc = ncmp_client_command_mp(&priv->client, priv->ncmp_slot,
-                                 NCMP_CMD_EC_VERIFY, parts, lens, 4,
-                                 NULL, 0, &rsp);
-    if (nrc != NCMP_OK)
-        return ncmp_err_to_ckr(nrc);
-    return (CK_RV)rsp.header.ack;
+    return ncmp_crypto_ec_verify(&priv->client, priv->ncmp_slot,
+                                 params_attr->pValue,
+                                 (uint32_t)params_attr->ulValueLen,
+                                 point_attr->pValue,
+                                 (uint32_t)point_attr->ulValueLen, in_data,
+                                 (uint32_t)in_data_len, signature,
+                                 (uint32_t)sig_len);
 }
 
 /* Defined later (keypair-gen section); used by generic_secret_key_gen below. */
@@ -895,23 +770,10 @@ static CK_RV ncmp_tmpl_add(TEMPLATE *tmpl, CK_ATTRIBUTE_TYPE type,
 static CK_RV ncmp_gen_random(struct ncmp_private_data *priv, CK_BYTE *buf,
                              CK_ULONG len)
 {
-    uint8_t lenbuf[4];
-    uint32_t out_len = 0;
-    uint32_t ack = 0;
-    int nrc;
-
     if (len == 0 || len > NCMP_MAX_PARAM_SIZE)
         return CKR_KEY_SIZE_RANGE;
 
-    ncmp_wr_u32le(lenbuf, (uint32_t)len);
-    nrc = ncmp_client_command(&priv->client, priv->ncmp_slot, NCMP_CMD_RNG,
-                              lenbuf, sizeof(lenbuf), buf, (uint32_t)len,
-                              &out_len, &ack);
-    if (nrc != NCMP_OK)
-        return ncmp_err_to_ckr(nrc);
-    if (ack != NCMP_CKR_OK || out_len != len)
-        return CKR_FUNCTION_FAILED;
-    return CKR_OK;
+    return ncmp_crypto_rng(&priv->client, priv->ncmp_slot, buf, (uint32_t)len);
 }
 
 /** Generate a clear symmetric key of @p keysize bytes (AES / DES / 3DES). */
@@ -1011,15 +873,9 @@ CK_RV token_specific_rsa_generate_keypair(STDLL_TokData_t *tokdata,
     CK_ATTRIBUTE *pubexp = NULL;
     CK_ULONG mod_bits = 0;
     uint32_t nbytes, hbytes, total;
-    uint8_t bitsbuf[4];
-    const uint8_t *pin[2];
-    uint32_t lin[2];
     uint8_t *outbuf;
-    NCMP_Message rsp;
-    const uint8_t *comp[7];
-    uint32_t clen[7];
+    ncmp_rsa_keypair_t kp;
     CK_RV rc;
-    int nrc;
 
     if (priv == NULL)
         return CKR_FUNCTION_FAILED;
@@ -1041,54 +897,40 @@ CK_RV token_specific_rsa_generate_keypair(STDLL_TokData_t *tokdata,
     if (outbuf == NULL)
         return CKR_HOST_MEMORY;
 
-    /* Ask the token to generate the key: [modulus bits | public exponent]. */
-    ncmp_wr_u32le(bitsbuf, (uint32_t)mod_bits);
-    pin[0] = bitsbuf;        lin[0] = sizeof(bitsbuf);
-    pin[1] = pubexp->pValue; lin[1] = (uint32_t)pubexp->ulValueLen;
-    nrc = ncmp_client_command_mp(&priv->client, priv->ncmp_slot,
-                                 NCMP_CMD_RSA_KEYGEN, pin, lin, 2,
-                                 outbuf, total, &rsp);
-    if (nrc != NCMP_OK) {
+    /* Ask the token to generate the key: [modulus bits | public exponent] ->
+     * n, d, p, q, dp, dq, qinv (bytes land in outbuf, kp points at them). */
+    rc = ncmp_crypto_rsa_keygen(&priv->client, priv->ncmp_slot,
+                                (uint32_t)mod_bits, pubexp->pValue,
+                                (uint32_t)pubexp->ulValueLen, outbuf, total,
+                                &kp);
+    if (rc != CKR_OK) {
         free(outbuf);
-        return ncmp_err_to_ckr(nrc);
-    }
-    if (rsp.header.ack != NCMP_CKR_OK) {
-        CK_RV ack = (CK_RV)rsp.header.ack;
-        free(outbuf);
-        return ack;
-    }
-
-    /* Components: n, d, p, q, dp, dq, qinv. */
-    for (int i = 0; i < 7; ++i) {
-        if (ncmp_msg_param(&rsp, i, &comp[i], &clen[i]) != NCMP_OK ||
-            clen[i] == 0) {
-            free(outbuf);
-            return CKR_FUNCTION_FAILED;
-        }
+        return rc;
     }
 
     /* Public key: modulus (+ the caller's public exponent stays in publ_tmpl).
      * Private key: full component set. build_attribute deep-copies, so outbuf
      * can be freed afterwards. */
-    rc = ncmp_tmpl_add(publ_tmpl, CKA_MODULUS, comp[0], clen[0]);
+    rc = ncmp_tmpl_add(publ_tmpl, CKA_MODULUS, kp.modulus, kp.modulus_len);
     if (rc == CKR_OK)
-        rc = ncmp_tmpl_add(priv_tmpl, CKA_MODULUS, comp[0], clen[0]);
+        rc = ncmp_tmpl_add(priv_tmpl, CKA_MODULUS, kp.modulus, kp.modulus_len);
     if (rc == CKR_OK)
         rc = ncmp_tmpl_add(priv_tmpl, CKA_PUBLIC_EXPONENT,
                            (const uint8_t *)pubexp->pValue,
                            (uint32_t)pubexp->ulValueLen);
     if (rc == CKR_OK)
-        rc = ncmp_tmpl_add(priv_tmpl, CKA_PRIVATE_EXPONENT, comp[1], clen[1]);
+        rc = ncmp_tmpl_add(priv_tmpl, CKA_PRIVATE_EXPONENT, kp.priv_exp,
+                           kp.priv_exp_len);
     if (rc == CKR_OK)
-        rc = ncmp_tmpl_add(priv_tmpl, CKA_PRIME_1, comp[2], clen[2]);
+        rc = ncmp_tmpl_add(priv_tmpl, CKA_PRIME_1, kp.prime1, kp.prime1_len);
     if (rc == CKR_OK)
-        rc = ncmp_tmpl_add(priv_tmpl, CKA_PRIME_2, comp[3], clen[3]);
+        rc = ncmp_tmpl_add(priv_tmpl, CKA_PRIME_2, kp.prime2, kp.prime2_len);
     if (rc == CKR_OK)
-        rc = ncmp_tmpl_add(priv_tmpl, CKA_EXPONENT_1, comp[4], clen[4]);
+        rc = ncmp_tmpl_add(priv_tmpl, CKA_EXPONENT_1, kp.exp1, kp.exp1_len);
     if (rc == CKR_OK)
-        rc = ncmp_tmpl_add(priv_tmpl, CKA_EXPONENT_2, comp[5], clen[5]);
+        rc = ncmp_tmpl_add(priv_tmpl, CKA_EXPONENT_2, kp.exp2, kp.exp2_len);
     if (rc == CKR_OK)
-        rc = ncmp_tmpl_add(priv_tmpl, CKA_COEFFICIENT, comp[6], clen[6]);
+        rc = ncmp_tmpl_add(priv_tmpl, CKA_COEFFICIENT, kp.coeff, kp.coeff_len);
 
     free(outbuf);
     return rc;
@@ -1101,13 +943,8 @@ CK_RV token_specific_ec_generate_keypair(STDLL_TokData_t *tokdata,
     struct ncmp_private_data *priv = tokdata->private_data;
     CK_ATTRIBUTE *params = NULL;
     uint8_t outbuf[256];
-    const uint8_t *pin[1];
-    uint32_t lin[1];
-    NCMP_Message rsp;
-    const uint8_t *point, *pval;
-    uint32_t lpoint, lpval;
+    ncmp_ec_keypair_t kp;
     CK_RV rc;
-    int nrc;
 
     if (priv == NULL)
         return CKR_FUNCTION_FAILED;
@@ -1116,29 +953,23 @@ CK_RV token_specific_ec_generate_keypair(STDLL_TokData_t *tokdata,
     if (rc != CKR_OK)
         return rc;
 
-    pin[0] = params->pValue; lin[0] = (uint32_t)params->ulValueLen;
-    nrc = ncmp_client_command_mp(&priv->client, priv->ncmp_slot,
-                                 NCMP_CMD_EC_KEYGEN, pin, lin, 1,
-                                 outbuf, sizeof(outbuf), &rsp);
-    if (nrc != NCMP_OK)
-        return ncmp_err_to_ckr(nrc);
-    if (rsp.header.ack != NCMP_CKR_OK)
-        return (CK_RV)rsp.header.ack;
-
-    if (ncmp_msg_param(&rsp, 0, &point, &lpoint) != NCMP_OK || lpoint == 0 ||
-        ncmp_msg_param(&rsp, 1, &pval, &lpval) != NCMP_OK || lpval == 0)
-        return CKR_FUNCTION_FAILED;
+    rc = ncmp_crypto_ec_keygen(&priv->client, priv->ncmp_slot, params->pValue,
+                               (uint32_t)params->ulValueLen, outbuf,
+                               sizeof(outbuf), &kp);
+    if (rc != CKR_OK)
+        return rc;
 
     /* Public key: EC point. Private key: curve params + private value + point. */
-    rc = ncmp_tmpl_add(publ_tmpl, CKA_EC_POINT, point, lpoint);
+    rc = ncmp_tmpl_add(publ_tmpl, CKA_EC_POINT, kp.ec_point, kp.ec_point_len);
     if (rc == CKR_OK)
         rc = ncmp_tmpl_add(priv_tmpl, CKA_EC_PARAMS,
                            (const uint8_t *)params->pValue,
                            (uint32_t)params->ulValueLen);
     if (rc == CKR_OK)
-        rc = ncmp_tmpl_add(priv_tmpl, CKA_VALUE, pval, lpval);
+        rc = ncmp_tmpl_add(priv_tmpl, CKA_VALUE, kp.priv, kp.priv_len);
     if (rc == CKR_OK)
-        rc = ncmp_tmpl_add(priv_tmpl, CKA_EC_POINT, point, lpoint);
+        rc = ncmp_tmpl_add(priv_tmpl, CKA_EC_POINT, kp.ec_point,
+                           kp.ec_point_len);
 
     return rc;
 }
@@ -1174,12 +1005,8 @@ CK_RV token_specific_hmac_sign(STDLL_TokData_t *tokdata, SESSION *sess,
     uint32_t hsize = ncmp_hmac_size(mech);
     OBJECT *key_obj = NULL;
     CK_ATTRIBUTE *kv = NULL;
-    NCMP_Message rsp;
-    const uint8_t *parts[3];
-    uint32_t lens[3];
-    uint8_t mechbuf[4];
+    uint32_t out_len = 0;
     CK_RV rc;
-    int nrc;
 
     if (priv == NULL || hsize == 0)
         return CKR_FUNCTION_FAILED;
@@ -1197,20 +1024,15 @@ CK_RV token_specific_hmac_sign(STDLL_TokData_t *tokdata, SESSION *sess,
         return rc;
     }
 
-    ncmp_wr_u32le(mechbuf, mech);
-    parts[0] = mechbuf;    lens[0] = sizeof(mechbuf);
-    parts[1] = kv->pValue; lens[1] = (uint32_t)kv->ulValueLen;
-    parts[2] = in_data;    lens[2] = (uint32_t)in_data_len;
-    nrc = ncmp_client_command_mp(&priv->client, priv->ncmp_slot,
-                                 NCMP_CMD_HMAC_SIGN, parts, lens, 3,
-                                 out_data, (uint32_t)*out_data_len, &rsp);
+    rc = ncmp_crypto_hmac_sign(&priv->client, priv->ncmp_slot, mech, kv->pValue,
+                               (uint32_t)kv->ulValueLen, in_data,
+                               (uint32_t)in_data_len, out_data,
+                               (uint32_t)*out_data_len, &out_len);
     object_put(tokdata, key_obj, TRUE);
 
-    if (nrc != NCMP_OK)
-        return ncmp_err_to_ckr(nrc);
-    if (rsp.header.ack != NCMP_CKR_OK)
-        return (CK_RV)rsp.header.ack;
-    if (rsp.param_len[0] != hsize)
+    if (rc != CKR_OK)
+        return rc;
+    if (out_len != hsize)
         return CKR_FUNCTION_FAILED;
     *out_data_len = hsize;
     return CKR_OK;
@@ -1225,12 +1047,7 @@ CK_RV token_specific_hmac_verify(STDLL_TokData_t *tokdata, SESSION *sess,
     uint32_t mech = (uint32_t)ctx->mech.mechanism;
     OBJECT *key_obj = NULL;
     CK_ATTRIBUTE *kv = NULL;
-    NCMP_Message rsp;
-    const uint8_t *parts[4];
-    uint32_t lens[4];
-    uint8_t mechbuf[4];
     CK_RV rc;
-    int nrc;
 
     if (priv == NULL || ncmp_hmac_size(mech) == 0)
         return CKR_FUNCTION_FAILED;
@@ -1244,19 +1061,13 @@ CK_RV token_specific_hmac_verify(STDLL_TokData_t *tokdata, SESSION *sess,
         return rc;
     }
 
-    ncmp_wr_u32le(mechbuf, mech);
-    parts[0] = mechbuf;    lens[0] = sizeof(mechbuf);
-    parts[1] = kv->pValue; lens[1] = (uint32_t)kv->ulValueLen;
-    parts[2] = in_data;    lens[2] = (uint32_t)in_data_len;
-    parts[3] = signature;  lens[3] = (uint32_t)sig_len;
-    nrc = ncmp_client_command_mp(&priv->client, priv->ncmp_slot,
-                                 NCMP_CMD_HMAC_VERIFY, parts, lens, 4,
-                                 NULL, 0, &rsp);
+    /* Adapter returns CKR_OK or the token's CKR_SIGNATURE_INVALID ACK. */
+    rc = ncmp_crypto_hmac_verify(&priv->client, priv->ncmp_slot, mech,
+                                 kv->pValue, (uint32_t)kv->ulValueLen, in_data,
+                                 (uint32_t)in_data_len, signature,
+                                 (uint32_t)sig_len);
     object_put(tokdata, key_obj, TRUE);
-
-    if (nrc != NCMP_OK)
-        return ncmp_err_to_ckr(nrc);
-    return (CK_RV)rsp.header.ack; /* CKR_OK or CKR_SIGNATURE_INVALID */
+    return rc;
 }
 
 /** Forward an RSA-OAEP op resolving the key handle and modulus/exponent. */
@@ -1270,11 +1081,8 @@ static CK_RV ncmp_rsa_oaep(STDLL_TokData_t *tokdata,
     OBJECT *key_obj = NULL;
     CK_ATTRIBUTE *mod = NULL;
     CK_ATTRIBUTE *exp = NULL;
-    NCMP_Message rsp;
-    const uint8_t *parts[3];
-    uint32_t lens[3];
+    uint32_t out_bytes = 0;
     CK_RV rc;
-    int nrc;
 
     rc = object_mgr_find_in_map1(tokdata, ctx->key, &key_obj, READ_LOCK);
     if (rc != CKR_OK)
@@ -1296,21 +1104,13 @@ static CK_RV ncmp_rsa_oaep(STDLL_TokData_t *tokdata,
         goto out;
     }
 
-    parts[0] = mod->pValue; lens[0] = (uint32_t)mod->ulValueLen;
-    parts[1] = exp->pValue; lens[1] = (uint32_t)exp->ulValueLen;
-    parts[2] = in;          lens[2] = (uint32_t)in_len;
-    nrc = ncmp_client_command_mp(&priv->client, priv->ncmp_slot, opcode,
-                                 parts, lens, 3, out, (uint32_t)*out_len, &rsp);
-    if (nrc != NCMP_OK) {
-        rc = ncmp_err_to_ckr(nrc);
-        goto out;
-    }
-    if (rsp.header.ack != NCMP_CKR_OK) {
-        rc = (CK_RV)rsp.header.ack;
-        goto out;
-    }
-    *out_len = rsp.param_len[0];
-    rc = CKR_OK;
+    rc = ncmp_crypto_rsa_oaep(&priv->client, priv->ncmp_slot, opcode,
+                              mod->pValue, (uint32_t)mod->ulValueLen,
+                              exp->pValue, (uint32_t)exp->ulValueLen, in,
+                              (uint32_t)in_len, out, (uint32_t)*out_len,
+                              &out_bytes);
+    if (rc == CKR_OK)
+        *out_len = out_bytes;
 
 out:
     object_put(tokdata, key_obj, TRUE);
@@ -1362,12 +1162,9 @@ CK_RV token_specific_rsa_pss_sign(STDLL_TokData_t *tokdata, SESSION *sess,
     OBJECT *key_obj = NULL;
     CK_ATTRIBUTE *mod = NULL;
     CK_ATTRIBUTE *exp = NULL;
-    NCMP_Message rsp;
-    const uint8_t *parts[3];
-    uint32_t lens[3];
+    uint32_t out_len = 0;
     CK_ULONG modlen;
     CK_RV rc;
-    int nrc;
 
     UNUSED(sess);
 
@@ -1392,26 +1189,18 @@ CK_RV token_specific_rsa_pss_sign(STDLL_TokData_t *tokdata, SESSION *sess,
         goto out;
     }
 
-    parts[0] = mod->pValue; lens[0] = (uint32_t)modlen;
-    parts[1] = exp->pValue; lens[1] = (uint32_t)exp->ulValueLen;
-    parts[2] = in_data;     lens[2] = (uint32_t)in_data_len;
-    nrc = ncmp_client_command_mp(&priv->client, priv->ncmp_slot,
-                                 NCMP_CMD_RSA_SIGN, parts, lens, 3,
-                                 sig, (uint32_t)*sig_len, &rsp);
-    if (nrc != NCMP_OK) {
-        rc = ncmp_err_to_ckr(nrc);
+    rc = ncmp_crypto_rsa_sign(&priv->client, priv->ncmp_slot, mod->pValue,
+                              (uint32_t)modlen, exp->pValue,
+                              (uint32_t)exp->ulValueLen, in_data,
+                              (uint32_t)in_data_len, sig, (uint32_t)*sig_len,
+                              &out_len);
+    if (rc != CKR_OK)
         goto out;
-    }
-    if (rsp.header.ack != NCMP_CKR_OK) {
-        rc = (CK_RV)rsp.header.ack;
-        goto out;
-    }
-    if (rsp.param_len[0] != modlen) {
+    if (out_len != modlen) {
         rc = CKR_FUNCTION_FAILED;
         goto out;
     }
     *sig_len = modlen;
-    rc = CKR_OK;
 
 out:
     object_put(tokdata, key_obj, TRUE);
@@ -1427,11 +1216,7 @@ CK_RV token_specific_rsa_pss_verify(STDLL_TokData_t *tokdata, SESSION *sess,
     OBJECT *key_obj = NULL;
     CK_ATTRIBUTE *mod = NULL;
     CK_ATTRIBUTE *exp = NULL;
-    NCMP_Message rsp;
-    const uint8_t *parts[4];
-    uint32_t lens[4];
     CK_RV rc;
-    int nrc;
 
     UNUSED(sess);
 
@@ -1449,14 +1234,11 @@ CK_RV token_specific_rsa_pss_verify(STDLL_TokData_t *tokdata, SESSION *sess,
     if (rc != CKR_OK)
         goto out;
 
-    parts[0] = mod->pValue; lens[0] = (uint32_t)mod->ulValueLen;
-    parts[1] = exp->pValue; lens[1] = (uint32_t)exp->ulValueLen;
-    parts[2] = in_data;     lens[2] = (uint32_t)in_data_len;
-    parts[3] = signature;   lens[3] = (uint32_t)sig_len;
-    nrc = ncmp_client_command_mp(&priv->client, priv->ncmp_slot,
-                                 NCMP_CMD_RSA_VERIFY, parts, lens, 4,
-                                 NULL, 0, &rsp);
-    rc = (nrc != NCMP_OK) ? ncmp_err_to_ckr(nrc) : (CK_RV)rsp.header.ack;
+    rc = ncmp_crypto_rsa_verify(&priv->client, priv->ncmp_slot, mod->pValue,
+                                (uint32_t)mod->ulValueLen, exp->pValue,
+                                (uint32_t)exp->ulValueLen, in_data,
+                                (uint32_t)in_data_len, signature,
+                                (uint32_t)sig_len);
 
 out:
     object_put(tokdata, key_obj, TRUE);
@@ -1470,26 +1252,20 @@ CK_RV token_specific_dh_pkcs_derive(STDLL_TokData_t *tokdata, CK_BYTE *secret,
                                     CK_ULONG prime_len)
 {
     struct ncmp_private_data *priv = tokdata->private_data;
-    NCMP_Message rsp;
-    const uint8_t *parts[3];
-    uint32_t lens[3];
-    int nrc;
+    uint32_t out_len = 0;
+    CK_RV rc;
 
     if (priv == NULL || secret == NULL)
         return CKR_FUNCTION_FAILED;
 
     /* Raw values (no object): [prime | own private | peer public]. */
-    parts[0] = prime;    lens[0] = (uint32_t)prime_len;
-    parts[1] = priv_val; lens[1] = (uint32_t)priv_len;
-    parts[2] = pub;      lens[2] = (uint32_t)pub_len;
-    nrc = ncmp_client_command_mp(&priv->client, priv->ncmp_slot,
-                                 NCMP_CMD_DH_DERIVE, parts, lens, 3,
-                                 secret, (uint32_t)*secret_len, &rsp);
-    if (nrc != NCMP_OK)
-        return ncmp_err_to_ckr(nrc);
-    if (rsp.header.ack != NCMP_CKR_OK)
-        return (CK_RV)rsp.header.ack;
-    *secret_len = rsp.param_len[0];
+    rc = ncmp_crypto_dh_derive(&priv->client, priv->ncmp_slot, prime,
+                               (uint32_t)prime_len, priv_val, (uint32_t)priv_len,
+                               pub, (uint32_t)pub_len, secret,
+                               (uint32_t)*secret_len, &out_len);
+    if (rc != CKR_OK)
+        return rc;
+    *secret_len = out_len;
     return CKR_OK;
 }
 
@@ -1500,27 +1276,21 @@ CK_RV token_specific_ecdh_pkcs_derive(STDLL_TokData_t *tokdata, CK_BYTE *priv_va
                                       CK_ULONG oid_len, CK_BBOOL flag)
 {
     struct ncmp_private_data *priv = tokdata->private_data;
-    NCMP_Message rsp;
-    const uint8_t *parts[3];
-    uint32_t lens[3];
-    int nrc;
+    uint32_t out_len = 0;
+    CK_RV rc;
 
     UNUSED(flag);
 
     if (priv == NULL || secret == NULL)
         return CKR_FUNCTION_FAILED;
 
-    parts[0] = oid;      lens[0] = (uint32_t)oid_len;
-    parts[1] = priv_val; lens[1] = (uint32_t)priv_len;
-    parts[2] = pub;      lens[2] = (uint32_t)pub_len;
-    nrc = ncmp_client_command_mp(&priv->client, priv->ncmp_slot,
-                                 NCMP_CMD_ECDH_DERIVE, parts, lens, 3,
-                                 secret, (uint32_t)*secret_len, &rsp);
-    if (nrc != NCMP_OK)
-        return ncmp_err_to_ckr(nrc);
-    if (rsp.header.ack != NCMP_CKR_OK)
-        return (CK_RV)rsp.header.ack;
-    *secret_len = rsp.param_len[0];
+    rc = ncmp_crypto_ecdh_derive(&priv->client, priv->ncmp_slot, oid,
+                                 (uint32_t)oid_len, priv_val, (uint32_t)priv_len,
+                                 pub, (uint32_t)pub_len, secret,
+                                 (uint32_t)*secret_len, &out_len);
+    if (rc != CKR_OK)
+        return rc;
+    *secret_len = out_len;
     return CKR_OK;
 }
 

@@ -46,6 +46,22 @@ int test_client_hmac_forward(void);
 int test_client_rsa_oaep_forward(void);
 int test_client_dh_derive_forward(void);
 int test_client_ecdh_derive_forward(void);
+/* Crypto marshalling adapter (ncmp_crypto): every op forwarded to the mock. */
+int test_crypto_rng(void);
+int test_crypto_digest(void);
+int test_crypto_digest_multipart(void);
+int test_crypto_aes_ecb(void);
+int test_crypto_aes_cbc(void);
+int test_crypto_aes_stream(void);
+int test_crypto_aes_gcm(void);
+int test_crypto_rsa(void);
+int test_crypto_rsa_oaep(void);
+int test_crypto_ec(void);
+int test_crypto_hmac(void);
+int test_crypto_rsa_keygen(void);
+int test_crypto_ec_keygen(void);
+int test_crypto_dh_derive(void);
+int test_crypto_ecdh_derive(void);
 
 int main(void)
 {
@@ -83,6 +99,22 @@ int main(void)
     NCMP_RUN(test_client_rsa_oaep_forward);
     NCMP_RUN(test_client_dh_derive_forward);
     NCMP_RUN(test_client_ecdh_derive_forward);
+
+    NCMP_RUN(test_crypto_rng);
+    NCMP_RUN(test_crypto_digest);
+    NCMP_RUN(test_crypto_digest_multipart);
+    NCMP_RUN(test_crypto_aes_ecb);
+    NCMP_RUN(test_crypto_aes_cbc);
+    NCMP_RUN(test_crypto_aes_stream);
+    NCMP_RUN(test_crypto_aes_gcm);
+    NCMP_RUN(test_crypto_rsa);
+    NCMP_RUN(test_crypto_rsa_oaep);
+    NCMP_RUN(test_crypto_ec);
+    NCMP_RUN(test_crypto_hmac);
+    NCMP_RUN(test_crypto_rsa_keygen);
+    NCMP_RUN(test_crypto_ec_keygen);
+    NCMP_RUN(test_crypto_dh_derive);
+    NCMP_RUN(test_crypto_ecdh_derive);
 
     fprintf(stderr, "\n%s (%d failure%s)\n",
             failures ? "SUITE FAILED" : "SUITE PASSED",

@@ -20,7 +20,7 @@
 
 /** Human-readable token/manufacturer identity (padded/space-filled at use). */
 #define NCMP_TOKEN_LABEL      "Token NCMP"
-#define NCMP_TOKEN_MANUF      "OpenCryptoki-NCMP"
+#define NCMP_TOKEN_MANUF      "DYST"
 #define NCMP_TOKEN_MODEL      "FX3-USB"
 
 #endif /* NCMP_TOK_STRUCT_H */

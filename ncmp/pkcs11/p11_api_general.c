@@ -123,7 +123,7 @@ CK_RV C_GetInfo(CK_INFO_PTR pInfo)
     pInfo->libraryVersion.minor = P11_LIB_MINOR;
     pInfo->flags = 0;
     p11_pad(pInfo->manufacturerID, sizeof(pInfo->manufacturerID),
-            "OpenCryptoki NCMP");
+            "DYST");
     p11_pad(pInfo->libraryDescription, sizeof(pInfo->libraryDescription),
             "NCMP FX3 USB token library");
     return CKR_OK;

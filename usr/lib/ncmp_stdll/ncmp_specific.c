@@ -34,7 +34,7 @@
  * Token identity globals referenced by the common layer (key.c, utility.c).
  * Every STDLL must define these; see soft_specific.c for the pattern.
  */
-const char manuf[] = "IBM";
+const char manuf[] = "DYST";
 const char model[] = "NCMP";
 const char descr[] = "NCMP USB Token";
 const char label[] = "ncmptok";

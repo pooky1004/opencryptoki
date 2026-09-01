@@ -71,7 +71,7 @@ CK_RV C_GetSlotInfo(CK_SLOT_ID slotID, CK_SLOT_INFO_PTR pInfo)
     p11_pad(pInfo->slotDescription, sizeof(pInfo->slotDescription),
             p11_slotmap_label(slotID));
     p11_pad(pInfo->manufacturerID, sizeof(pInfo->manufacturerID),
-            "Cypress EZ-USB FX3");
+            "DYST");
     pInfo->flags = CKF_HW_SLOT | CKF_REMOVABLE_DEVICE;
     if (rv == CKR_OK)
         pInfo->flags |= CKF_TOKEN_PRESENT;
@@ -107,7 +107,7 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slotID, CK_TOKEN_INFO_PTR pInfo)
     memset(pInfo, 0, sizeof(*pInfo));
     p11_pad(pInfo->label, sizeof(pInfo->label), p11_slotmap_label(slotID));
     p11_pad(pInfo->manufacturerID, sizeof(pInfo->manufacturerID),
-            "Cypress EZ-USB FX3");
+            "DYST");
     p11_pad(pInfo->model, sizeof(pInfo->model), "NCMP");
     p11_pad(pInfo->serialNumber, sizeof(pInfo->serialNumber), "NCMP00000001");
     pInfo->flags = CKF_RNG | CKF_LOGIN_REQUIRED;

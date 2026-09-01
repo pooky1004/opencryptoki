@@ -50,16 +50,19 @@ int ncmp_transport_open(uint32_t slot_id, ncmp_transport_t **out);
 int ncmp_transport_send(ncmp_transport_t *t, const uint8_t *frame, size_t len);
 
 /**
- * @brief Receive one message using the mandatory two-step read.
+ * @brief Receive one message with a single-shot read into a max-size buffer.
  *
- * Step 1 reads the fixed header (frame prefix + NCMP_Header); step 2 reads
- * exactly payload_len more bytes. The assembled frame is written to @p buf.
+ * The whole frame is pulled in ONE transfer into @p buf and then parsed; the
+ * frame prefix + NCMP_Header and its payload are never read in separate calls,
+ * because the FX3 bulk IN endpoint delivers one frame per transfer. Pass a
+ * buffer at least NCMP_MAX_FRAME_SIZE so any valid frame fits in one read.
  *
  * @param t       Transport handle.
- * @param buf     Destination buffer (>= NCMP_MAX_FRAME_SIZE recommended).
+ * @param buf     Destination buffer (must be >= NCMP_MAX_FRAME_SIZE).
  * @param buf_len Capacity of @p buf.
- * @param out_len Total assembled frame length on success.
- * @return NCMP_OK, NCMP_ERR_TRUNCATED, NCMP_ERR_TIMEOUT, or NCMP_ERR_USB.
+ * @param out_len Total received frame length on success.
+ * @return NCMP_OK, NCMP_ERR_TRUNCATED, NCMP_ERR_PAYLOAD, NCMP_ERR_TIMEOUT,
+ *         or NCMP_ERR_USB.
  */
 int ncmp_transport_recv(ncmp_transport_t *t, uint8_t *buf, size_t buf_len,
                         size_t *out_len);

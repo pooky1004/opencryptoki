@@ -6,9 +6,11 @@
  *
  * Each slot corresponds to one physical FX3 board (its own USB interface), so
  * a per-slot transport handle owns one libusb device handle and its bulk
- * IN/OUT endpoints. Receive uses the mandatory two-step read:
- *   Step 1: read exactly (frame prefix + NCMP_Header) bytes.
- *   Step 2: parse payload_len, then read exactly payload_len more bytes.
+ * IN/OUT endpoints. Receive uses a single-shot read: the whole frame is pulled
+ * in ONE bulk transfer into a max-size buffer (NCMP_MAX_FRAME_SIZE) and then
+ * parsed. The FX3 bulk IN endpoint delivers one response per transfer
+ * (terminated by a short packet / ZLP), so a header-first then remainder read
+ * would split that transfer and desynchronise the byte stream.
  *
  * The libusb body compiles only when <libusb.h> is available; otherwise a
  * stub is built so the tree still configures without the -dev package (the
@@ -185,11 +187,44 @@ int ncmp_transport_send(ncmp_transport_t *t, const uint8_t *frame, size_t len)
     return ncmp_bulk_exact(t, t->ep_out, (uint8_t *)frame, len);
 }
 
+/**
+ * Read one complete frame from the bulk IN endpoint in a single transfer.
+ *
+ * The FX3 firmware emits each response as one bulk transfer, so the host posts
+ * one read spanning the whole max-size buffer and takes whatever the device
+ * delivers. libusb ends the transfer on a short packet (or a ZLP when the frame
+ * length is a multiple of the endpoint's max packet size), returning the full
+ * frame length in @p *out_len. The buffer must be at least one full frame
+ * (NCMP_MAX_FRAME_SIZE); an oversized transfer is reported as LIBUSB_ERROR_
+ * OVERFLOW and mapped to NCMP_ERR_PAYLOAD.
+ */
+static int ncmp_bulk_read_frame(ncmp_transport_t *t, uint8_t *buf,
+                                size_t buf_len, size_t *out_len)
+{
+    int cap = buf_len > INT32_MAX ? INT32_MAX : (int)buf_len;
+    int transferred = 0;
+    int rc = libusb_bulk_transfer(t->dev, t->ep_in, buf, cap, &transferred,
+                                  NCMP_USB_TIMEOUT_MS);
+
+    if (rc == LIBUSB_ERROR_TIMEOUT && transferred == 0)
+        return NCMP_ERR_TIMEOUT;
+    if (rc == LIBUSB_ERROR_OVERFLOW)
+        return NCMP_ERR_PAYLOAD;
+    if (rc != 0 && rc != LIBUSB_ERROR_TIMEOUT)
+        return NCMP_ERR_USB;
+    if (transferred <= 0)
+        return NCMP_ERR_USB;
+
+    *out_len = (size_t)transferred;
+    return NCMP_OK;
+}
+
 int ncmp_transport_recv(ncmp_transport_t *t, uint8_t *buf, size_t buf_len,
                         size_t *out_len)
 {
     const size_t fixed = NCMP_FRAME_PREFIX_SIZE + NCMP_HEADER_WIRE_SIZE;
     NCMP_Header hdr;
+    size_t got = 0;
     int rc;
 
     if (!t || !buf || !out_len)
@@ -197,24 +232,26 @@ int ncmp_transport_recv(ncmp_transport_t *t, uint8_t *buf, size_t buf_len,
     if (buf_len < fixed)
         return NCMP_ERR_TRUNCATED;
 
-    /* Step 1: read the fixed header (frame prefix + NCMP_Header). */
-    rc = ncmp_bulk_exact(t, t->ep_in, buf, fixed);
-    if (rc != NCMP_OK)
-        return rc;
-    rc = ncmp_wire_decode_header(buf, fixed, &hdr);
+    /*
+     * Single-shot read: pull the entire frame in ONE bulk transfer into the
+     * caller's max-size buffer, then parse. The FX3 bulk IN endpoint delivers a
+     * whole frame per transfer, so the header and its payload cannot be split
+     * across two reads without losing byte-stream alignment.
+     */
+    rc = ncmp_bulk_read_frame(t, buf, buf_len, &got);
     if (rc != NCMP_OK)
         return rc;
 
-    /* Step 2: read exactly payload_len more bytes to complete the frame. */
-    if (buf_len < fixed + hdr.payload_len)
+    /* Parse the header from what arrived and confirm the frame is complete. */
+    if (got < fixed)
         return NCMP_ERR_TRUNCATED;
-    if (hdr.payload_len > 0) {
-        rc = ncmp_bulk_exact(t, t->ep_in, buf + fixed, hdr.payload_len);
-        if (rc != NCMP_OK)
-            return rc;
-    }
+    rc = ncmp_wire_decode_header(buf, got, &hdr);
+    if (rc != NCMP_OK)
+        return rc;
+    if (got != fixed + hdr.payload_len)
+        return NCMP_ERR_TRUNCATED;
 
-    *out_len = fixed + hdr.payload_len;
+    *out_len = got;
     return NCMP_OK;
 }
 

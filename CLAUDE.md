@@ -25,7 +25,7 @@ hook into, `pkcsslotd` — it is a separate pipe/proxy daemon.
 - **C — `mock_token_ncmp`** (`ncmp/mock/`): SW emulator of the FX3 datapath;
   enabled with `-DENABLE_MOCK_TOKEN=ON`.
 - **D — tests** (`ncmp/tests/`): C suite for APIs, concurrency, limits, stats,
-  2-step read, robust-mutex recovery, ACK errors.
+  single-shot frame read, robust-mutex recovery, ACK errors.
 - Shared primitives: `ncmp/common/`, public headers `ncmp/include/ncmp/`.
 
 ## Tech stack
@@ -102,8 +102,9 @@ Updated by the comm thread immediately before each USB send:
 payload_len}` (20B), then `param_len[8]` (32B), then params 1..8.
 `ack` carries a `CKR_*` code in both directions. Invariants:
 `frame_len == 20 + payload_len` and
-`payload_len == 32 + sum(param_len[i])`. Receive is **two-step**: read the
-fixed header, parse `payload_len`, then read exactly that many payload bytes.
+`payload_len == 32 + sum(param_len[i])`. The FX3 bulk IN endpoint is read
+**single-shot**: one transfer fills a max-size buffer (`NCMP_MAX_FRAME_SIZE`),
+then the frame is parsed - never a header-then-remainder read.
 See `ncmp/include/ncmp/ncmp_wire.h`.
 
 ## Coding style

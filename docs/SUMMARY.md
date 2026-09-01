@@ -30,7 +30,7 @@
 
 ### 2.1 인프라 & 데몬 (STEP ①~④)
 - **와이어 프로토콜**: 4바이트 정렬, frame_len + `NCMP_Header`(20B) + `param_len[8]` +
-  payload. `_Static_assert`로 헤더 20B 고정. **2단계 수신**(헤더→payload_len→본문).
+  payload. `_Static_assert`로 헤더 20B 고정. **단발 수신**(최대 버퍼로 프레임 1개 한 번에 읽고 파싱).
 - **공유 메모리(SHM)**: `shm_open`/`mmap`, magic/version 검증. **원시 포인터 금지** —
   전부 오프셋/인덱스(`ncmp_shm_ptr`). 슬롯당 per-entry 요청/응답 버퍼 풀.
 - **동시성**: MPSC CAS 큐(`FREE→CLAIMED→POSTED→SENT→DONE→FREE`, 타임아웃 `ABANDONED`),
@@ -41,7 +41,7 @@
 - **IPC**: UNIX 소켓 HELLO/ATTACH 핸드셰이크(제어) + SHM(대량 데이터). conn_thread 서버.
 - **STDLL 클라이언트**: connect+attach, enqueue/wait 재사용, `NCMP_ERR_*`→`CKR_*` 매핑.
 - **libusb 실전송**: `__has_include(<libusb.h>)` 가드(실구현/스텁 자동), 디바이스 열거·
-  claim·bulk R/W·2단계 수신. **VID/PID/EP는 상수 + 펌웨어 확정 시 조정 TODO**.
+  claim·bulk R/W·단발 프레임 수신. **VID/PID/EP는 상수 + 펌웨어 확정 시 조정 TODO**.
 - **daemon 라이프사이클**: 시그널→SHM→probe→슬롯별 comm_thread + conn_thread→정상 종료.
   mock/real `ncmpd` 모두 기동·SIGTERM 종료 실측.
 

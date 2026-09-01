@@ -43,7 +43,7 @@
 ### 1.3 공개 헤더 (`ncmp/include/ncmp/`, 7종) — 저수준 가이드라인을 코드로 인코딩
 - `ncmp_limits.h` — 4 slots / 8 sessions / 32 total, 파라미터 32KB·페이로드
   40KB, FX3 버퍼(Rx 64KB/Tx 128KB)·컨테이너(64KB×4)·기본 in-flight 상한.
-- `ncmp_wire.h` — `NCMP_Header`, param_len[8], 4바이트 정렬, 불변식, 2단계 수신.
+- `ncmp_wire.h` — `NCMP_Header`, param_len[8], 4바이트 정렬, 불변식, 단발 수신.
 - `ncmp_queue.h` — MPSC 링, CAS 상태머신, `ncmp_qentry_cas()`.
 - `ncmp_shm.h` — `NCMP_ShmHeader`/`NCMP_Slot`/`NCMP_SlotStats`, `ncmp_shm_ptr()`.
 - `ncmp_mutex.h` — robust 프로세스 공유 뮤텍스 래퍼 계약.
@@ -52,7 +52,7 @@
 
 ### 1.4 모듈 스캐폴드 (4 모듈 + common)
 - **Module A `ncmp/daemon/`**: `main.c`(시그널·라이프사이클), `conn_thread.c`,
-  `comm_thread.c`(in-flight 통계 로직 포함), `usb_transport.c`(2단계 수신 골격).
+  `comm_thread.c`(in-flight 통계 로직 포함), `usb_transport.c`(단발 수신 골격).
 - **Module B `ncmp/stdll/`**: `ncmp_specific.c`(토큰 SPI seam),
   `ncmp_client.c`(claim/post/wait), `ncmp_session.c`, `tok_struct.h`.
 - **Module C `ncmp/mock/`**: `mock_main.c`, `fx3_dma.c`, `container.c`(mover),
@@ -98,8 +98,8 @@
   `NCMP_MOCK_CMD_FAIL_BIT` 시 `ack=CKR_FUNCTION_FAILED` 반환. — STEP ③
 - **libusb 실전송**(`daemon/usb_transport.c`): `__has_include(<libusb.h>)` 가드로
   실 구현/스텁 자동 선택. `ncmp_transport_probe`(VID/PID 열거→슬롯 매핑),
-  `_open`(nth FX3 device open+claim), `_send`/`_recv`(bulk exact 루프 + **2단계
-  수신** 실제 read 2회), `_close`. VID/PID/EP는 상수 + 펌웨어 확정 시 조정 주석. — STEP ④
+  `_open`(nth FX3 device open+claim), `_send`(bulk exact 루프)/`_recv`(**단발
+  수신**: 최대 버퍼로 프레임 1개 한 번에 read), `_close`. VID/PID/EP는 상수 + 펌웨어 확정 시 조정 주석. — STEP ④
 - **transport 열거 추상화**: `ncmp_transport_probe()`를 mock/real 양쪽에 구현
   (mock=1 슬롯, real=매칭 USB 수, cap 4). — STEP ④
 - **daemon 라이프사이클**(`daemon/main.c`): 시그널 설치→SHM create→probe→슬롯별
@@ -287,7 +287,7 @@
       슬롯 비트마스크 응답, 정상 종료. — STEP ③
 - [x] `comm_thread`: dispatch/drain 파이프라인, in-flight 예약/해제, `sequence_id`
       매칭, ABANDONED 응답 폐기, 종료 시 통계 자가 리포트. — STEP ②
-- [x] `usb_transport`: libusb open/claim/endpoint, bulk R/W, 2단계 수신 실제
+- [x] `usb_transport`: libusb open/claim/endpoint, bulk R/W, 단발 프레임 수신 실제
       read 2회, `ncmp_transport_probe` 열거. — STEP ④
       (실제 FX3 하드웨어 브링업/VID·PID·EP 확정은 하드웨어 확보 후.)
 
@@ -376,7 +376,7 @@ cd ncmp && gcc -std=c11 -Wall -Wextra -Wshadow -D_GNU_SOURCE -Iinclude -Itests \
    (`test_inflight_stats`/`test_concurrency` 실측화). ✅ 완료
 3. [x] STDLL `ncmp_client_exec` 왕복: IPC 핸드셰이크 + SHM attach +
    `ncmp_slot_enqueue`/`wait` 재사용, `NCMP_ERR_*`→`CKR_*` 매핑, ACK 오류 전파. ✅ 완료
-4. [x] libusb 실전송(`usb_transport.c`, 2단계 수신) + `daemon/main.c`
+4. [x] libusb 실전송(`usb_transport.c`, 단발 프레임 수신) + `daemon/main.c`
    라이프사이클 + `ncmp_transport_probe`. mock/real ncmpd 기동·종료 확인. ✅ 완료
 5. [x] opencryptoki 통합: `usr/lib/ncmp_stdll/` + autotools `--enable-ncmptok`
    → `libpkcs11_ncmp.so` 실제 빌드·심볼 검증. ✅ 완료

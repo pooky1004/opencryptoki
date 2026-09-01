@@ -97,9 +97,11 @@ Token NCMP는 Cypress EZ-USB FX3(CYUSB3KIT-003) 보드를 USB로 연결한 물�
 - `ack`는 요청·응답 양방향에서 `CKR_*` 상태를 전달합니다.
 - 불변식: `frame_len == 20 + payload_len`,
   `payload_len == 32 + Σ param_len[i]`.
-- **2단계 수신**(`usb_transport_recv`): ① 고정 헤더를 읽고 ② `payload_len`을
-  파싱한 뒤 정확히 그만큼 재수신하여 조립. USB 패킷 경계와 무관하게 프레이밍을
-  보장합니다.
+- **단발 수신**(`usb_transport_recv`): FX3 벌크 IN은 프레임 1개를 전송 1회로
+  내려주므로, 최대 크기 버퍼(`NCMP_MAX_FRAME_SIZE`)로 **한 번에 읽은** 뒤
+  헤더를 파싱해 `frame_len == 4 + 20 + payload_len` 일치 여부로 완전성을
+  검증합니다. 헤더 먼저·나머지 나중의 분할 읽기는 하지 않습니다(전송 경계가
+  갈라져 스트림 정렬이 깨짐).
 - 헤더/구조체 정의는 `ncmp/include/ncmp/ncmp_wire.h`.
 
 ---
@@ -169,13 +171,19 @@ FREE → CLAIMED → POSTED → SENT → DONE → FREE      (정상)
 
 ## 9. 데이터 흐름 (요청 1건)
 
+> 이 절은 **STDLL → ncmpd → USB** 전송 1홉을 다룬다. 그 위, 애플리케이션의
+> `C_Encrypt` 호출이 API 층 → `new_host`(SC_\*) → `token_specific` 를 거쳐 아래
+> 1번 단계까지 도달하는 전체 호출 흐름은
+> [`stdll-call-flow.md`](stdll-call-flow.md) 참고.
+
 1. STDLL: `ncmp_wire_validate_params`(≤32KB/≤40KB) → 요청 인코딩.
 2. `ncmp_queue_claim` → 엔트리의 `req_off` 버퍼에 프레임 기록 →
    `ncmp_queue_post`.
 3. `comm_thread`: POSTED 발견 → SENT 전이 → in-flight 예약(통계 갱신) →
    `usb_transport_send`.
-4. `usb_transport_recv` 2단계 수신 → `sequence_id`로 엔트리 매칭 → in-flight
-   해제 → `rsp_off`에 응답+`ack` 기록 → DONE 전이.
+4. `usb_transport_recv` 단발 수신(최대 버퍼로 프레임 1개 한 번에 읽기) →
+   `sequence_id`로 엔트리 매칭 → in-flight 해제 → `rsp_off`에 응답+`ack` 기록
+   → DONE 전이.
 5. STDLL: 엔트리 DONE 관측 → 응답 디코드 → `ack`(CKR_*) 반환 → DONE→FREE.
 
 ---
@@ -191,7 +199,7 @@ ctest --test-dir build --output-on-failure
 - `ENABLE_MOCK_TOKEN=ON`이면 Module C를 빌드하고 데몬 전송을 목 루프백으로
   전환(`NCMP_USE_MOCK_TRANSPORT`). OFF면 libusb-1.0을 요구합니다.
 - 테스트 커버리지(Module D): 와이어 경계값, CAS 큐 전이, 세션 상한,
-  robust mutex 크래시 복구, in-flight 통계, 멀티스레드 동시성, 2단계 수신,
+  robust mutex 크래시 복구, in-flight 통계, 멀티스레드 동시성, 단발 프레임 수신,
   ACK 오류 전파.
 
 ---

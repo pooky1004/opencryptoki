@@ -8,7 +8,7 @@
 | [`SUMMARY.md`](SUMMARY.md) | **먼저 읽기**. 한 일·남은 과제·현황 지표·빌드/테스트 명령 요약본. |
 | [`STATUS.md`](STATUS.md) | 단계별 상세 진행 로그(무엇을 어떻게 구현·검증했는지). |
 | [`architecture.md`](architecture.md) | 설계 세부가 필요할 때. 시스템 개요, 와이어 프로토콜, SHM, 동시성, in-flight 통계, 데이터 흐름, opencryptoki 통합. |
-| [`stdll-call-flow.md`](stdll-call-flow.md) | 표준 opencryptoki 경로(자체 프로바이더 미사용) 추적. `C_Initialize`→`C_OpenSession`→`C_EncryptInit`→`C_Encrypt`가 API층→new_host(SC_*)→token_specific→ncmpd로 내려가는 호출 흐름을 파일:라인 단위로. |
+| [`stdll-call-flow.md`](stdll-call-flow.md) | 표준 opencryptoki 경로 추적. `C_Initialize`→`C_OpenSession`→`C_EncryptInit`→`C_Encrypt`가 API층→new_host(SC_*)→token_specific→ncmpd로 내려가는 호출 흐름을 파일:라인 단위로. |
 
 ## 핵심 소스 진입점
 
@@ -22,13 +22,11 @@
 | 데몬 comm/통계 | `ncmp/daemon/comm_thread.c` |
 | 단발 USB 수신(최대 버퍼) | `ncmp/daemon/usb_transport.c` |
 | STDLL 세션 상한 | `ncmp/stdll/ncmp_session.c` |
-| **자체 PKCS#11 프로바이더** | `ncmp/pkcs11/` (p11_*.c) |
-| 프로바이더 내부 상태/헤더 | `ncmp/pkcs11/p11_provider.h`, `p11_state.c` |
-| 함수테이블(2.40/3.0/3.2) | `ncmp/pkcs11/p11_functionlist.c` |
-| 벤더 인터페이스(공개 헤더) | `ncmp/pkcs11/ncmp_vendor.h`, `p11_vendor.c` |
-| 슬롯 매핑 | `ncmp/pkcs11/p11_slotmap.c`, `usr/lib/ncmp_stdll/ncmptok.conf` |
+| STDLL 크립토 훅(token_specific) | `ncmp/stdll/ncmp_specific.c` |
+| 슬롯 매핑 | `usr/lib/ncmp_stdll/ncmptok.conf` |
+| 벤더 와이어 opcode(0x0100+) | `ncmp/include/ncmp/ncmp_cmd.h`, `ncmp/mock/mcu_scheduler.c` |
 | 목 데이터패스 | `ncmp/mock/` |
-| 테스트 스위트 | `ncmp/tests/` (PKCS#11 API: `test_pkcs11_api.c`) |
+| 테스트 스위트 | `ncmp/tests/` |
 
 ## 작업 마무리 규약
 작업을 끝낼 때마다 진행 상황과 남은 과제를 `.md` 상태 파일로 요약할 것을

@@ -1,13 +1,8 @@
 # STDLL 호출 흐름 — 표준 opencryptoki 경로
 
-자체 PKCS#11 프로바이더(`ncmp/pkcs11/`)를 **쓰지 않을 때** 애플리케이션이
-세션을 열고 암호화를 수행하는 전 구간을 코드 레벨로 추적한 문서다. 앱은
-`libpkcs11_ncmp.so`를 직접 `dlopen` 하지 않고 **opencryptoki 표준 3층 구조**를
-탄다.
-
-> 대비: 자체 프로바이더 경로는 [`ncmp-provider`](../ncmp/pkcs11/) 참고. 그쪽은
-> 아래 API 층 + STDLL 층을 하나로 합쳐 자기 `C_*` 안에서 바로 ncmpd로
-> forward 한다 (함수테이블 2.40/3.0/3.2 + NCMP Vendor 인터페이스 노출).
+애플리케이션이 세션을 열고 암호화를 수행하는 전 구간을 코드 레벨로 추적한
+문서다. 앱은 **opencryptoki 표준 3층 구조**(API 층 → STDLL(new_host) →
+token_specific)를 타고 `libpkcs11_ncmp.so`에 도달한다.
 
 ## 1. 전체 그림
 
@@ -135,19 +130,7 @@ comm 스레드 → USB(또는 mock)로 전달한다. 응답의 `ack`(CKR_\*)를 
 `ckm_ → mech_aes → encr_mgr → SC_Encrypt → ST_Encrypt → C_Encrypt` 로 전파되어
 앱에 리턴된다.
 
-## 6. 표준 경로 vs 자체 프로바이더 요약
-
-| 구분 | 표준 STDLL 경로 (이 문서) | 자체 프로바이더 (`ncmp/pkcs11/`) |
-|------|---------------------------|-----------------------------------|
-| 진입 | `libopencryptoki.so` 링크 → `pkcsslotd` 경유 로드 | 앱이 `.so` 직접 `dlopen` |
-| 함수테이블 | API 층 `FcnList`(SC_\*) + `token_specific` 훅, 2단 | `C_GetFunctionList`/`C_GetInterface` 로 직접 노출 |
-| 버전 매핑 | opencryptoki 공통이 담당 | 2.40 / 3.0 / 3.2 + NCMP Vendor 테이블 자체 제공 |
-| 상태 | `STDLL_TokData_t`(프로세스 로컬) | per-process 상태 + SHM robust 세션 카운터 |
-| pkcsslotd | 초기화 시 구성/SHM 생성 | 불필요(직접 ncmpd 접속) |
-| 슬롯 매핑 | `ncmptok.conf` → `priv->ncmp_slot` | `ncmptok.conf` / `NCMP_SLOT_BASE` |
-| 공통 forward | `ncmp_client_command_mp` (ncmp/stdll) | 동일 전송층 공유 |
-
-## 7. 관련 소스 진입점
+## 6. 관련 소스 진입점
 
 | 관심사 | 파일:라인 |
 |--------|-----------|

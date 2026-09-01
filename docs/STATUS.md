@@ -394,62 +394,14 @@ cd ncmp && gcc -std=c11 -Wall -Wextra -Wshadow -D_GNU_SOURCE -Iinclude -Itests \
 
 ---
 
-## 5. 자체 PKCS#11 프로바이더 계층 (신규, `ncmp/pkcs11/`)
+## 5. 자체 PKCS#11 프로바이더 계층 — 제거됨 (2026-09-02)
 
-STDLL(new_host 기반) 경로와 별개로, 애플리케이션이 `libpkcs11_ncmp.so`를 직접
-로드해 `C_GetFunctionList`로 함수테이블을 얻어 쓰는 **완전 자립형 프로바이더**를
-추가. C_* 심볼이 opencryptoki `new_host.c`와 충돌하므로 **독립 빌드 타깃**으로 분리.
+`ncmp/pkcs11/`(p11_*.c, `p11_provider.h`, `ncmp_vendor.h`)로 존재하던 완전
+자립형 PKCS#11 프로바이더 계층은 STDLL(new_host 기반) 경로로 일원화하면서
+**제거**되었다. 관련 소스·`test_pkcs11_api.c`·빌드 배선(`add_subdirectory(pkcs11)`)을
+모두 삭제. 애플리케이션은 opencryptoki 표준 3층 경로(API → new_host → token_specific
+= `ncmp/stdll/ncmp_specific.c`)만 사용한다.
 
-### 5.1 구성 파일
-- `p11_provider.h` — 내부 상태 타입(세션/객체/opctx/슬롯), 헬퍼 선언.
-- `p11_state.c` — 전역 상태·per-process 락·객체/속성 스토어·전송 헬퍼
-  (`p11_forward`/`p11_forward_mp`, 왕복 중 락 해제)·에러 매핑.
-- `p11_slotmap.c` — CK 슬롯 ↔ 물리 슬롯 매핑(`ncmptok.conf`/`NCMP_SLOT_BASE`).
-- `p11_api_general.c` — Initialize/Finalize/GetInfo(+세션 카운터 해제).
-- `p11_api_slot.c` — slot·token 관리, mechanism 목록(28종)/정보, InitToken(zeroize).
-- `p11_api_session.c` — 세션 관리 + 로그인(슬롯 단위), 상태(CKS_*) 계산.
-- `p11_api_object.c` — 객체/find, 가시성(슬롯 단위, private=로그인 필요), 민감속성.
-- `p11_api_crypt.c` — enc/dec(AES ECB/CBC/CBC_PAD/CTR/GCM, RSA-OAEP; 2-call 버퍼
-  프로토콜, 멀티파트 버퍼링), digest(1shot+멀티파트), sign/verify(RSA/PSS/ECDSA/
-  HMAC), dual-function, message-based(단발형 구현·streaming은 미지원 배선).
-- `p11_api_key.c` — GenerateKey/KeyPair(RSA·EC)/Wrap/Unwrap/Derive(DH·ECDH)/RNG/
-  parallel + 3.2 async·encapsulate 등 미지원 배선.
-- `p11_functionlist.c` — `CK_FUNCTION_LIST` 2.40/3.0/3.2 3종 테이블 +
-  `C_GetFunctionList`/`GetInterfaceList`/`GetInterface`(이름/버전 매칭).
-- `p11_vendor.c` / `ncmp_vendor.h` — `CK_NCMP_VENDOR_FUNCTION_LIST`(콜백 13종).
-
-### 5.2 벤더 opcode/콜백 + 목 지원
-- 와이어 opcode 0x0100+: `VD_LOOPBACK/MEM_WRITE/MEM_READ/MEM_FILL/MEM_CRC/PING/
-  SELFTEST/FW_INFO`. `mock_device_t`에 4KB vendor 스크래치 RAM + epoch 추가,
-  `mcu_scheduler.c`에 실행부 구현.
-- 콜백: loopback·mem R/W·fill·crc(토큰 왕복), ping·selftest·fw_info(헬스/식별),
-  get_inflight·get_slotmap·set/get_loglevel·host_echo(호스트 인트로스펙션).
-
-### 5.3 동시성/멀티프로세스
-- 프로세스 전역 상태는 정적 초기화된 per-process 뮤텍스로 보호. **토큰 왕복 직전
-  키 소재를 지역 버퍼로 스냅샷 후 락 해제** → 스레드가 lock-free 전송으로 실제
-  동시 실행. 프로세스 간 세션 상한은 SHM robust 카운터(`ncmp_session_open/close`)로
-  강제(Finalize에서도 해제). `.so` 다중 로드는 init 상태로 정합.
-
-### 5.4 테스트 (`ncmp/tests/test_pkcs11_api.c`)
-- 버전 매핑(2.40/3.0/3.2 테이블·기본 3.2)·벤더 인터페이스 스모크.
-- **복합 시나리오 S1~S5**: (1) 멀티스레드 동시성·세션격리, (2) 토큰키 영속+백업/
-  복원(파워사이클=Finalize/Initialize, 비추출 개인키·민감속성), (3) RSA-OAEP
-  래핑/언래핑+CBC_PAD Update/Final 파이프라인, (4) 예외/권한(ENCRYPT 불가→
-  `CKR_KEY_FUNCTION_NOT_PERMITTED`, 잘못된 IV→`CKR_MECHANISM_PARAM_INVALID`,
-  세션종료 후 무효화)·복구, (5) 슬롯 스캔+`InitToken` Zeroization.
-- **멀티슬롯/멀티세션 M1~M10**: 세션상한(8/슬롯), 슬롯별 RNG, 라운드로빈 AES,
-  슬롯 간 객체격리, 동시 키생성, 세션 간 객체공유, 동시 멀티파트 다이제스트,
-  로그인 격리, 동시 sign/verify, 시스템 세션상한(32)+CloseAllSessions.
-- 결과: **49/49 통과, ThreadSanitizer 0 races**(`setarch -R` + 재빌드).
-
-### 5.5 슬롯정보 정합
-`opencryptoki.conf`의 슬롯번호(예 slot 5)와 ncmpd 물리 슬롯(0..3) 불일치를
-`ncmptok.conf`(`<ck_slot> <phys> [label]`) 또는 `NCMP_SLOT_BASE`로 매핑. 온라인
-물리 슬롯만 `C_GetSlotList`에 노출. 예시 conf 및 opencryptoki.conf 주석 정합화.
-
-### 5.6 빌드 배선
-- CMake: `ncmp/pkcs11/CMakeLists.txt`(shared `pkcs11_ncmp`), `ncmp/stdll`는
-  재사용 전송 static lib(`ncmp_stdll_client`)로 전환, 상위 CMake에 PIC +
-  `add_subdirectory(pkcs11)`, tests에 프로바이더/테스트 추가.
-- 자립형 프로바이더는 opencryptoki `usr/include`(PKCS#11 헤더)만 의존.
+벤더 와이어 opcode(0x0100+, `VD_LOOPBACK/MEM_*/PING/SELFTEST/FW_INFO`)는 프로바이더와
+무관한 토큰 datapath 기능이므로 유지된다 — 정의는 `ncmp/include/ncmp/ncmp_cmd.h`,
+목 실행부는 `ncmp/mock/mcu_scheduler.c`.

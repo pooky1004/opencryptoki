@@ -46,25 +46,6 @@ int test_client_hmac_forward(void);
 int test_client_rsa_oaep_forward(void);
 int test_client_dh_derive_forward(void);
 int test_client_ecdh_derive_forward(void);
-/* PKCS#11 provider (C_* API): version mapping, vendor iface, 5 composite +
- * 10 multi-slot/multi-session scenarios. */
-int test_p11_version_mapping(void);
-int test_p11_vendor_interface(void);
-int test_p11_s1_concurrency(void);
-int test_p11_s2_persistence(void);
-int test_p11_s3_keywrap(void);
-int test_p11_s4_faults(void);
-int test_p11_s5_zeroize(void);
-int test_p11_m1_session_ceiling(void);
-int test_p11_m2_per_slot_rng(void);
-int test_p11_m3_roundrobin_aes(void);
-int test_p11_m4_slot_isolation(void);
-int test_p11_m5_concurrent_keygen(void);
-int test_p11_m6_cross_session(void);
-int test_p11_m7_concurrent_digest(void);
-int test_p11_m8_login_isolation(void);
-int test_p11_m9_concurrent_signverify(void);
-int test_p11_m10_total_ceiling(void);
 
 int main(void)
 {
@@ -102,24 +83,6 @@ int main(void)
     NCMP_RUN(test_client_rsa_oaep_forward);
     NCMP_RUN(test_client_dh_derive_forward);
     NCMP_RUN(test_client_ecdh_derive_forward);
-
-    NCMP_RUN(test_p11_version_mapping);
-    NCMP_RUN(test_p11_vendor_interface);
-    NCMP_RUN(test_p11_s1_concurrency);
-    NCMP_RUN(test_p11_s2_persistence);
-    NCMP_RUN(test_p11_s3_keywrap);
-    NCMP_RUN(test_p11_s4_faults);
-    NCMP_RUN(test_p11_s5_zeroize);
-    NCMP_RUN(test_p11_m1_session_ceiling);
-    NCMP_RUN(test_p11_m2_per_slot_rng);
-    NCMP_RUN(test_p11_m3_roundrobin_aes);
-    NCMP_RUN(test_p11_m4_slot_isolation);
-    NCMP_RUN(test_p11_m5_concurrent_keygen);
-    NCMP_RUN(test_p11_m6_cross_session);
-    NCMP_RUN(test_p11_m7_concurrent_digest);
-    NCMP_RUN(test_p11_m8_login_isolation);
-    NCMP_RUN(test_p11_m9_concurrent_signverify);
-    NCMP_RUN(test_p11_m10_total_ceiling);
 
     fprintf(stderr, "\n%s (%d failure%s)\n",
             failures ? "SUITE FAILED" : "SUITE PASSED",

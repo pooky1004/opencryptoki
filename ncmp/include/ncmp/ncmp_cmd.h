@@ -53,10 +53,9 @@ enum ncmp_opcode {
      * the mock signature is deterministic regardless of PSS vs PKCS padding). */
 
     /*
-     * Vendor-defined opcodes (0x0100+). Exposed to applications through the
-     * "NCMP Vendor" PKCS#11 interface (see ncmp/pkcs11/ncmp_vendor.h). They do
-     * not correspond to any standard PKCS#11 function; they exercise the token
-     * datapath and query device-side state.
+     * Vendor-defined opcodes (0x0100+). They do not correspond to any standard
+     * PKCS#11 function; they exercise the token datapath and query device-side
+     * state. Implemented at the wire level by the mock token (mcu_scheduler.c).
      */
     NCMP_CMD_VD_LOOPBACK  = 0x0100, /**< Echo param0 back verbatim. */
     NCMP_CMD_VD_MEM_WRITE = 0x0101, /**< [addr(LE u32)|bytes] -> (ack). */

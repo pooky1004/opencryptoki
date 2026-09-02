@@ -254,3 +254,7 @@ Sessionx.vim
 
 # Token NCMP standalone CMake build output
 ncmp/build/
+
+# Generated Office documents (built from docs/*.md)
+*.docx
+*.pptx

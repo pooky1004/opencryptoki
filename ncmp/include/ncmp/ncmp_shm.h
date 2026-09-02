@@ -17,7 +17,9 @@
 
 /** Magic and version stamped into the SHM header for sanity checks. */
 #define NCMP_SHM_MAGIC 0x4E434D50u /* "NCMP" */
-#define NCMP_SHM_VERSION 1u
+#define NCMP_SHM_VERSION 2u /* v2 adds per-slot token identity + allocation. */
+
+#include "ncmp_cmd.h" /* NCMP_TI_* identity field sizes. */
 
 /**
  * Per-entry scratch buffer size. Each ring entry owns one request and one
@@ -36,6 +38,29 @@ typedef enum ncmp_slot_state {
     NCMP_SLOT_ONLINE = 1,  /**< Token present and comm_thread running. */
     NCMP_SLOT_FAULTED = 2  /**< USB/token error; awaiting recovery. */
 } ncmp_slot_state_t;
+
+/**
+ * Cached identity of the physical token backing a slot. Filled once by the
+ * daemon at boot (from NCMP_CMD_VD_TOKEN_INFO) and read by every STDLL process
+ * to match a CK slot to a physical token by label or serial number. POD only
+ * (no pointers) so it lives directly in SHM. Character fields are NUL-padded.
+ */
+typedef struct ncmp_token_identity {
+    char     label[NCMP_TI_LABEL_LEN];       /**< Token label. */
+    char     serial[NCMP_TI_SERIAL_LEN];     /**< Serial number. */
+    char     manufacturer[NCMP_TI_MANUF_LEN];/**< Manufacturer id. */
+    char     model[NCMP_TI_MODEL_LEN];       /**< Model. */
+    uint8_t  hw_major;                       /**< Hardware version major. */
+    uint8_t  hw_minor;                       /**< Hardware version minor. */
+    uint8_t  fw_major;                       /**< Firmware version major. */
+    uint8_t  fw_minor;                       /**< Firmware version minor. */
+    uint32_t flags;                          /**< Vendor status flags. */
+    uint8_t  valid;                          /**< Non-zero once identify ran. */
+    uint8_t  _pad[3];
+} NCMP_TokenIdentity;
+
+/** Sentinel bound_ck_slot meaning "physical slot not yet claimed". */
+#define NCMP_SLOT_UNBOUND (-1)
 
 /**
  * Per-slot in-flight tracking and statistics. Counters are updated by the
@@ -61,6 +86,16 @@ typedef struct ncmp_slot {
     uint32_t        cur_sessions;  /**< 0 .. PKCS11_MAX_SESSION_PER_SLOT. */
 
     NCMP_SlotStats  stats;         /**< In-flight + throughput counters. */
+
+    /* Physical-token identity + cross-process allocation. Both are written
+     * under the SHM global_lock (see ncmp_slotmap.c), never via raw atomics, so
+     * concurrent STDLL processes agree on the CK-slot -> physical-slot mapping.
+     * The binding is keyed by the CK slot id (not a pid): every process opening
+     * the same CK slot resolves to the same physical token, while distinct CK
+     * slots claim distinct tokens. The mapping persists for the daemon's life. */
+    NCMP_TokenIdentity token;      /**< Cached identity (daemon fills at boot). */
+    int32_t         bound_ck_slot; /**< Claiming CK slot id, or NCMP_SLOT_UNBOUND. */
+    uint32_t        _bind_pad;
 
     /* MPSC command ring (pending queue). Producers CAS entries; the slot's
      * single comm_thread consumes them. Waiting clients poll their entry's

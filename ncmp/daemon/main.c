@@ -16,12 +16,16 @@
  */
 #include "ncmpd.h"
 #include "ncmp/ncmp_shm.h"
+#include "ncmp/ncmp_slotmap.h"
 #include "ncmp/ncmp_transport.h"
+#include "ncmp/ncmp_wire.h"
+#include "ncmp/ncmp_cmd.h"
 #include "ncmp/ncmp_ipc.h"
 #include "ncmp/ncmp_errno.h"
 
 #include <signal.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -63,6 +67,55 @@ int ncmpd_install_signals(void)
 static void ncmpd_ensure_sock_dir(void)
 {
     (void)mkdir("/run/ncmpd", 0755); /* ignore EEXIST / permission errors */
+}
+
+/**
+ * @brief Query one token's identity over its transport and cache it in SHM.
+ *
+ * Runs a single synchronous NCMP_CMD_VD_TOKEN_INFO round-trip before the slot's
+ * comm_thread starts (so the transport is used exclusively here), then stores
+ * the decoded identity so every STDLL process can match a CK slot to a physical
+ * token by label or serial. A probe failure is non-fatal: the slot still serves
+ * crypto, it just has no cached identity (binding falls back to first-free).
+ */
+static void ncmpd_probe_identity(ncmp_transport_t *transport, uint32_t slot_id,
+                                 void *shm_base)
+{
+    uint8_t reqbuf[64];
+    uint8_t rspbuf[NCMP_MAX_FRAME_SIZE];
+    uint8_t payload[128];
+    NCMP_Message req;
+    NCMP_Message rsp;
+    NCMP_TokenIdentity ident;
+    const uint8_t *blob;
+    uint32_t blob_len;
+    size_t enc_len = 0;
+    size_t got = 0;
+
+    memset(&req, 0, sizeof(req));
+    req.header.command_id = NCMP_CMD_VD_TOKEN_INFO;
+    req.payload = payload;
+    req.payload_cap = sizeof(payload);
+    if (ncmp_wire_encode(&req, reqbuf, sizeof(reqbuf), &enc_len) != NCMP_OK)
+        return;
+    if (ncmp_transport_send(transport, reqbuf, enc_len) != NCMP_OK)
+        return;
+    if (ncmp_transport_recv(transport, rspbuf, sizeof(rspbuf), &got) != NCMP_OK)
+        return;
+
+    rsp.payload = payload;
+    rsp.payload_cap = sizeof(payload);
+    if (ncmp_wire_decode(rspbuf, got, &rsp) != NCMP_OK)
+        return;
+    if (ncmp_msg_param(&rsp, 0, &blob, &blob_len) != NCMP_OK)
+        return;
+    if (ncmp_token_info_unpack(blob, blob_len, &ident) != NCMP_OK)
+        return;
+
+    (void)ncmp_slot_set_identity(shm_base, slot_id, &ident);
+    fprintf(stderr, "ncmpd: slot %u token '%.*s' serial '%.*s'\n", slot_id,
+            (int)NCMP_TI_LABEL_LEN, ident.label,
+            (int)NCMP_TI_SERIAL_LEN, ident.serial);
 }
 
 int main(int argc, char **argv)
@@ -109,6 +162,11 @@ int main(int argc, char **argv)
             fprintf(stderr, "ncmpd: slot %u transport open failed\n", s);
             continue;
         }
+
+        /* Scan the token's identity before its comm_thread claims the
+         * transport, and cache it in SHM for CK-slot binding. */
+        ncmpd_probe_identity(slots[s].transport, s, shm_base);
+
         if (pthread_create(&slots[s].thread, NULL, ncmpd_comm_thread,
                            &slots[s]) != 0) {
             fprintf(stderr, "ncmpd: slot %u comm_thread start failed\n", s);

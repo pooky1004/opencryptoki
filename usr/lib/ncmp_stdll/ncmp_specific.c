@@ -9,6 +9,7 @@
  */
 #include <pthread.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -18,14 +19,17 @@
 #include "defs.h"
 #include "host_defs.h"
 #include "h_extern.h"
+#include "pqc_defs.h"
 #include "errno.h"
 #include "tok_specific.h"
 #include "tok_struct.h"
 #include "trace.h"
 
-/* NCMP client + crypto adapter + error-mapping API (ncmp/ subtree). */
+/* NCMP client + crypto/admin adapters + error-mapping API (ncmp/ subtree). */
 #include "ncmp/ncmp_client.h"
 #include "ncmp/ncmp_crypto.h"
+#include "ncmp/ncmp_admin.h"
+#include "ncmp/ncmp_slotmap.h"
 #include "ncmp/ncmp_ckr.h"
 #include "ncmp/ncmp_cmd.h"
 #include "ncmp/ncmp_limits.h"
@@ -42,43 +46,76 @@ const char label[] = "ncmptok";
 
 /** Per-token private state held in STDLL_TokData_t::private_data. */
 struct ncmp_private_data {
-    ncmp_client_t client;    /**< Connection to ncmpd (socket + SHM). */
-    uint32_t      ncmp_slot; /**< Physical NCMP slot backing this token. */
+    ncmp_client_t      client;    /**< Connection to ncmpd (socket + SHM). */
+    uint32_t           ncmp_slot; /**< Physical NCMP slot backing this token. */
+    int32_t            ck_slot;   /**< CK slot id this token was opened for. */
+    NCMP_TokenIdentity identity;  /**< Cached identity of the bound token. */
 };
 
+/**
+ * @brief Resolve the desired token label/serial for a CK slot from the
+ *        environment.
+ *
+ * Per-slot overrides (NCMP_TOK_LABEL<n> / NCMP_TOK_SERIAL<n>) take precedence
+ * over the generic NCMP_TOK_LABEL / NCMP_TOK_SERIAL. An unset value yields an
+ * empty string ("no preference"), which makes ncmp_slot_bind() fall back to the
+ * first unallocated online token. (A future ncmptok.conf file can supply the
+ * same mapping; see docs/architecture.md.)
+ */
+static void ncmp_desired_identity(CK_SLOT_ID slot, char *label, size_t label_cap,
+                                  char *serial, size_t serial_cap)
+{
+    char key[48];
+    const char *v;
+
+    label[0] = '\0';
+    serial[0] = '\0';
+
+    snprintf(key, sizeof(key), "NCMP_TOK_LABEL%lu", (unsigned long)slot);
+    v = getenv(key);
+    if (v == NULL)
+        v = getenv("NCMP_TOK_LABEL");
+    if (v != NULL)
+        snprintf(label, label_cap, "%s", v);
+
+    snprintf(key, sizeof(key), "NCMP_TOK_SERIAL%lu", (unsigned long)slot);
+    v = getenv(key);
+    if (v == NULL)
+        v = getenv("NCMP_TOK_SERIAL");
+    if (v != NULL)
+        snprintf(serial, serial_cap, "%s", v);
+}
+
 /*
- * Mechanisms advertised by the NCMP token. Placeholder set representing what
- * the FX3 firmware exposes; the real list should be queried from the token
- * once the query command is wired. Kept small until then.
+ * Mechanisms advertised by the NCMP token. This is the token's defined surface:
+ *   - symmetric AEAD/stream : AES-GCM, AES-CTR
+ *   - hash / XOF            : SHA-256, SHA-512, SHA3-{224,256,384,512},
+ *                             SHAKE-128/256 key derivation
+ *   - post-quantum          : ML-KEM (strength 1/3/5 via CKA_PARAMETER_SET;
+ *                             key agreement) and ML-DSA (sign/verify)
+ * AES key sizes are 16..32 bytes; PQC strengths are selected per key via
+ * CKA_PARAMETER_SET (CKP_ML_{KEM,DSA}_*), so the min/max fields are left 0.
  */
 static const MECH_LIST_ELEMENT ncmp_mech_list[] = {
-    { CKM_SHA_1,    { 0,   0,    CKF_DIGEST } },
-    { CKM_SHA224,   { 0,   0,    CKF_DIGEST } },
-    { CKM_SHA256,   { 0,   0,    CKF_DIGEST } },
-    { CKM_SHA384,   { 0,   0,    CKF_DIGEST } },
-    { CKM_SHA512,   { 0,   0,    CKF_DIGEST } },
-    { CKM_AES_CBC,  { 16,  32,   CKF_ENCRYPT | CKF_DECRYPT } },
-    { CKM_AES_ECB,  { 16,  32,   CKF_ENCRYPT | CKF_DECRYPT } },
+    /* Symmetric. */
     { CKM_AES_GCM,  { 16,  32,   CKF_ENCRYPT | CKF_DECRYPT } },
     { CKM_AES_CTR,  { 16,  32,   CKF_ENCRYPT | CKF_DECRYPT } },
-    { CKM_AES_OFB,  { 16,  32,   CKF_ENCRYPT | CKF_DECRYPT } },
-    { CKM_AES_CFB128,{ 16, 32,   CKF_ENCRYPT | CKF_DECRYPT } },
-    { CKM_RSA_PKCS, { 512, 4096, CKF_ENCRYPT | CKF_DECRYPT |
-                                 CKF_SIGN | CKF_VERIFY } },
-    { CKM_RSA_PKCS_KEY_PAIR_GEN, { 512, 4096, CKF_GENERATE_KEY_PAIR } },
-    { CKM_ECDSA,    { 256, 521,  CKF_SIGN | CKF_VERIFY } },
-    { CKM_EC_KEY_PAIR_GEN, { 256, 521, CKF_GENERATE_KEY_PAIR } },
-    { CKM_RSA_PKCS_OAEP, { 512, 4096, CKF_ENCRYPT | CKF_DECRYPT } },
-    { CKM_SHA_1_HMAC,   { 0, 0, CKF_SIGN | CKF_VERIFY } },
-    { CKM_SHA224_HMAC,  { 0, 0, CKF_SIGN | CKF_VERIFY } },
-    { CKM_SHA256_HMAC,  { 0, 0, CKF_SIGN | CKF_VERIFY } },
-    { CKM_SHA384_HMAC,  { 0, 0, CKF_SIGN | CKF_VERIFY } },
-    { CKM_SHA512_HMAC,  { 0, 0, CKF_SIGN | CKF_VERIFY } },
-    { CKM_DES3_KEY_GEN, { 24, 24, CKF_GENERATE } },
-    { CKM_GENERIC_SECRET_KEY_GEN, { 1, 4096, CKF_GENERATE } },
-    { CKM_RSA_PKCS_PSS, { 512, 4096, CKF_SIGN | CKF_VERIFY } },
-    { CKM_DH_PKCS_DERIVE, { 512, 4096, CKF_DERIVE } },
-    { CKM_ECDH1_DERIVE, { 256, 521, CKF_DERIVE } },
+    /* Hash. */
+    { CKM_SHA256,   { 0,   0,    CKF_DIGEST } },
+    { CKM_SHA512,   { 0,   0,    CKF_DIGEST } },
+    { CKM_SHA3_224, { 0,   0,    CKF_DIGEST } },
+    { CKM_SHA3_256, { 0,   0,    CKF_DIGEST } },
+    { CKM_SHA3_384, { 0,   0,    CKF_DIGEST } },
+    { CKM_SHA3_512, { 0,   0,    CKF_DIGEST } },
+    /* XOF (SHAKE) key derivation. */
+    { CKM_SHAKE_128_KEY_DERIVATION, { 0, 0, CKF_DERIVE } },
+    { CKM_SHAKE_256_KEY_DERIVATION, { 0, 0, CKF_DERIVE } },
+    /* Post-quantum KEM (key agreement) + keypair generation. */
+    { CKM_ML_KEM_KEY_PAIR_GEN, { 0, 0, CKF_GENERATE_KEY_PAIR } },
+    { CKM_ML_KEM,   { 0,   0,    CKF_ENCAPSULATE | CKF_DECAPSULATE } },
+    /* Post-quantum signature + keypair generation. */
+    { CKM_ML_DSA_KEY_PAIR_GEN, { 0, 0, CKF_GENERATE_KEY_PAIR } },
+    { CKM_ML_DSA,   { 0,   0,    CKF_SIGN | CKF_VERIFY } },
 };
 static const CK_ULONG ncmp_mech_list_len =
     (sizeof(ncmp_mech_list) / sizeof(MECH_LIST_ELEMENT));
@@ -136,9 +173,11 @@ CK_RV token_specific_init(STDLL_TokData_t *tokdata, CK_SLOT_ID SlotNumber,
     }
 
     /*
-     * Map this token to the first NCMP slot the daemon reports online. A single
-     * FX3 board maps to one slot; multi-board setups will select the slot via
-     * ncmptok.conf (TODO) instead of taking the lowest online one.
+     * Bind this CK slot to a physical NCMP token. The daemon has already scanned
+     * each device's identity into SHM; ncmp_slot_bind() matches the configured
+     * label or serial against the online tokens and, failing a match, claims the
+     * first unallocated one. The binding is keyed by CK slot id and shared in
+     * SHM, so every process opening this CK slot resolves to the same token.
      */
     if (priv->client.slot_mask == 0) {
         TRACE_ERROR("ncmp: daemon reports no online slots\n");
@@ -147,7 +186,35 @@ CK_RV token_specific_init(STDLL_TokData_t *tokdata, CK_SLOT_ID SlotNumber,
         free(priv);
         goto error;
     }
-    priv->ncmp_slot = (uint32_t)__builtin_ctz(priv->client.slot_mask);
+
+    {
+        char want_label[NCMP_TI_LABEL_LEN + 1];
+        char want_serial[NCMP_TI_SERIAL_LEN + 1];
+        uint32_t phys = 0;
+        int nrc2;
+
+        ncmp_desired_identity(SlotNumber, want_label, sizeof(want_label),
+                              want_serial, sizeof(want_serial));
+        priv->ck_slot = (int32_t)SlotNumber;
+        nrc2 = ncmp_slot_bind(priv->client.shm_base, priv->client.slot_mask,
+                              priv->ck_slot, want_label, want_serial, &phys);
+        if (nrc2 != NCMP_OK) {
+            rc = ncmp_err_to_ckr(nrc2);
+            TRACE_ERROR("ncmp_slot_bind failed (ncmp rc=%d -> ck 0x%lx)\n",
+                        nrc2, rc);
+            ncmp_client_fini(&priv->client);
+            free(priv);
+            goto error;
+        }
+        priv->ncmp_slot = phys;
+        TRACE_INFO("ncmp: CK slot %lu -> physical slot %u\n",
+                   (unsigned long)SlotNumber, phys);
+    }
+
+    /* Cache the bound token's identity for get_token_info (best-effort: the
+     * daemon may not have completed the identity scan). */
+    (void)ncmp_slot_get_identity(priv->client.shm_base, priv->ncmp_slot,
+                                 &priv->identity);
 
     tokdata->private_data = priv;
     return CKR_OK;
@@ -172,12 +239,98 @@ CK_RV token_specific_final(STDLL_TokData_t *tokdata,
     }
 
     if (priv != NULL) {
+        /* The CK-slot -> physical-slot binding intentionally persists in SHM
+         * for the daemon's lifetime (other processes may still use this slot);
+         * only the per-process client is torn down here. */
         ncmp_client_fini(&priv->client);
         free(priv);
         tokdata->private_data = NULL;
     }
 
     return CKR_OK;
+}
+
+/** Map a PKCS#11 CK_USER_TYPE to the wire user type (SO=0, otherwise USER=1). */
+static uint32_t ncmp_wire_user_type(CK_USER_TYPE user_type)
+{
+    return (user_type == CKU_SO) ? NCMP_CKU_SO : NCMP_CKU_USER;
+}
+
+CK_RV token_specific_login(STDLL_TokData_t *tokdata, SESSION *sess,
+                           CK_USER_TYPE user_type, CK_CHAR_PTR pin,
+                           CK_ULONG pin_len)
+{
+    struct ncmp_private_data *priv = tokdata->private_data;
+
+    UNUSED(sess);
+
+    if (priv == NULL)
+        return CKR_FUNCTION_FAILED;
+
+    return ncmp_admin_login(&priv->client, priv->ncmp_slot,
+                            ncmp_wire_user_type(user_type),
+                            (const uint8_t *)pin, (uint32_t)pin_len);
+}
+
+CK_RV token_specific_logout(STDLL_TokData_t *tokdata)
+{
+    struct ncmp_private_data *priv = tokdata->private_data;
+
+    if (priv == NULL)
+        return CKR_FUNCTION_FAILED;
+
+    return ncmp_admin_logout(&priv->client, priv->ncmp_slot);
+}
+
+CK_RV token_specific_init_pin(STDLL_TokData_t *tokdata, SESSION *sess,
+                              CK_CHAR_PTR pin, CK_ULONG pin_len)
+{
+    struct ncmp_private_data *priv = tokdata->private_data;
+
+    UNUSED(sess);
+
+    if (priv == NULL)
+        return CKR_FUNCTION_FAILED;
+
+    return ncmp_admin_init_pin(&priv->client, priv->ncmp_slot,
+                               (const uint8_t *)pin, (uint32_t)pin_len);
+}
+
+CK_RV token_specific_set_pin(STDLL_TokData_t *tokdata, SESSION *sess,
+                             CK_CHAR_PTR old_pin, CK_ULONG old_len,
+                             CK_CHAR_PTR new_pin, CK_ULONG new_len)
+{
+    struct ncmp_private_data *priv = tokdata->private_data;
+
+    UNUSED(sess);
+
+    if (priv == NULL)
+        return CKR_FUNCTION_FAILED;
+
+    return ncmp_admin_set_pin(&priv->client, priv->ncmp_slot,
+                              (const uint8_t *)old_pin, (uint32_t)old_len,
+                              (const uint8_t *)new_pin, (uint32_t)new_len);
+}
+
+CK_RV token_specific_init_token(STDLL_TokData_t *tokdata, CK_SLOT_ID sid,
+                                CK_CHAR_PTR pin, CK_ULONG pin_len,
+                                CK_CHAR_PTR label)
+{
+    struct ncmp_private_data *priv = tokdata->private_data;
+    char lbl[NCMP_TI_LABEL_LEN + 1];
+
+    UNUSED(sid);
+
+    if (priv == NULL)
+        return CKR_FUNCTION_FAILED;
+
+    /* The label arrives as a 32-byte space-padded field; forward it as a string
+     * (the admin adapter re-pads to the fixed wire width). */
+    memcpy(lbl, label, NCMP_TI_LABEL_LEN);
+    lbl[NCMP_TI_LABEL_LEN] = '\0';
+
+    return ncmp_admin_init_token(&priv->client, priv->ncmp_slot,
+                                 (const uint8_t *)pin, (uint32_t)pin_len, lbl);
 }
 
 CK_RV token_specific_rng(STDLL_TokData_t *tokdata, CK_BYTE *output,
@@ -1294,17 +1447,458 @@ CK_RV token_specific_ecdh_pkcs_derive(STDLL_TokData_t *tokdata, CK_BYTE *priv_va
     return CKR_OK;
 }
 
+/* ------------------------------------------------------------------------- *
+ * XOF (SHAKE) key derivation and post-quantum (ML-DSA / ML-KEM).
+ *
+ * PQC keys are forwarded as opaque blobs stored whole in CKA_VALUE; the private
+ * blob carries the public blob as its prefix so the token's sign/verify and
+ * encaps/decaps agree. Blob sizes come from the resolved parameter set. The
+ * shared secret produced by ML-KEM is always 32 bytes (NIST FIPS 203).
+ * ------------------------------------------------------------------------- */
+
+/** ML-KEM shared-secret size in bytes (FIPS 203). */
+#define NCMP_MLKEM_SS_LEN 32u
+
+/** Whole-blob sizes (bytes) the proxy stores for an ML-DSA parameter set. */
+static void ncmp_mldsa_lens(const struct pqc_oid *oid, uint32_t *pub_len,
+                            uint32_t *priv_len, uint32_t *sig_len)
+{
+    *pub_len = (uint32_t)(oid->len_info.ml_dsa.rho_len +
+                          oid->len_info.ml_dsa.t1_len);
+    *priv_len = (uint32_t)(oid->len_info.ml_dsa.rho_len +
+                           oid->len_info.ml_dsa.tr_len +
+                           oid->len_info.ml_dsa.s1_len +
+                           oid->len_info.ml_dsa.s2_len +
+                           oid->len_info.ml_dsa.t0_len);
+    switch (oid->keyform) {
+    case CKP_ML_DSA_44: *sig_len = 2420; break;
+    case CKP_ML_DSA_65: *sig_len = 3309; break;
+    case CKP_ML_DSA_87: *sig_len = 4627; break;
+    default:            *sig_len = 0;    break;
+    }
+}
+
+/** Whole-blob sizes (bytes) the proxy stores for an ML-KEM parameter set. */
+static void ncmp_mlkem_lens(const struct pqc_oid *oid, uint32_t *pub_len,
+                            uint32_t *priv_len, uint32_t *ct_len)
+{
+    *pub_len = (uint32_t)oid->len_info.ml_kem.pk_len;
+    *priv_len = (uint32_t)oid->len_info.ml_kem.sk_len;
+    *ct_len = (uint32_t)oid->len_info.ml_kem.ct_len;
+}
+
+CK_RV token_specific_ml_dsa_generate_keypair(STDLL_TokData_t *tokdata,
+                                             const struct pqc_oid *oid,
+                                             TEMPLATE *publ_tmpl,
+                                             TEMPLATE *priv_tmpl)
+{
+    struct ncmp_private_data *priv = tokdata->private_data;
+    uint32_t pub_len, priv_len, sig_len;
+    CK_BYTE *pub = NULL, *prv = NULL;
+    CK_RV rc;
+
+    if (priv == NULL)
+        return CKR_FUNCTION_FAILED;
+    ncmp_mldsa_lens(oid, &pub_len, &priv_len, &sig_len);
+    if (pub_len == 0 || priv_len <= pub_len)
+        return CKR_MECHANISM_PARAM_INVALID;
+
+    pub = malloc(pub_len);
+    prv = malloc(priv_len);
+    if (pub == NULL || prv == NULL) {
+        rc = CKR_HOST_MEMORY;
+        goto out;
+    }
+
+    rc = ncmp_crypto_mldsa_keygen(&priv->client, priv->ncmp_slot,
+                                  (uint32_t)oid->keyform, pub_len, priv_len,
+                                  pub, prv);
+    if (rc != CKR_OK)
+        goto out;
+
+    rc = template_build_update_attribute(publ_tmpl, CKA_VALUE, pub, pub_len);
+    if (rc != CKR_OK)
+        goto out;
+    rc = template_build_update_attribute(priv_tmpl, CKA_VALUE, prv, priv_len);
+    if (rc != CKR_OK)
+        goto out;
+    /* Persist the parameter set so sign/verify can re-resolve the OID. */
+    rc = pqc_add_keyform_mode(publ_tmpl, oid, CKM_ML_DSA_KEY_PAIR_GEN);
+    if (rc != CKR_OK)
+        goto out;
+    rc = pqc_add_keyform_mode(priv_tmpl, oid, CKM_ML_DSA_KEY_PAIR_GEN);
+
+out:
+    free(pub);
+    free(prv);
+    return rc;
+}
+
+CK_RV token_specific_ml_dsa_sign(STDLL_TokData_t *tokdata, SESSION *sess,
+                                 CK_BBOOL length_only,
+                                 const struct pqc_oid *oid, CK_MECHANISM *mech,
+                                 CK_BYTE *in_data, CK_ULONG in_data_len,
+                                 CK_BYTE *sig, CK_ULONG *sig_len,
+                                 OBJECT *key_obj, CK_BBOOL final_part)
+{
+    struct ncmp_private_data *priv = tokdata->private_data;
+    uint32_t pub_len, priv_len, exp_sig_len, out_len = 0;
+    CK_ATTRIBUTE *val = NULL;
+    CK_RV rc;
+
+    UNUSED(sess);
+    UNUSED(mech);
+    UNUSED(final_part);
+
+    if (priv == NULL)
+        return CKR_FUNCTION_FAILED;
+    ncmp_mldsa_lens(oid, &pub_len, &priv_len, &exp_sig_len);
+    if (exp_sig_len == 0)
+        return CKR_MECHANISM_PARAM_INVALID;
+
+    if (length_only) {
+        *sig_len = exp_sig_len;
+        return CKR_OK;
+    }
+    if (*sig_len < exp_sig_len) {
+        *sig_len = exp_sig_len;
+        return CKR_BUFFER_TOO_SMALL;
+    }
+
+    rc = template_attribute_get_non_empty(key_obj->template, CKA_VALUE, &val);
+    if (rc != CKR_OK)
+        return rc;
+
+    rc = ncmp_crypto_mldsa_sign(&priv->client, priv->ncmp_slot,
+                                (uint32_t)oid->keyform, pub_len, exp_sig_len,
+                                val->pValue, (uint32_t)val->ulValueLen,
+                                in_data, (uint32_t)in_data_len, sig, &out_len);
+    if (rc != CKR_OK)
+        return rc;
+    *sig_len = out_len;
+    return CKR_OK;
+}
+
+CK_RV token_specific_ml_dsa_verify(STDLL_TokData_t *tokdata, SESSION *sess,
+                                   const struct pqc_oid *oid,
+                                   CK_MECHANISM *mech, CK_BYTE *in_data,
+                                   CK_ULONG in_data_len, CK_BYTE *signature,
+                                   CK_ULONG signature_len, OBJECT *key_obj,
+                                   CK_BBOOL final_part)
+{
+    struct ncmp_private_data *priv = tokdata->private_data;
+    CK_ATTRIBUTE *val = NULL;
+    CK_RV rc;
+
+    UNUSED(sess);
+    UNUSED(mech);
+    UNUSED(final_part);
+
+    if (priv == NULL)
+        return CKR_FUNCTION_FAILED;
+
+    rc = template_attribute_get_non_empty(key_obj->template, CKA_VALUE, &val);
+    if (rc != CKR_OK)
+        return rc;
+
+    return ncmp_crypto_mldsa_verify(&priv->client, priv->ncmp_slot,
+                                    (uint32_t)oid->keyform, val->pValue,
+                                    (uint32_t)val->ulValueLen, in_data,
+                                    (uint32_t)in_data_len, signature,
+                                    (uint32_t)signature_len);
+}
+
+CK_RV token_specific_ml_kem_generate_keypair(STDLL_TokData_t *tokdata,
+                                             const struct pqc_oid *oid,
+                                             TEMPLATE *publ_tmpl,
+                                             TEMPLATE *priv_tmpl)
+{
+    struct ncmp_private_data *priv = tokdata->private_data;
+    uint32_t pub_len, priv_len, ct_len;
+    CK_BYTE *pub = NULL, *prv = NULL;
+    CK_RV rc;
+
+    if (priv == NULL)
+        return CKR_FUNCTION_FAILED;
+    ncmp_mlkem_lens(oid, &pub_len, &priv_len, &ct_len);
+    if (pub_len == 0 || priv_len <= pub_len)
+        return CKR_MECHANISM_PARAM_INVALID;
+
+    pub = malloc(pub_len);
+    prv = malloc(priv_len);
+    if (pub == NULL || prv == NULL) {
+        rc = CKR_HOST_MEMORY;
+        goto out;
+    }
+
+    rc = ncmp_crypto_mlkem_keygen(&priv->client, priv->ncmp_slot,
+                                  (uint32_t)oid->keyform, pub_len, priv_len,
+                                  pub, prv);
+    if (rc != CKR_OK)
+        goto out;
+
+    rc = template_build_update_attribute(publ_tmpl, CKA_VALUE, pub, pub_len);
+    if (rc != CKR_OK)
+        goto out;
+    rc = template_build_update_attribute(priv_tmpl, CKA_VALUE, prv, priv_len);
+    if (rc != CKR_OK)
+        goto out;
+    rc = pqc_add_keyform_mode(publ_tmpl, oid, CKM_ML_KEM_KEY_PAIR_GEN);
+    if (rc != CKR_OK)
+        goto out;
+    rc = pqc_add_keyform_mode(priv_tmpl, oid, CKM_ML_KEM_KEY_PAIR_GEN);
+
+out:
+    free(pub);
+    free(prv);
+    return rc;
+}
+
+/** Build the shared-secret CKO_SECRET_KEY object from @p secret (encaps/decaps). */
+static CK_RV ncmp_mlkem_make_secret(STDLL_TokData_t *tokdata, SESSION *sess,
+                                    CK_ATTRIBUTE *pTemplate,
+                                    CK_ULONG ulAttributeCount, CK_ULONG mode,
+                                    CK_KEY_TYPE keytype, CK_ULONG keylen,
+                                    const CK_BYTE *secret, CK_ULONG secret_len,
+                                    CK_OBJECT_HANDLE *phKey)
+{
+    OBJECT *new_key_obj = NULL;
+    CK_RV rc;
+
+    if (keylen > secret_len)
+        return CKR_TEMPLATE_INCONSISTENT;
+
+    rc = object_mgr_create_skel(tokdata, sess, pTemplate, ulAttributeCount,
+                                mode, CKO_SECRET_KEY, keytype, &new_key_obj);
+    if (rc != CKR_OK)
+        return rc;
+
+    rc = template_build_update_attribute(new_key_obj->template, CKA_VALUE,
+                                         (CK_BYTE *)secret, keylen);
+    if (rc != CKR_OK)
+        goto err;
+
+    switch (keytype) {
+    case CKK_GENERIC_SECRET:
+    case CKK_AES:
+    case CKK_AES_XTS:
+        rc = template_build_update_attribute(new_key_obj->template,
+                                             CKA_VALUE_LEN, (CK_BYTE *)&keylen,
+                                             sizeof(keylen));
+        if (rc != CKR_OK)
+            goto err;
+        break;
+    default:
+        break;
+    }
+
+    rc = object_mgr_create_final(tokdata, sess, new_key_obj, phKey);
+    if (rc != CKR_OK)
+        goto err;
+    return CKR_OK;
+
+err:
+    object_free(new_key_obj);
+    if (phKey != NULL)
+        *phKey = CK_INVALID_HANDLE;
+    return rc;
+}
+
+CK_RV token_specific_ml_kem_encapsulate_key(STDLL_TokData_t *tokdata,
+                                            SESSION *sess, CK_BBOOL length_only,
+                                            const struct pqc_oid *oid,
+                                            CK_MECHANISM *mech, OBJECT *key_obj,
+                                            CK_ATTRIBUTE *pTemplate,
+                                            CK_ULONG ulAttributeCount,
+                                            CK_BYTE *pCiphertext,
+                                            CK_ULONG *pulCiphertextLen,
+                                            CK_KEY_TYPE keytype, CK_ULONG keylen,
+                                            CK_OBJECT_HANDLE *phKey)
+{
+    struct ncmp_private_data *priv = tokdata->private_data;
+    uint32_t pub_len, priv_len, ct_len;
+    CK_ATTRIBUTE *val = NULL;
+    CK_BYTE ss[NCMP_MLKEM_SS_LEN];
+    CK_RV rc;
+
+    UNUSED(mech);
+
+    if (priv == NULL)
+        return CKR_FUNCTION_FAILED;
+    ncmp_mlkem_lens(oid, &pub_len, &priv_len, &ct_len);
+
+    if (length_only) {
+        *pulCiphertextLen = ct_len;
+        return CKR_OK;
+    }
+    if (*pulCiphertextLen < ct_len) {
+        *pulCiphertextLen = ct_len;
+        return CKR_BUFFER_TOO_SMALL;
+    }
+
+    rc = template_attribute_get_non_empty(key_obj->template, CKA_VALUE, &val);
+    if (rc != CKR_OK)
+        return rc;
+
+    rc = ncmp_crypto_mlkem_encaps(&priv->client, priv->ncmp_slot,
+                                  (uint32_t)oid->keyform, val->pValue,
+                                  (uint32_t)val->ulValueLen, ct_len,
+                                  NCMP_MLKEM_SS_LEN, pCiphertext, ss);
+    if (rc != CKR_OK)
+        return rc;
+    *pulCiphertextLen = ct_len;
+
+    return ncmp_mlkem_make_secret(tokdata, sess, pTemplate, ulAttributeCount,
+                                  MODE_ENCAPS, keytype, keylen, ss,
+                                  NCMP_MLKEM_SS_LEN, phKey);
+}
+
+CK_RV token_specific_ml_kem_decapsulate_key(STDLL_TokData_t *tokdata,
+                                            SESSION *sess,
+                                            const struct pqc_oid *oid,
+                                            CK_MECHANISM *mech, OBJECT *key_obj,
+                                            CK_ATTRIBUTE *pTemplate,
+                                            CK_ULONG ulAttributeCount,
+                                            CK_BYTE *pCiphertext,
+                                            CK_ULONG ulCiphertextLen,
+                                            CK_KEY_TYPE keytype, CK_ULONG keylen,
+                                            CK_OBJECT_HANDLE *phKey)
+{
+    struct ncmp_private_data *priv = tokdata->private_data;
+    uint32_t pub_len, priv_len, ct_len;
+    CK_ATTRIBUTE *val = NULL;
+    CK_BYTE ss[NCMP_MLKEM_SS_LEN];
+    CK_RV rc;
+
+    UNUSED(mech);
+
+    if (priv == NULL)
+        return CKR_FUNCTION_FAILED;
+    ncmp_mlkem_lens(oid, &pub_len, &priv_len, &ct_len);
+
+    rc = template_attribute_get_non_empty(key_obj->template, CKA_VALUE, &val);
+    if (rc != CKR_OK)
+        return rc;
+
+    rc = ncmp_crypto_mlkem_decaps(&priv->client, priv->ncmp_slot,
+                                  (uint32_t)oid->keyform, pub_len, val->pValue,
+                                  (uint32_t)val->ulValueLen, pCiphertext,
+                                  (uint32_t)ulCiphertextLen, NCMP_MLKEM_SS_LEN,
+                                  ss);
+    if (rc != CKR_OK)
+        return rc;
+
+    return ncmp_mlkem_make_secret(tokdata, sess, pTemplate, ulAttributeCount,
+                                  MODE_DECAPS, keytype, keylen, ss,
+                                  NCMP_MLKEM_SS_LEN, phKey);
+}
+
+CK_RV token_specific_shake_key_derive(STDLL_TokData_t *tokdata, SESSION *sess,
+                                      CK_MECHANISM *mech, OBJECT *base_key_obj,
+                                      CK_KEY_TYPE base_key_type,
+                                      OBJECT *derived_key_obj,
+                                      CK_KEY_TYPE derived_key_type,
+                                      CK_ULONG derived_key_len)
+{
+    struct ncmp_private_data *priv = tokdata->private_data;
+    CK_ATTRIBUTE *base_val = NULL;
+    CK_BYTE *derived = NULL;
+    CK_RV rc;
+
+    UNUSED(sess);
+    UNUSED(base_key_type);
+
+    if (priv == NULL)
+        return CKR_FUNCTION_FAILED;
+    if (derived_key_len == 0 || derived_key_len > NCMP_MAX_PARAM_SIZE)
+        return CKR_KEY_SIZE_RANGE;
+
+    rc = template_attribute_get_non_empty(base_key_obj->template, CKA_VALUE,
+                                          &base_val);
+    if (rc != CKR_OK)
+        return rc;
+
+    derived = malloc(derived_key_len);
+    if (derived == NULL)
+        return CKR_HOST_MEMORY;
+
+    rc = ncmp_crypto_shake_derive(&priv->client, priv->ncmp_slot,
+                                  (uint32_t)mech->mechanism, base_val->pValue,
+                                  (uint32_t)base_val->ulValueLen, derived,
+                                  (uint32_t)derived_key_len);
+    if (rc != CKR_OK)
+        goto out;
+
+    rc = template_build_update_attribute(derived_key_obj->template, CKA_VALUE,
+                                         derived, derived_key_len);
+    if (rc != CKR_OK)
+        goto out;
+
+    switch (derived_key_type) {
+    case CKK_GENERIC_SECRET:
+    case CKK_AES:
+    case CKK_AES_XTS:
+    case CKK_SHA_1_HMAC:
+    case CKK_SHA224_HMAC:
+    case CKK_SHA256_HMAC:
+    case CKK_SHA384_HMAC:
+    case CKK_SHA512_HMAC:
+        rc = template_build_update_attribute(derived_key_obj->template,
+                                             CKA_VALUE_LEN,
+                                             (CK_BYTE *)&derived_key_len,
+                                             sizeof(derived_key_len));
+        break;
+    default:
+        break;
+    }
+
+out:
+    free(derived);
+    return rc;
+}
+
+/** Copy a NUL-padded identity field into a space-padded CK_TOKEN_INFO field. */
+static void ncmp_copy_padded(CK_CHAR *dst, size_t dst_len, const char *src,
+                             size_t src_cap)
+{
+    size_t n;
+
+    for (n = 0; n < src_cap && n < dst_len && src[n] != '\0'; ++n)
+        dst[n] = (CK_CHAR)src[n];
+    for (; n < dst_len; ++n)
+        dst[n] = ' ';
+}
+
 CK_RV token_specific_get_token_info(STDLL_TokData_t *tokdata,
                                     CK_TOKEN_INFO_PTR pInfo)
 {
-    UNUSED(tokdata);
+    struct ncmp_private_data *priv = tokdata->private_data;
 
-    /* Report the NCMP token/firmware revision. TODO: query the FX3 firmware
-     * for its actual version once that command is wired. */
-    pInfo->firmwareVersion.major = 1;
-    pInfo->firmwareVersion.minor = 0;
-    pInfo->hardwareVersion.major = 1;
-    pInfo->hardwareVersion.minor = 0;
+    /*
+     * Report the identity the daemon scanned from the physical token. The common
+     * layer has already populated label/manufacturer/model/serial from the token
+     * globals; override them with the live values (and the real versions) when a
+     * valid identity was cached.
+     */
+    if (priv != NULL && priv->identity.valid) {
+        const NCMP_TokenIdentity *id = &priv->identity;
+
+        ncmp_copy_padded(pInfo->manufacturerID, sizeof(pInfo->manufacturerID),
+                         id->manufacturer, NCMP_TI_MANUF_LEN);
+        ncmp_copy_padded(pInfo->model, sizeof(pInfo->model), id->model,
+                         NCMP_TI_MODEL_LEN);
+        ncmp_copy_padded(pInfo->serialNumber, sizeof(pInfo->serialNumber),
+                         id->serial, NCMP_TI_SERIAL_LEN);
+        pInfo->hardwareVersion.major = id->hw_major;
+        pInfo->hardwareVersion.minor = id->hw_minor;
+        pInfo->firmwareVersion.major = id->fw_major;
+        pInfo->firmwareVersion.minor = id->fw_minor;
+    } else {
+        pInfo->firmwareVersion.major = 1;
+        pInfo->firmwareVersion.minor = 0;
+        pInfo->hardwareVersion.major = 1;
+        pInfo->hardwareVersion.minor = 0;
+    }
 
     return CKR_OK;
 }

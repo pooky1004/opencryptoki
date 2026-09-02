@@ -39,6 +39,27 @@ typedef struct mock_digest_ctx {
     uint32_t acc;    /**< Running accumulator. */
 } mock_digest_ctx_t;
 
+/** Maximum PIN length the mock token stores. */
+#define NCMP_MOCK_PIN_MAX 32
+
+/** Emulated token identity + PIN/login state (see mock_device_set_identity). */
+typedef struct mock_token_admin {
+    int      valid;                       /**< Identity has been seeded. */
+    char     label[NCMP_TI_LABEL_LEN];    /**< Token label. */
+    char     serial[NCMP_TI_SERIAL_LEN];  /**< Serial number. */
+    char     manufacturer[NCMP_TI_MANUF_LEN];
+    char     model[NCMP_TI_MODEL_LEN];
+    uint8_t  hw_major, hw_minor, fw_major, fw_minor;
+    uint32_t flags;
+
+    uint8_t  so_pin[NCMP_MOCK_PIN_MAX];   /**< Security-officer PIN. */
+    uint32_t so_pin_len;
+    uint8_t  user_pin[NCMP_MOCK_PIN_MAX]; /**< User PIN. */
+    uint32_t user_pin_len;
+    int      logged_in;                   /**< Non-zero while a user is logged in. */
+    uint32_t login_user;                  /**< Logged-in user type. */
+} mock_token_admin_t;
+
 /** Emulated device state. */
 typedef struct mock_device {
     mock_container_t  container[NCMP_DEV_CONTAINER_COUNT];
@@ -46,7 +67,18 @@ typedef struct mock_device {
     mock_digest_ctx_t digest_ctx[NCMP_MOCK_DIGEST_CTX_MAX];
     uint8_t           vd_mem[NCMP_VD_MEM_SIZE]; /**< Vendor scratch RAM. */
     uint32_t          epoch;     /**< Bumped on selftest; vendor PING readback. */
+    mock_token_admin_t admin;    /**< Identity + PIN/login state. */
 } mock_device_t;
+
+/**
+ * @brief Seed a mock device's identity + default PINs for slot @p slot_id.
+ *
+ * Gives each emulated slot a distinct label ("NCMPTOKEN<n>") and serial
+ * ("NCMPSN00000000<n>") so the STDLL slot-binding logic can be exercised, plus
+ * default user PIN "1234" and SO PIN "12345678". Called from the mock transport
+ * on open (idempotent per slot).
+ */
+void mock_device_set_identity(mock_device_t *dev, uint32_t slot_id);
 
 /**
  * @brief Mover: read the 4-byte length prefix and stage a frame into a free

@@ -62,6 +62,23 @@ int test_crypto_rsa_keygen(void);
 int test_crypto_ec_keygen(void);
 int test_crypto_dh_derive(void);
 int test_crypto_ecdh_derive(void);
+/* Token administration: identity, CK-slot binding, login/PIN lifecycle. */
+int test_admin_token_info(void);
+int test_admin_bind_by_serial(void);
+int test_admin_bind_by_label(void);
+int test_admin_bind_first_free(void);
+int test_admin_bind_idempotent(void);
+int test_admin_bind_no_match_falls_back(void);
+int test_admin_unbind(void);
+int test_admin_login(void);
+int test_admin_set_pin(void);
+int test_admin_init_pin(void);
+int test_admin_init_token(void);
+/* SHA3 / XOF / post-quantum (ML-DSA, ML-KEM) adapter tests. */
+int test_pqc_sha3(void);
+int test_pqc_shake(void);
+int test_pqc_mldsa(void);
+int test_pqc_mlkem(void);
 
 int main(void)
 {
@@ -115,6 +132,23 @@ int main(void)
     NCMP_RUN(test_crypto_ec_keygen);
     NCMP_RUN(test_crypto_dh_derive);
     NCMP_RUN(test_crypto_ecdh_derive);
+
+    NCMP_RUN(test_admin_token_info);
+    NCMP_RUN(test_admin_bind_by_serial);
+    NCMP_RUN(test_admin_bind_by_label);
+    NCMP_RUN(test_admin_bind_first_free);
+    NCMP_RUN(test_admin_bind_idempotent);
+    NCMP_RUN(test_admin_bind_no_match_falls_back);
+    NCMP_RUN(test_admin_unbind);
+    NCMP_RUN(test_admin_login);
+    NCMP_RUN(test_admin_set_pin);
+    NCMP_RUN(test_admin_init_pin);
+    NCMP_RUN(test_admin_init_token);
+
+    NCMP_RUN(test_pqc_sha3);
+    NCMP_RUN(test_pqc_shake);
+    NCMP_RUN(test_pqc_mldsa);
+    NCMP_RUN(test_pqc_mlkem);
 
     fprintf(stderr, "\n%s (%d failure%s)\n",
             failures ? "SUITE FAILED" : "SUITE PASSED",

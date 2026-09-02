@@ -32,6 +32,7 @@ enum ncmp_opcode {
     NCMP_CMD_DIGEST_FINAL  = 0x0006, /**< param0=ctx_id -> resp param0=digest. */
     NCMP_CMD_HMAC_SIGN   = 0x0007, /**< [mech|key|data] -> [mac]. */
     NCMP_CMD_HMAC_VERIFY = 0x0008, /**< [mech|key|data|mac] -> (ack). */
+    NCMP_CMD_SHAKE_DERIVE = 0x0009, /**< XOF: [mech|outlen(LE u32)|base] -> [out]. */
     NCMP_CMD_AES_CBC = 0x0010, /**< AES-CBC: params [flags|key|iv|data]->[out]. */
     NCMP_CMD_AES_ECB = 0x0011, /**< AES-ECB: params [flags|key|data]->[out]. */
     NCMP_CMD_AES_GCM = 0x0012, /**< AES-GCM: [flags|key|iv|aad|taglen|data]->[out]. */
@@ -53,6 +54,30 @@ enum ncmp_opcode {
      * the mock signature is deterministic regardless of PSS vs PKCS padding). */
 
     /*
+     * Token administration: PIN / login lifecycle. The physical token owns the
+     * PIN material; the STDLL forwards the caller's PIN and the token answers
+     * with a CKR_* ack (CKR_OK / CKR_PIN_INCORRECT / CKR_PIN_LEN_RANGE / ...).
+     */
+    NCMP_CMD_LOGIN      = 0x0030, /**< [user_type(LE u32)|pin] -> (ack). */
+    NCMP_CMD_LOGOUT     = 0x0031, /**< (no params) -> (ack). */
+    NCMP_CMD_INIT_PIN   = 0x0032, /**< [new_pin] -> (ack) (SO sets user PIN). */
+    NCMP_CMD_SET_PIN    = 0x0033, /**< [old_pin|new_pin] -> (ack). */
+    NCMP_CMD_INIT_TOKEN = 0x0034, /**< [so_pin|label(32)] -> (ack). */
+
+    /*
+     * Post-quantum (PKCS#11 3.2 ML-DSA / ML-KEM). All keys are forwarded as
+     * opaque blobs; the mock produces deterministic, size-correct outputs so
+     * round-trips (sign->verify, encaps->decaps) succeed. param0 always carries
+     * the parameter set (CKP_ML_* keyform, LE u32).
+     */
+    NCMP_CMD_MLDSA_KEYGEN = 0x0050, /**< [set|pub_len|priv_len] -> [pub|priv]. */
+    NCMP_CMD_MLDSA_SIGN   = 0x0051, /**< [set|pub_len|sig_len|priv|data] -> [sig]. */
+    NCMP_CMD_MLDSA_VERIFY = 0x0052, /**< [set|pub|data|sig] -> (ack). */
+    NCMP_CMD_MLKEM_KEYGEN = 0x0053, /**< [set|pub_len|priv_len] -> [pub|priv]. */
+    NCMP_CMD_MLKEM_ENCAPS = 0x0054, /**< [set|ct_len|ss_len|pub] -> [ct|ss]. */
+    NCMP_CMD_MLKEM_DECAPS = 0x0055, /**< [set|pub_len|ss_len|priv|ct] -> [ss]. */
+
+    /*
      * Vendor-defined opcodes (0x0100+). They do not correspond to any standard
      * PKCS#11 function; they exercise the token datapath and query device-side
      * state. Implemented at the wire level by the mock token (mcu_scheduler.c).
@@ -64,8 +89,38 @@ enum ncmp_opcode {
     NCMP_CMD_VD_SELFTEST  = 0x0104, /**< No payload -> [status LE u32 (0=ok)]. */
     NCMP_CMD_VD_FW_INFO   = 0x0105, /**< No payload -> [major|minor|patch|build]. */
     NCMP_CMD_VD_MEM_FILL  = 0x0106, /**< [addr|len|byte] -> (ack). */
-    NCMP_CMD_VD_MEM_CRC   = 0x0107  /**< [addr|len] -> [crc32 LE u32]. */
+    NCMP_CMD_VD_MEM_CRC   = 0x0107, /**< [addr|len] -> [crc32 LE u32]. */
+    NCMP_CMD_VD_TOKEN_INFO = 0x0108 /**< (no params) -> [identity blob]. */
 };
+
+/*
+ * Token identity blob layout (parameter 0 of a NCMP_CMD_VD_TOKEN_INFO response).
+ * Fixed 104-byte little-endian record scanned at daemon boot and cached per slot
+ * in SHM. Character fields are NUL-padded (the STDLL space-pads to the PKCS#11
+ * CK_TOKEN_INFO convention). Kept as raw offsets so the (PKCS#11-agnostic) mock
+ * and the daemon agree without sharing a struct definition.
+ */
+#define NCMP_TI_LABEL_LEN   32u
+#define NCMP_TI_SERIAL_LEN  16u
+#define NCMP_TI_MANUF_LEN   32u
+#define NCMP_TI_MODEL_LEN   16u
+
+#define NCMP_TI_OFF_LABEL     0u
+#define NCMP_TI_OFF_SERIAL    32u
+#define NCMP_TI_OFF_MANUF     48u
+#define NCMP_TI_OFF_MODEL     80u
+#define NCMP_TI_OFF_HW_MAJOR  96u
+#define NCMP_TI_OFF_HW_MINOR  97u
+#define NCMP_TI_OFF_FW_MAJOR  98u
+#define NCMP_TI_OFF_FW_MINOR  99u
+#define NCMP_TI_OFF_FLAGS     100u
+
+/** Total on-wire size of the token identity blob. */
+#define NCMP_TOKEN_INFO_WIRE_SIZE 104u
+
+/** PKCS#11 user types carried in the NCMP_CMD_LOGIN request (LE u32). */
+#define NCMP_CKU_SO   0u
+#define NCMP_CKU_USER 1u
 
 /** Size (bytes) of the mock token's vendor scratch memory region. */
 #define NCMP_VD_MEM_SIZE (4u * 1024u)
@@ -103,17 +158,26 @@ static inline uint32_t ncmp_hmac_size(uint32_t mech)
 #define NCMP_MECH_SHA224  0x00000255u
 #define NCMP_MECH_SHA384  0x00000260u
 #define NCMP_MECH_SHA512  0x00000270u
+/* SHA-3 family (numerically identical to the CKM_SHA3_* constants). */
+#define NCMP_MECH_SHA3_256 0x000002B0u
+#define NCMP_MECH_SHA3_224 0x000002B5u
+#define NCMP_MECH_SHA3_384 0x000002C0u
+#define NCMP_MECH_SHA3_512 0x000002D0u
 
 /** Digest output size in bytes for @p mech, or 0 if unsupported. */
 static inline uint32_t ncmp_digest_size(uint32_t mech)
 {
     switch (mech) {
-    case NCMP_MECH_SHA_1:  return 20;
-    case NCMP_MECH_SHA224: return 28;
-    case NCMP_MECH_SHA256: return 32;
-    case NCMP_MECH_SHA384: return 48;
-    case NCMP_MECH_SHA512: return 64;
-    default:               return 0;
+    case NCMP_MECH_SHA_1:   return 20;
+    case NCMP_MECH_SHA224:  return 28;
+    case NCMP_MECH_SHA256:  return 32;
+    case NCMP_MECH_SHA384:  return 48;
+    case NCMP_MECH_SHA512:  return 64;
+    case NCMP_MECH_SHA3_224: return 28;
+    case NCMP_MECH_SHA3_256: return 32;
+    case NCMP_MECH_SHA3_384: return 48;
+    case NCMP_MECH_SHA3_512: return 64;
+    default:                return 0;
     }
 }
 

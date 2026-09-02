@@ -82,6 +82,7 @@ int ncmp_shm_create(void **out_base)
         slot->cur_sessions = 0;
         slot->buf_pool_off = pool_off;
         slot->buf_pool_len = NCMP_SLOT_POOL_SIZE;
+        slot->bound_ck_slot = NCMP_SLOT_UNBOUND; /* token.valid stays 0 (memset). */
 
         if (ncmp_mutex_init(&slot->sess_lock) != 0) {
             munmap(base, total);

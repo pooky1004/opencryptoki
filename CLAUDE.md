@@ -36,14 +36,31 @@ hook into, `pkcsslotd` — it is a separate pipe/proxy daemon.
 include/ncmp/   ncmp_limits.h ncmp_wire.h ncmp_mutex.h ncmp_queue.h
                 ncmp_shm.h ncmp_ipc.h ncmp_errno.h   (shared public headers)
 common/         ncmp_mutex.c ncmp_queue.c ncmp_wire.c ncmp_shm.c
+                ncmp_slot.c ncmp_slotmap.c ncmp_ipc.c
 daemon/         main.c conn_thread.c comm_thread.c usb_transport.c  (Module A)
-stdll/          ncmp_client.c ncmp_session.c ncmp_ckr.c ncmp_crypto.c (Module B
-                transport + crypto adapter; token_specific SPI is in
-                usr/lib/ncmp_stdll/)
+stdll/          ncmp_client.c ncmp_session.c ncmp_ckr.c ncmp_crypto.c
+                ncmp_admin.c  (Module B transport + crypto/admin adapters;
+                token_specific SPI is in usr/lib/ncmp_stdll/)
 mock/           mock_main.c fx3_dma.c container.c mcu_scheduler.c   (Module C)
 tests/          test_*.c + ncmp_test.h                              (Module D)
 cmake/          FindLibUSB.cmake
 ```
+
+## Token identity, slot binding & login
+- At boot `ncmpd` scans each present token's identity (label/serial/manufacturer/
+  model/versions) via `NCMP_CMD_VD_TOKEN_INFO` and caches it per physical slot in
+  SHM (`NCMP_TokenIdentity` in `ncmp_shm.h`; probe in `daemon/main.c`).
+- `t_init` binds a CK slot to a physical token with `ncmp_slot_bind()`
+  (`common/ncmp_slotmap.c`): match by desired serial then label, else claim the
+  first unallocated online token. The binding is **keyed by CK slot id** and held
+  in SHM under `global_lock`, so all processes opening the same CK slot resolve to
+  the same token and it persists for the daemon's life (not released on final).
+  Desired label/serial come from env `NCMP_TOK_LABEL[<n>]` / `NCMP_TOK_SERIAL[<n>]`
+  (per-CK-slot suffix overrides the generic form); unset ⇒ first-free.
+- PIN/login lifecycle (`t_login`/`t_logout`/`t_init_pin`/`t_set_pin`/
+  `t_init_token`) is forwarded to the physical token via the `ncmp_admin` adapter
+  (`stdll/ncmp_admin.c`, opcodes `NCMP_CMD_LOGIN`..`NCMP_CMD_INIT_TOKEN`); the
+  mock token stores/verifies PINs (default user `1234`, SO `12345678`).
 
 ## Slot map & vendor opcodes
 - Slot map: `ncmptok.conf` (env `NCMP_TOK_CONF`) or `NCMP_SLOT_BASE` maps CK
@@ -119,6 +136,21 @@ See `ncmp/include/ncmp/ncmp_wire.h`.
 The STDLL plugs in via a `token_spec_t token_specific` (see other tokens'
 `tok_struct.h`). Autotools wiring — a `--enable-ncmptok` toggle and an
 `ncmp_stdll` dir — is the follow-up step; see `docs/architecture.md`.
+
+## Advertised mechanism surface (token's defined capability)
+`ncmp_mech_list` in `usr/lib/ncmp_stdll/ncmp_specific.c` advertises exactly:
+- **Symmetric**: AES-GCM, AES-CTR.
+- **Hash/XOF**: SHA-256, SHA-512, SHA3-224/256/384/512; SHAKE-128/256 key
+  derivation (XOF via `t_shake_key_derive`, opcode `NCMP_CMD_SHAKE_DERIVE`).
+- **PQC (PKCS#11 3.2)**: ML-KEM (strengths 1/3/5 = CKP_ML_KEM_512/768/1024) for
+  keypair-gen + encapsulate/decapsulate (shared-secret key agreement); ML-DSA
+  (strengths 1/3/5 = CKP_ML_DSA_44/65/87) for keypair-gen + sign/verify.
+  Strength is selected per key via `CKA_PARAMETER_SET`; opcodes
+  `NCMP_CMD_MLDSA_*` / `NCMP_CMD_MLKEM_*`.
+PQC keys are opaque blobs stored whole in `CKA_VALUE` (private blob is prefixed
+with the public blob); blob sizes come from `struct pqc_oid` (pqc_supported.c).
+The standard `t_ml_dsa_*` / `t_ml_kem_*` / `t_shake_key_derive` hooks are used
+(NOT the IBM `t_ibm_*` variants). Tests: `ncmp/tests/test_pqc.c`.
 
 ## PKCS#11 support target
 Full PKCS#11 2.x, 3.0, and 3.2; multi-application concurrent access.

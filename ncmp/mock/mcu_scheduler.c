@@ -24,6 +24,55 @@
 #define MOCK_CKR_DEVICE_MEMORY 0x31u
 #define MOCK_CKR_MECHANISM_INVALID 0x70u
 #define MOCK_CKR_SIGNATURE_INVALID 0xC0u
+#define MOCK_CKR_PIN_INCORRECT 0xA0u
+#define MOCK_CKR_PIN_LEN_RANGE 0xA2u
+#define MOCK_CKR_USER_ALREADY_LOGGED_IN 0x100u
+#define MOCK_CKR_USER_NOT_LOGGED_IN 0x101u
+#define MOCK_CKR_USER_TYPE_INVALID 0x103u
+
+void mock_device_set_identity(mock_device_t *dev, uint32_t slot_id)
+{
+    mock_token_admin_t *a;
+    char d = (char)('0' + (slot_id & 0x7u));
+
+    if (!dev)
+        return;
+    a = &dev->admin;
+    if (a->valid)
+        return;
+
+    memset(a, 0, sizeof(*a));
+    /* Distinct per-slot label/serial so slot-binding tests can match them. */
+    memcpy(a->label, "NCMPTOKEN0", 10);
+    a->label[9] = d;
+    memcpy(a->serial, "NCMPSN0000000", 13);
+    a->serial[12] = d;
+    memcpy(a->manufacturer, "DYST", 4);
+    memcpy(a->model, "NCMP", 4);
+    a->hw_major = 1;
+    a->hw_minor = 0;
+    a->fw_major = 1;
+    a->fw_minor = 0;
+    a->flags = 0;
+
+    /* Factory-default PINs (the physical token owns them). */
+    memcpy(a->user_pin, "1234", 4);
+    a->user_pin_len = 4;
+    memcpy(a->so_pin, "12345678", 8);
+    a->so_pin_len = 8;
+    a->logged_in = 0;
+    a->valid = 1;
+}
+
+/** Constant-time-ish PIN compare against the stored PIN for @p user_type. */
+static int mock_pin_ok(const mock_token_admin_t *a, uint32_t user_type,
+                       const uint8_t *pin, uint32_t len)
+{
+    const uint8_t *stored = (user_type == 0u) ? a->so_pin : a->user_pin;
+    uint32_t slen = (user_type == 0u) ? a->so_pin_len : a->user_pin_len;
+
+    return len == slen && (len == 0 || memcmp(stored, pin, len) == 0);
+}
 
 /**
  * @brief Expand an accumulator into a @p outlen-byte signature.
@@ -41,6 +90,21 @@ static void mock_sig_expand(uint32_t acc, const uint8_t *comp, uint32_t complen,
     for (uint32_t i = 0; i < outlen; ++i)
         out[i] = (uint8_t)((acc >> (i & 7)) + i * 197u + comp[i % complen]);
 }
+
+/** Deterministic byte expansion keyed only by @p seed (no key component). */
+static void mock_pqc_expand(uint32_t seed, uint8_t *out, uint32_t outlen)
+{
+    uint8_t s[4];
+
+    s[0] = (uint8_t)seed;
+    s[1] = (uint8_t)(seed >> 8);
+    s[2] = (uint8_t)(seed >> 16);
+    s[3] = (uint8_t)(seed >> 24);
+    mock_sig_expand(seed, s, sizeof(s), out, outlen);
+}
+
+/** Largest PQC blob the mock materializes on the stack (ML-DSA-87 signature). */
+#define MOCK_PQC_MAX 5120u
 
 /** Digest accumulator seed; shared by one-shot and multipart so they agree. */
 #define MOCK_DIGEST_SEED 0x811C9DC5u
@@ -736,6 +800,360 @@ static void mock_exec_command(mock_device_t *dev, NCMP_Message *msg)
         acc = mock_digest_fold(acc, ppub, lpub);
         mock_sig_expand(acc, oid, loid, msg->payload, flen);
         msg->param_len[0] = flen;
+        for (int i = 1; i < NCMP_MAX_PARAM_COUNT; ++i)
+            msg->param_len[i] = 0;
+        msg->header.ack = MOCK_CKR_OK;
+        break;
+    }
+    case NCMP_CMD_VD_TOKEN_INFO: {
+        /* No input -> emit the fixed 104-byte identity blob in param0. */
+        mock_token_admin_t *a = &dev->admin;
+        uint8_t *p = msg->payload;
+
+        memset(p, 0, NCMP_TOKEN_INFO_WIRE_SIZE);
+        memcpy(p + NCMP_TI_OFF_LABEL, a->label, NCMP_TI_LABEL_LEN);
+        memcpy(p + NCMP_TI_OFF_SERIAL, a->serial, NCMP_TI_SERIAL_LEN);
+        memcpy(p + NCMP_TI_OFF_MANUF, a->manufacturer, NCMP_TI_MANUF_LEN);
+        memcpy(p + NCMP_TI_OFF_MODEL, a->model, NCMP_TI_MODEL_LEN);
+        p[NCMP_TI_OFF_HW_MAJOR] = a->hw_major;
+        p[NCMP_TI_OFF_HW_MINOR] = a->hw_minor;
+        p[NCMP_TI_OFF_FW_MAJOR] = a->fw_major;
+        p[NCMP_TI_OFF_FW_MINOR] = a->fw_minor;
+        ncmp_wr_u32le(p + NCMP_TI_OFF_FLAGS, a->flags);
+        msg->param_len[0] = NCMP_TOKEN_INFO_WIRE_SIZE;
+        for (int i = 1; i < NCMP_MAX_PARAM_COUNT; ++i)
+            msg->param_len[i] = 0;
+        msg->header.ack = MOCK_CKR_OK;
+        break;
+    }
+    case NCMP_CMD_LOGIN: {
+        /* [user_type(LE u32) | pin] -> verify against the stored PIN. */
+        mock_token_admin_t *a = &dev->admin;
+        const uint8_t *put, *ppin;
+        uint32_t lut, lpin, ut;
+
+        if (ncmp_msg_param(msg, 0, &put, &lut) != NCMP_OK || lut < 4 ||
+            ncmp_msg_param(msg, 1, &ppin, &lpin) != NCMP_OK) {
+            for (int i = 0; i < NCMP_MAX_PARAM_COUNT; ++i)
+                msg->param_len[i] = 0;
+            msg->header.ack = MOCK_CKR_FUNCTION_FAILED;
+            break;
+        }
+        for (int i = 0; i < NCMP_MAX_PARAM_COUNT; ++i)
+            msg->param_len[i] = 0;
+        ut = ncmp_rd_u32le(put);
+        if (ut != 0u && ut != 1u) {
+            msg->header.ack = MOCK_CKR_USER_TYPE_INVALID;
+            break;
+        }
+        if (a->logged_in) {
+            msg->header.ack = MOCK_CKR_USER_ALREADY_LOGGED_IN;
+            break;
+        }
+        if (!mock_pin_ok(a, ut, ppin, lpin)) {
+            msg->header.ack = MOCK_CKR_PIN_INCORRECT;
+            break;
+        }
+        a->logged_in = 1;
+        a->login_user = ut;
+        msg->header.ack = MOCK_CKR_OK;
+        break;
+    }
+    case NCMP_CMD_LOGOUT: {
+        /* Clear the login state (idempotent). */
+        dev->admin.logged_in = 0;
+        for (int i = 0; i < NCMP_MAX_PARAM_COUNT; ++i)
+            msg->param_len[i] = 0;
+        msg->header.ack = MOCK_CKR_OK;
+        break;
+    }
+    case NCMP_CMD_INIT_PIN: {
+        /* [new_pin] -> SO sets the user PIN (SO must be logged in). */
+        mock_token_admin_t *a = &dev->admin;
+        const uint8_t *ppin;
+        uint32_t lpin;
+
+        if (ncmp_msg_param(msg, 0, &ppin, &lpin) != NCMP_OK) {
+            for (int i = 0; i < NCMP_MAX_PARAM_COUNT; ++i)
+                msg->param_len[i] = 0;
+            msg->header.ack = MOCK_CKR_FUNCTION_FAILED;
+            break;
+        }
+        for (int i = 0; i < NCMP_MAX_PARAM_COUNT; ++i)
+            msg->param_len[i] = 0;
+        if (!a->logged_in || a->login_user != 0u) {
+            msg->header.ack = MOCK_CKR_USER_NOT_LOGGED_IN;
+            break;
+        }
+        if (lpin > NCMP_MOCK_PIN_MAX) {
+            msg->header.ack = MOCK_CKR_PIN_LEN_RANGE;
+            break;
+        }
+        memcpy(a->user_pin, ppin, lpin);
+        a->user_pin_len = lpin;
+        msg->header.ack = MOCK_CKR_OK;
+        break;
+    }
+    case NCMP_CMD_SET_PIN: {
+        /* [old_pin | new_pin] -> change the current user's PIN. */
+        mock_token_admin_t *a = &dev->admin;
+        const uint8_t *pold, *pnew;
+        uint32_t lold, lnew, ut;
+        uint8_t *target;
+        uint32_t *tlen;
+
+        if (ncmp_msg_param(msg, 0, &pold, &lold) != NCMP_OK ||
+            ncmp_msg_param(msg, 1, &pnew, &lnew) != NCMP_OK) {
+            for (int i = 0; i < NCMP_MAX_PARAM_COUNT; ++i)
+                msg->param_len[i] = 0;
+            msg->header.ack = MOCK_CKR_FUNCTION_FAILED;
+            break;
+        }
+        for (int i = 0; i < NCMP_MAX_PARAM_COUNT; ++i)
+            msg->param_len[i] = 0;
+        ut = (a->logged_in && a->login_user == 0u) ? 0u : 1u;
+        if (!mock_pin_ok(a, ut, pold, lold)) {
+            msg->header.ack = MOCK_CKR_PIN_INCORRECT;
+            break;
+        }
+        if (lnew > NCMP_MOCK_PIN_MAX) {
+            msg->header.ack = MOCK_CKR_PIN_LEN_RANGE;
+            break;
+        }
+        target = (ut == 0u) ? a->so_pin : a->user_pin;
+        tlen = (ut == 0u) ? &a->so_pin_len : &a->user_pin_len;
+        memcpy(target, pnew, lnew);
+        *tlen = lnew;
+        msg->header.ack = MOCK_CKR_OK;
+        break;
+    }
+    case NCMP_CMD_INIT_TOKEN: {
+        /* [so_pin | label(32)] -> verify SO PIN, set the label. */
+        mock_token_admin_t *a = &dev->admin;
+        const uint8_t *pso, *plabel;
+        uint32_t lso, llabel;
+
+        if (ncmp_msg_param(msg, 0, &pso, &lso) != NCMP_OK ||
+            ncmp_msg_param(msg, 1, &plabel, &llabel) != NCMP_OK) {
+            for (int i = 0; i < NCMP_MAX_PARAM_COUNT; ++i)
+                msg->param_len[i] = 0;
+            msg->header.ack = MOCK_CKR_FUNCTION_FAILED;
+            break;
+        }
+        for (int i = 0; i < NCMP_MAX_PARAM_COUNT; ++i)
+            msg->param_len[i] = 0;
+        if (!mock_pin_ok(a, 0u, pso, lso)) {
+            msg->header.ack = MOCK_CKR_PIN_INCORRECT;
+            break;
+        }
+        if (llabel > NCMP_TI_LABEL_LEN)
+            llabel = NCMP_TI_LABEL_LEN;
+        memset(a->label, 0, sizeof(a->label));
+        memcpy(a->label, plabel, llabel);
+        a->logged_in = 0;
+        msg->header.ack = MOCK_CKR_OK;
+        break;
+    }
+    case NCMP_CMD_SHAKE_DERIVE: {
+        /* XOF: [mech | outlen(LE u32) | base] -> [derived(outlen)]. Deterministic
+         * expansion of the base key material to the requested length. */
+        const uint8_t *pmech, *plen, *pbase;
+        uint32_t lmech, llen, lbase, mech, outlen;
+        uint8_t base[256];
+
+        if (ncmp_msg_param(msg, 0, &pmech, &lmech) != NCMP_OK || lmech < 4 ||
+            ncmp_msg_param(msg, 1, &plen, &llen) != NCMP_OK || llen < 4 ||
+            ncmp_msg_param(msg, 2, &pbase, &lbase) != NCMP_OK ||
+            lbase == 0 || lbase > sizeof(base)) {
+            msg->param_len[0] = 0;
+            msg->header.ack = MOCK_CKR_MECHANISM_INVALID;
+            break;
+        }
+        mech = ncmp_rd_u32le(pmech);
+        outlen = ncmp_rd_u32le(plen);
+        if (outlen == 0 || outlen > NCMP_MAX_PARAM_SIZE) {
+            msg->param_len[0] = 0;
+            msg->header.ack = MOCK_CKR_MECHANISM_INVALID;
+            break;
+        }
+        memcpy(base, pbase, lbase); /* copy before overwriting the payload */
+        mock_sig_expand(mock_digest_fold(MOCK_DIGEST_SEED ^ mech, base, lbase),
+                        base, lbase, msg->payload, outlen);
+        msg->param_len[0] = outlen;
+        for (int i = 1; i < NCMP_MAX_PARAM_COUNT; ++i)
+            msg->param_len[i] = 0;
+        msg->header.ack = MOCK_CKR_OK;
+        break;
+    }
+    case NCMP_CMD_MLDSA_KEYGEN:
+    case NCMP_CMD_MLKEM_KEYGEN: {
+        /* [set | pub_len | priv_len] -> [pub | priv]; priv is prefixed with the
+         * public blob so sign/verify (resp. encaps/decaps) can agree. */
+        const uint8_t *pset, *ppub, *ppriv;
+        uint32_t lset, lpub, lpriv, set, pub_len, priv_len, seed;
+
+        if (ncmp_msg_param(msg, 0, &pset, &lset) != NCMP_OK || lset < 4 ||
+            ncmp_msg_param(msg, 1, &ppub, &lpub) != NCMP_OK || lpub < 4 ||
+            ncmp_msg_param(msg, 2, &ppriv, &lpriv) != NCMP_OK || lpriv < 4) {
+            msg->param_len[0] = 0;
+            msg->header.ack = MOCK_CKR_MECHANISM_INVALID;
+            break;
+        }
+        set = ncmp_rd_u32le(pset);
+        pub_len = ncmp_rd_u32le(ppub);
+        priv_len = ncmp_rd_u32le(ppriv);
+        if (pub_len == 0 || priv_len < pub_len ||
+            pub_len > NCMP_MAX_PARAM_SIZE || priv_len > NCMP_MAX_PARAM_SIZE ||
+            (uint64_t)pub_len + priv_len > NCMP_MAX_PAYLOAD_SIZE) {
+            msg->param_len[0] = 0;
+            msg->header.ack = MOCK_CKR_MECHANISM_INVALID;
+            break;
+        }
+        seed = MOCK_DIGEST_SEED ^ (set * 2654435761u) ^
+               ncmp_cmd_opcode(msg->header.command_id);
+        /* pub at [0,pub_len); priv at [pub_len, pub_len+priv_len) with its first
+         * pub_len bytes equal to pub. */
+        mock_pqc_expand(seed, msg->payload, pub_len);
+        memmove(msg->payload + pub_len, msg->payload, pub_len);
+        mock_pqc_expand(seed ^ 0x55555555u,
+                        msg->payload + pub_len + pub_len, priv_len - pub_len);
+        msg->param_len[0] = pub_len;
+        msg->param_len[1] = priv_len;
+        for (int i = 2; i < NCMP_MAX_PARAM_COUNT; ++i)
+            msg->param_len[i] = 0;
+        msg->header.ack = MOCK_CKR_OK;
+        break;
+    }
+    case NCMP_CMD_MLDSA_SIGN: {
+        /* [set | pub_len | sig_len | priv | data] -> [sig]. Fold the public
+         * prefix of priv + data; expand to a signature of sig_len bytes. */
+        const uint8_t *pset, *ppl, *psl, *ppriv, *pdata;
+        uint32_t lset, lpl, lsl, lpriv, ldata, set, pub_len, sig_len, acc;
+        uint8_t pub[MOCK_PQC_MAX];
+
+        if (ncmp_msg_param(msg, 0, &pset, &lset) != NCMP_OK || lset < 4 ||
+            ncmp_msg_param(msg, 1, &ppl, &lpl) != NCMP_OK || lpl < 4 ||
+            ncmp_msg_param(msg, 2, &psl, &lsl) != NCMP_OK || lsl < 4 ||
+            ncmp_msg_param(msg, 3, &ppriv, &lpriv) != NCMP_OK ||
+            ncmp_msg_param(msg, 4, &pdata, &ldata) != NCMP_OK) {
+            msg->param_len[0] = 0;
+            msg->header.ack = MOCK_CKR_MECHANISM_INVALID;
+            break;
+        }
+        set = ncmp_rd_u32le(pset);
+        pub_len = ncmp_rd_u32le(ppl);
+        sig_len = ncmp_rd_u32le(psl);
+        if (pub_len == 0 || pub_len > sizeof(pub) || pub_len > lpriv ||
+            sig_len == 0 || sig_len > NCMP_MAX_PARAM_SIZE) {
+            msg->param_len[0] = 0;
+            msg->header.ack = MOCK_CKR_MECHANISM_INVALID;
+            break;
+        }
+        memcpy(pub, ppriv, pub_len); /* public prefix, before overwriting */
+        acc = mock_digest_fold(MOCK_DIGEST_SEED ^ set, pub, pub_len);
+        acc = mock_digest_fold(acc, pdata, ldata);
+        mock_sig_expand(acc, pub, pub_len, msg->payload, sig_len);
+        msg->param_len[0] = sig_len;
+        for (int i = 1; i < NCMP_MAX_PARAM_COUNT; ++i)
+            msg->param_len[i] = 0;
+        msg->header.ack = MOCK_CKR_OK;
+        break;
+    }
+    case NCMP_CMD_MLDSA_VERIFY: {
+        /* [set | pub | data | sig] -> recompute the signature and compare. */
+        const uint8_t *pset, *ppub, *pdata, *psig;
+        uint32_t lset, lpub, ldata, lsig, set, acc;
+        uint8_t pub[MOCK_PQC_MAX], sig[MOCK_PQC_MAX];
+
+        if (ncmp_msg_param(msg, 0, &pset, &lset) != NCMP_OK || lset < 4 ||
+            ncmp_msg_param(msg, 1, &ppub, &lpub) != NCMP_OK || lpub == 0 ||
+            lpub > sizeof(pub) ||
+            ncmp_msg_param(msg, 2, &pdata, &ldata) != NCMP_OK ||
+            ncmp_msg_param(msg, 3, &psig, &lsig) != NCMP_OK ||
+            lsig == 0 || lsig > sizeof(sig)) {
+            msg->param_len[0] = 0;
+            msg->header.ack = MOCK_CKR_MECHANISM_INVALID;
+            break;
+        }
+        set = ncmp_rd_u32le(pset);
+        memcpy(pub, ppub, lpub);
+        acc = mock_digest_fold(MOCK_DIGEST_SEED ^ set, pub, lpub);
+        acc = mock_digest_fold(acc, pdata, ldata);
+        mock_sig_expand(acc, pub, lpub, sig, lsig);
+        msg->param_len[0] = 0;
+        for (int i = 1; i < NCMP_MAX_PARAM_COUNT; ++i)
+            msg->param_len[i] = 0;
+        msg->header.ack = (memcmp(sig, psig, lsig) == 0)
+                              ? MOCK_CKR_OK : MOCK_CKR_SIGNATURE_INVALID;
+        break;
+    }
+    case NCMP_CMD_MLKEM_ENCAPS: {
+        /* [set | ct_len | ss_len | pub] -> [ct | ss]. */
+        const uint8_t *pset, *pcl, *psl, *ppub;
+        uint32_t lset, lcl, lsl, lpub, set, ct_len, ss_len, acc;
+        uint8_t pub[MOCK_PQC_MAX];
+
+        if (ncmp_msg_param(msg, 0, &pset, &lset) != NCMP_OK || lset < 4 ||
+            ncmp_msg_param(msg, 1, &pcl, &lcl) != NCMP_OK || lcl < 4 ||
+            ncmp_msg_param(msg, 2, &psl, &lsl) != NCMP_OK || lsl < 4 ||
+            ncmp_msg_param(msg, 3, &ppub, &lpub) != NCMP_OK ||
+            lpub == 0 || lpub > sizeof(pub)) {
+            msg->param_len[0] = 0;
+            msg->header.ack = MOCK_CKR_MECHANISM_INVALID;
+            break;
+        }
+        set = ncmp_rd_u32le(pset);
+        ct_len = ncmp_rd_u32le(pcl);
+        ss_len = ncmp_rd_u32le(psl);
+        if (ct_len == 0 || ss_len == 0 || ct_len > NCMP_MAX_PARAM_SIZE ||
+            ss_len > NCMP_MAX_PARAM_SIZE ||
+            (uint64_t)ct_len + ss_len > NCMP_MAX_PAYLOAD_SIZE) {
+            msg->param_len[0] = 0;
+            msg->header.ack = MOCK_CKR_MECHANISM_INVALID;
+            break;
+        }
+        memcpy(pub, ppub, lpub); /* copy before overwriting the payload */
+        acc = mock_digest_fold(MOCK_DIGEST_SEED ^ set, pub, lpub);
+        mock_sig_expand(acc, pub, lpub, msg->payload, ct_len); /* ct */
+        /* Shared secret binds pub + ciphertext (decaps recomputes the same). */
+        mock_sig_expand(mock_digest_fold(acc, msg->payload, ct_len),
+                        pub, lpub, msg->payload + ct_len, ss_len);
+        msg->param_len[0] = ct_len;
+        msg->param_len[1] = ss_len;
+        for (int i = 2; i < NCMP_MAX_PARAM_COUNT; ++i)
+            msg->param_len[i] = 0;
+        msg->header.ack = MOCK_CKR_OK;
+        break;
+    }
+    case NCMP_CMD_MLKEM_DECAPS: {
+        /* [set | pub_len | ss_len | priv | ct] -> [ss]; recompute encaps' ss. */
+        const uint8_t *pset, *ppl, *psl, *ppriv, *pct;
+        uint32_t lset, lpl, lsl, lpriv, lct, set, pub_len, ss_len, acc;
+        uint8_t pub[MOCK_PQC_MAX];
+
+        if (ncmp_msg_param(msg, 0, &pset, &lset) != NCMP_OK || lset < 4 ||
+            ncmp_msg_param(msg, 1, &ppl, &lpl) != NCMP_OK || lpl < 4 ||
+            ncmp_msg_param(msg, 2, &psl, &lsl) != NCMP_OK || lsl < 4 ||
+            ncmp_msg_param(msg, 3, &ppriv, &lpriv) != NCMP_OK ||
+            ncmp_msg_param(msg, 4, &pct, &lct) != NCMP_OK || lct == 0) {
+            msg->param_len[0] = 0;
+            msg->header.ack = MOCK_CKR_MECHANISM_INVALID;
+            break;
+        }
+        set = ncmp_rd_u32le(pset);
+        pub_len = ncmp_rd_u32le(ppl);
+        ss_len = ncmp_rd_u32le(psl);
+        if (pub_len == 0 || pub_len > sizeof(pub) || pub_len > lpriv ||
+            ss_len == 0 || ss_len > NCMP_MAX_PARAM_SIZE) {
+            msg->param_len[0] = 0;
+            msg->header.ack = MOCK_CKR_MECHANISM_INVALID;
+            break;
+        }
+        memcpy(pub, ppriv, pub_len); /* public prefix of the private blob */
+        acc = mock_digest_fold(MOCK_DIGEST_SEED ^ set, pub, pub_len);
+        acc = mock_digest_fold(acc, pct, lct); /* fold the ciphertext */
+        mock_sig_expand(acc, pub, pub_len, msg->payload, ss_len);
+        msg->param_len[0] = ss_len;
         for (int i = 1; i < NCMP_MAX_PARAM_COUNT; ++i)
             msg->param_len[i] = 0;
         msg->header.ack = MOCK_CKR_OK;

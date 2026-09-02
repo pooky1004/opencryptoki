@@ -204,4 +204,58 @@ unsigned long ncmp_crypto_ecdh_derive(ncmp_client_t *c, uint32_t slot,
                                       uint32_t peer_point_len, uint8_t *out,
                                       uint32_t out_cap, uint32_t *out_len);
 
+/* ------------------------------------------------------------------------- *
+ * XOF (SHAKE) key derivation and post-quantum (ML-DSA / ML-KEM).
+ * PQC keys are opaque blobs; the private blob carries the public blob as its
+ * prefix so sign/verify and encaps/decaps agree in the mock. Callers size the
+ * blobs from the resolved parameter set (see ncmp_specific.c).
+ * ------------------------------------------------------------------------- */
+
+/** @brief SHAKE XOF: expand @p base key material to @p out_len bytes. */
+unsigned long ncmp_crypto_shake_derive(ncmp_client_t *c, uint32_t slot,
+                                       uint32_t mech, const uint8_t *base,
+                                       uint32_t base_len, uint8_t *out,
+                                       uint32_t out_len);
+
+/** @brief ML-DSA key pair: [set|pub_len|priv_len] -> pub, priv blobs. */
+unsigned long ncmp_crypto_mldsa_keygen(ncmp_client_t *c, uint32_t slot,
+                                       uint32_t paramset, uint32_t pub_len,
+                                       uint32_t priv_len, uint8_t *pub,
+                                       uint8_t *priv);
+
+/** @brief ML-DSA sign: [set|pub_len|sig_len|priv|data] -> signature. */
+unsigned long ncmp_crypto_mldsa_sign(ncmp_client_t *c, uint32_t slot,
+                                     uint32_t paramset, uint32_t pub_len,
+                                     uint32_t sig_len, const uint8_t *priv,
+                                     uint32_t priv_len, const uint8_t *data,
+                                     uint32_t data_len, uint8_t *sig,
+                                     uint32_t *out_sig_len);
+
+/** @brief ML-DSA verify: [set|pub|data|sig] -> ack. */
+unsigned long ncmp_crypto_mldsa_verify(ncmp_client_t *c, uint32_t slot,
+                                       uint32_t paramset, const uint8_t *pub,
+                                       uint32_t pub_len, const uint8_t *data,
+                                       uint32_t data_len, const uint8_t *sig,
+                                       uint32_t sig_len);
+
+/** @brief ML-KEM key pair: [set|pub_len|priv_len] -> pub, priv blobs. */
+unsigned long ncmp_crypto_mlkem_keygen(ncmp_client_t *c, uint32_t slot,
+                                       uint32_t paramset, uint32_t pub_len,
+                                       uint32_t priv_len, uint8_t *pub,
+                                       uint8_t *priv);
+
+/** @brief ML-KEM encapsulate: [set|ct_len|ss_len|pub] -> ciphertext, secret. */
+unsigned long ncmp_crypto_mlkem_encaps(ncmp_client_t *c, uint32_t slot,
+                                       uint32_t paramset, const uint8_t *pub,
+                                       uint32_t pub_len, uint32_t ct_len,
+                                       uint32_t ss_len, uint8_t *ct,
+                                       uint8_t *ss);
+
+/** @brief ML-KEM decapsulate: [set|pub_len|ss_len|priv|ct] -> shared secret. */
+unsigned long ncmp_crypto_mlkem_decaps(ncmp_client_t *c, uint32_t slot,
+                                       uint32_t paramset, uint32_t pub_len,
+                                       const uint8_t *priv, uint32_t priv_len,
+                                       const uint8_t *ct, uint32_t ct_len,
+                                       uint32_t ss_len, uint8_t *ss);
+
 #endif /* NCMP_CRYPTO_H */

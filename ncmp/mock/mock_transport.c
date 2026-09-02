@@ -56,6 +56,7 @@ int ncmp_transport_open(uint32_t slot_id, ncmp_transport_t **out)
     t->slot_id = slot_id;
     t->dev = &g_mock_dev[slot_id];
     memset(t->dev, 0, sizeof(*t->dev));
+    mock_device_set_identity(t->dev, slot_id);
     *out = t;
     return NCMP_OK;
 }

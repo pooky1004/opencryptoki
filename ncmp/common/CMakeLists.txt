@@ -6,6 +6,7 @@ add_library(ncmp_common STATIC
     ncmp_wire.c
     ncmp_shm.c
     ncmp_slot.c
+    ncmp_slotmap.c
     ncmp_ipc.c
 )
 

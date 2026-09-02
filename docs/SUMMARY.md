@@ -15,12 +15,13 @@
 
 | 지표 | 값 |
 |------|-----|
-| 진행 단계 | STEP ①~⑨ + 연산 확장 완성 |
-| standalone 테스트 | **47/47 통과** (전송 32 + 크립토 어댑터 15), ThreadSanitizer 0 races |
+| 진행 단계 | STEP ①~⑨ + 연산 확장 + 토큰관리 + PQC/SHA3/XOF mechanism 재정의 완성 |
+| standalone 테스트 | **62/62 통과** (전송 32 + 크립토 15 + 토큰관리 11 + PQC/SHA3/XOF 4), ThreadSanitizer 0 races |
 | opencryptoki STDLL | `libpkcs11_ncmp.so.0.0.0` **실제 빌드 성공** (strict `-pedantic -Werror -std=c99`) |
-| `token_specific` 훅 | **36종** 배선 (crypto 30 + 라이프사이클/리포팅 6) |
-| 와이어 opcode | 20종 + 벤더 8종 (loopback/mem read·write·fill·crc/ping/selftest/fw) |
-| 소스 규모 | `ncmp/` 서브트리 53파일 + opencryptoki 통합 4파일 |
+| `token_specific` 훅 | **48종** 배선 (crypto 30 + 라이프사이클/리포팅 6 + login/PIN 5 + XOF 1 + PQC 6) |
+| 와이어 opcode | 33종 + 벤더 9종 (loopback/mem·crc/ping/selftest/fw/token-info) |
+| **advertised mechanism** | AES-GCM/CTR · SHA-256/512 · SHA3-224/256/384/512 · SHAKE-128/256 KDF · ML-KEM(+keygen) · ML-DSA(+keygen) |
+| 소스 규모 | `ncmp/` 서브트리 58파일 + opencryptoki 통합 4파일 |
 | **미완(하드웨어 필요)** | 실 FX3 브링업 (VID/PID/EP 확정, `pkcsconf` 런타임 검증, 실 암호 정합성) |
 
 ---
@@ -71,7 +72,47 @@ param) / `ncmp_client_command_mp`(다중 param). **아키텍처 패턴 8종 확�
 > sign→verify, 변조→오류)·크기·키/입력 민감성을 검증해 **포워딩 정확성**을 보장.
 > 실제 암호값 정합성은 하드웨어 몫.
 
-### 2.4 자체 PKCS#11 프로바이더 계층 — 제거됨 (2026-09-02)
+### 2.4 토큰 정체성·슬롯 바인딩·login (2026-09-02)
+- **부팅 스캔**: `ncmpd`가 기동 시 각 online 슬롯에 `NCMP_CMD_VD_TOKEN_INFO`
+  단발 왕복으로 토큰 정체성(label/serial/manufacturer/model/hw·fw 버전/flags)을
+  조회해 SHM(`NCMP_TokenIdentity`, 슬롯별)에 캐시(`daemon/main.c`
+  `ncmpd_probe_identity`). comm_thread 기동 전에 전송을 독점 사용.
+- **CK슬롯↔물리토큰 바인딩**(`common/ncmp_slotmap.c`): `t_init`에서
+  `ncmp_slot_bind()`가 원하는 **serial→label** 순으로 online·미할당 토큰을
+  매칭, 없으면 **첫 미할당 online 토큰**을 할당. 바인딩은 **CK 슬롯 ID 기준**으로
+  SHM `global_lock` 하에 저장돼, 같은 CK 슬롯의 여러 프로세스가 동일 물리 토큰으로
+  수렴하고 데몬 수명 동안 유지(final에서 해제하지 않음). 원하는 label/serial은
+  env `NCMP_TOK_LABEL[<n>]`/`NCMP_TOK_SERIAL[<n>]`(CK 슬롯별 접미사 우선).
+- **login/PIN**(`stdll/ncmp_admin.c`): `t_login/t_logout/t_init_pin/t_set_pin/
+  t_init_token`을 물리 토큰으로 포워딩(opcode `NCMP_CMD_LOGIN`..`INIT_TOKEN`).
+  mock 토큰이 PIN 저장·검증(기본 user `1234`, SO `12345678`) 및 로그인 상태 관리.
+- **get_token_info**: 캐시된 정체성으로 manufacturerID/model/serialNumber/hw·fw
+  버전을 채움.
+- **테스트**(`tests/test_admin.c`, 11종): 정체성 조회, serial/label 매칭, 첫
+  미할당 폴백, 매칭 실패 폴백, 멱등 바인딩, 언바인드, login(오PIN/이미로그인/SO),
+  set_pin·init_pin·init_token(오SO PIN 거부·재라벨 확인).
+
+### 2.5 Mechanism 재정의: PQC / SHA3 / XOF (2026-09-02)
+NCMP 토큰의 advertised mechanism list를 아래 집합으로 **재정의**하고 신규 기능·
+테스트를 추가:
+- **대칭키**: AES-GCM, AES-CTR (기존 포워딩 유지).
+- **HASH/XOF**: SHA-256, SHA-512, SHA3-224/256/384/512(기존 DIGEST 경로 재사용,
+  `ncmp_digest_size`에 SHA3 추가) + SHAKE-128/256 **key derivation**(신규 opcode
+  `NCMP_CMD_SHAKE_DERIVE`, `t_shake_key_derive` 배선).
+- **PQC(PKCS#11 3.2)**:
+  - **ML-KEM** 보안강도 1/3/5(CKP_ML_KEM_512/768/1024, `CKA_PARAMETER_SET`로
+    선택): 키페어 생성 + encapsulate/decapsulate로 **공유비밀** 유도.
+  - **ML-DSA** 보안강도 1/3/5(CKP_ML_DSA_44/65/87): 키페어 생성 + **전자서명/검증**.
+- **프록시 표현**: PQC 키는 통짜 블롭으로 `CKA_VALUE`에 저장, private 블롭은 public
+  블롭을 접두어로 포함해 mock의 sign↔verify·encaps↔decaps가 일치. 크기는 공통
+  계층이 넘겨준 `struct pqc_oid`에서 STDLL이 계산해 와이어로 전달(ML-KEM 공유비밀은
+  32B 고정). KEM은 공통 계층 패턴대로 `object_mgr_create_skel/final`로 CKO_SECRET_KEY
+  오브젝트를 생성.
+- 신규 opcode: `SHAKE_DERIVE`(0x0009), `MLDSA_KEYGEN/SIGN/VERIFY`(0x0050~0x0052),
+  `MLKEM_KEYGEN/ENCAPS/DECAPS`(0x0053~0x0055). mock 결정론 구현
+  (`mcu_scheduler.c`), 어댑터(`ncmp_crypto.c`), 테스트(`test_pqc.c`, 4종).
+
+### 2.6 자체 PKCS#11 프로바이더 계층 — 제거됨 (2026-09-02)
 초기에는 `ncmp/pkcs11/`(p11_*.c)로 애플리케이션이 `libpkcs11_ncmp.so`를 직접
 dlopen 해 `C_GetFunctionList`로 쓰는 **완전 자립형 프로바이더**를 병행 제공했으나,
 opencryptoki 표준 STDLL(new_host 기반) 경로로 **일원화**하면서 해당 계층·전용
@@ -118,11 +159,11 @@ gcc -std=c11 -O2 -Wall -Wextra -D_GNU_SOURCE \
     -Iusr/include -Incmp/include -Incmp/tests -Incmp/mock -Incmp/daemon \
     ncmp/tests/*.c ncmp/common/*.c \
     ncmp/stdll/ncmp_session.c ncmp/stdll/ncmp_client.c ncmp/stdll/ncmp_ckr.c \
-    ncmp/stdll/ncmp_crypto.c \
+    ncmp/stdll/ncmp_crypto.c ncmp/stdll/ncmp_admin.c \
     ncmp/daemon/comm_thread.c ncmp/daemon/conn_thread.c \
     ncmp/mock/mock_transport.c ncmp/mock/fx3_dma.c ncmp/mock/container.c \
     ncmp/mock/mcu_scheduler.c -lpthread -lrt -o /tmp/ncmp_tests
-/tmp/ncmp_tests                                # -> SUITE PASSED (47/47)
+/tmp/ncmp_tests                                # -> SUITE PASSED (62/62)
 
 # ThreadSanitizer (ASLR off + 새로 빌드한 바이너리 필수):
 #   위 명령에 -fsanitize=thread 추가 후:  setarch $(uname -m) -R /tmp/ncmp_tests

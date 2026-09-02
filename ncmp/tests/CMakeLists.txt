@@ -11,6 +11,10 @@ add_executable(ncmp_tests
     test_client.c
     # Crypto marshalling adapter (ncmp_crypto) exercised end-to-end vs the mock.
     test_crypto.c
+    # Token admin: identity query, CK-slot binding, login/PIN lifecycle.
+    test_admin.c
+    # SHA3 / XOF / post-quantum (ML-DSA, ML-KEM) adapter tests.
+    test_pqc.c
     # Daemon consumer + connection server exercised by the STEP 2/3 tests.
     ${CMAKE_SOURCE_DIR}/daemon/comm_thread.c
     ${CMAKE_SOURCE_DIR}/daemon/conn_thread.c

@@ -43,6 +43,13 @@ token_spec_t token_specific = {
     .t_init = &token_specific_init,
     .t_final = &token_specific_final,
 
+    /* PIN / login lifecycle: forwarded to the physical token via ncmpd. */
+    .t_init_token = &token_specific_init_token,
+    .t_login = &token_specific_login,
+    .t_logout = &token_specific_logout,
+    .t_init_pin = &token_specific_init_pin,
+    .t_set_pin = &token_specific_set_pin,
+
     /* First forwarded crypto operation: RNG (NCMP_CMD_RNG over the wire). */
     .t_rng = &token_specific_rng,
 
@@ -89,6 +96,19 @@ token_spec_t token_specific = {
     .t_generic_secret_key_gen = &token_specific_generic_secret_key_gen,
     .t_rsa_generate_keypair = &token_specific_rsa_generate_keypair,
     .t_ec_generate_keypair = &token_specific_ec_generate_keypair,
+
+    /* XOF: SHAKE-128/256 key derivation. */
+    .t_shake_key_derive = &token_specific_shake_key_derive,
+
+    /* Post-quantum (PKCS#11 3.2): ML-DSA sign/verify + ML-KEM key agreement,
+     * with their key-pair generators. Strength is selected per key via
+     * CKA_PARAMETER_SET. */
+    .t_ml_dsa_generate_keypair = &token_specific_ml_dsa_generate_keypair,
+    .t_ml_dsa_sign = &token_specific_ml_dsa_sign,
+    .t_ml_dsa_verify = &token_specific_ml_dsa_verify,
+    .t_ml_kem_generate_keypair = &token_specific_ml_kem_generate_keypair,
+    .t_ml_kem_encapsulate_key = &token_specific_ml_kem_encapsulate_key,
+    .t_ml_kem_decapsulate_key = &token_specific_ml_kem_decapsulate_key,
 
     /* Token/mechanism reporting. */
     .t_get_token_info = &token_specific_get_token_info,

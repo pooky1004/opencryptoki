@@ -9,6 +9,7 @@
  */
 #include "ncmp/ncmp_shm.h"
 #include "ncmp/ncmp_wire.h"
+#include "ncmp/ncmp_cmd.h"
 #include "ncmp/ncmp_transport.h"
 #include "ncmp/ncmp_limits.h"
 #include "ncmp/ncmp_errno.h"
@@ -85,7 +86,7 @@ int test_mock_loopback_echo(void)
     memset(&req, 0, sizeof(req));
     req.header.session_id = 0x11;
     req.header.sequence_id = 0x22;
-    req.header.command_id = 0x33;
+    req.header.command_id = NCMP_CMD_VD_LOOPBACK;
     req.header.ack = 0; /* fresh request */
     req.param_len[0] = 4;
     req.payload = (uint8_t *)body;
@@ -110,7 +111,7 @@ int test_mock_loopback_echo(void)
 
     NCMP_CHECK(rsp.header.session_id == 0x11);
     NCMP_CHECK(rsp.header.sequence_id == 0x22);
-    NCMP_CHECK(rsp.header.command_id == 0x33);
+    NCMP_CHECK(rsp.header.command_id == NCMP_CMD_VD_LOOPBACK);
     NCMP_CHECK(rsp.header.ack == 0);          /* CKR_OK from the emulator */
     NCMP_CHECK(rsp.param_len[0] == 4);
     NCMP_CHECK(memcmp(rsp.payload, body, 4) == 0);

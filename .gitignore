@@ -256,5 +256,5 @@ Sessionx.vim
 ncmp/build/
 
 # Generated Office documents (built from docs/*.md)
-*.docx
-*.pptx
+# *.docx
+# *.pptx

@@ -250,10 +250,23 @@ CK_RV token_specific_final(STDLL_TokData_t *tokdata,
     return CKR_OK;
 }
 
-/** Map a PKCS#11 CK_USER_TYPE to the wire user type (SO=0, otherwise USER=1). */
+/** Best-effort memory scrub that the optimizer may not elide (no OpenSSL dep). */
+static void ncmp_secure_zero(void *p, size_t n)
+{
+    volatile unsigned char *v = (volatile unsigned char *)p;
+
+    while (n--)
+        *v++ = 0;
+}
+
+/** Map a PKCS#11 CK_USER_TYPE to the wire user type. */
 static uint32_t ncmp_wire_user_type(CK_USER_TYPE user_type)
 {
-    return (user_type == CKU_SO) ? NCMP_CKU_SO : NCMP_CKU_USER;
+    switch (user_type) {
+    case CKU_SO:               return NCMP_CKU_SO;
+    case CKU_CONTEXT_SPECIFIC: return NCMP_CKU_CONTEXT_SPECIFIC;
+    default:                   return NCMP_CKU_USER;
+    }
 }
 
 CK_RV token_specific_login(STDLL_TokData_t *tokdata, SESSION *sess,
@@ -261,14 +274,30 @@ CK_RV token_specific_login(STDLL_TokData_t *tokdata, SESSION *sess,
                            CK_ULONG pin_len)
 {
     struct ncmp_private_data *priv = tokdata->private_data;
+    uint32_t flags = NCMP_LOGIN_FLAG_NONE;
 
     UNUSED(sess);
 
     if (priv == NULL)
         return CKR_FUNCTION_FAILED;
 
+    /*
+     * Beyond the SO/User role, fold in the other conditions the login must
+     * consider:
+     *   - a NULL PIN (or the token flagging CKF_PROTECTED_AUTHENTICATION_PATH)
+     *     means the PIN is entered on the token's own pad -> protected-auth;
+     *   - CKU_CONTEXT_SPECIFIC re-authenticates the already-logged-in user
+     *     (PKCS#11 CKA_ALWAYS_AUTHENTICATE) rather than opening a new session.
+     */
+    if (pin == NULL ||
+        (tokdata->nv_token_data->token_info.flags &
+         CKF_PROTECTED_AUTHENTICATION_PATH) != 0)
+        flags |= NCMP_LOGIN_FLAG_PROTECTED_AUTH;
+    if (user_type == CKU_CONTEXT_SPECIFIC)
+        flags |= NCMP_LOGIN_FLAG_CONTEXT;
+
     return ncmp_admin_login(&priv->client, priv->ncmp_slot,
-                            ncmp_wire_user_type(user_type),
+                            ncmp_wire_user_type(user_type), flags,
                             (const uint8_t *)pin, (uint32_t)pin_len);
 }
 
@@ -312,14 +341,54 @@ CK_RV token_specific_set_pin(STDLL_TokData_t *tokdata, SESSION *sess,
                               (const uint8_t *)new_pin, (uint32_t)new_len);
 }
 
+/* Forward decl: defined in the token-reporting section below. */
+static void ncmp_copy_padded(CK_CHAR *dst, size_t dst_len, const char *src,
+                             size_t src_cap);
+
+/** Length of @p s within @p cap, excluding trailing spaces and NULs. */
+static size_t ncmp_trim_len(const char *s, size_t cap)
+{
+    size_t n = 0;
+
+    while (n < cap && s[n] != '\0')
+        ++n;
+    while (n > 0 && s[n - 1] == ' ')
+        --n;
+    return n;
+}
+
+/** Copy the scanned identity into the STDLL's nv_token_data->token_info. */
+static void ncmp_apply_identity(STDLL_TokData_t *tokdata,
+                                const NCMP_TokenIdentity *id)
+{
+    CK_TOKEN_INFO_32 *ti = &tokdata->nv_token_data->token_info;
+
+    ncmp_copy_padded(ti->label, sizeof(ti->label), id->label,
+                     NCMP_TI_LABEL_LEN);
+    ncmp_copy_padded(ti->manufacturerID, sizeof(ti->manufacturerID),
+                     id->manufacturer, NCMP_TI_MANUF_LEN);
+    ncmp_copy_padded(ti->model, sizeof(ti->model), id->model, NCMP_TI_MODEL_LEN);
+    ncmp_copy_padded(ti->serialNumber, sizeof(ti->serialNumber), id->serial,
+                     NCMP_TI_SERIAL_LEN);
+    ti->hardwareVersion.major = id->hw_major;
+    ti->hardwareVersion.minor = id->hw_minor;
+    ti->firmwareVersion.major = id->fw_major;
+    ti->firmwareVersion.minor = id->fw_minor;
+    ti->flags |= CKF_TOKEN_INITIALIZED;
+    ti->flags &= ~(CKF_USER_PIN_INITIALIZED | CKF_USER_PIN_LOCKED |
+                   CKF_USER_PIN_FINAL_TRY | CKF_USER_PIN_COUNT_LOW);
+}
+
 CK_RV token_specific_init_token(STDLL_TokData_t *tokdata, CK_SLOT_ID sid,
                                 CK_CHAR_PTR pin, CK_ULONG pin_len,
                                 CK_CHAR_PTR label)
 {
     struct ncmp_private_data *priv = tokdata->private_data;
     char lbl[NCMP_TI_LABEL_LEN + 1];
-
-    UNUSED(sid);
+    uint8_t *pinbuf = NULL;
+    NCMP_TokenIdentity id;
+    unsigned long arc;
+    CK_RV rc;
 
     if (priv == NULL)
         return CKR_FUNCTION_FAILED;
@@ -329,8 +398,101 @@ CK_RV token_specific_init_token(STDLL_TokData_t *tokdata, CK_SLOT_ID sid,
     memcpy(lbl, label, NCMP_TI_LABEL_LEN);
     lbl[NCMP_TI_LABEL_LEN] = '\0';
 
-    return ncmp_admin_init_token(&priv->client, priv->ncmp_slot,
-                                 (const uint8_t *)pin, (uint32_t)pin_len, lbl);
+    /* Work on a private copy of the SO PIN so the temporary can be scrubbed
+     * before returning (only the token must retain the secret). */
+    if (pin_len > 0) {
+        pinbuf = (uint8_t *)malloc(pin_len);
+        if (pinbuf == NULL)
+            return CKR_HOST_MEMORY;
+        memcpy(pinbuf, pin, pin_len);
+    }
+
+    /* 1) Set the SO PIN + label on the physical token. */
+    arc = ncmp_admin_init_token(&priv->client, priv->ncmp_slot, pinbuf,
+                                (uint32_t)pin_len, lbl);
+    if (arc != CKR_OK) {
+        rc = (CK_RV)arc;
+        goto out;
+    }
+
+    /* 2) Read the identity back and validate the label round-tripped exactly. */
+    arc = ncmp_admin_token_info(&priv->client, priv->ncmp_slot, &id);
+    if (arc != CKR_OK) {
+        rc = (CK_RV)arc;
+        goto out;
+    }
+    {
+        size_t want = ncmp_trim_len(lbl, NCMP_TI_LABEL_LEN);
+        size_t got = ncmp_trim_len(id.label, NCMP_TI_LABEL_LEN);
+
+        if (want != got || memcmp(lbl, id.label, want) != 0) {
+            TRACE_ERROR("ncmp: init_token label readback mismatch\n");
+            rc = CKR_FUNCTION_FAILED;
+            goto out;
+        }
+    }
+
+    /* 3) Cache the validated identity and persist it in nv_token_data. */
+    priv->identity = id;
+    ncmp_apply_identity(tokdata, &id);
+    rc = save_token_data(tokdata, sid);
+
+out:
+    /* Scrub every temporary that touched the PIN / label material. */
+    if (pinbuf != NULL) {
+        ncmp_secure_zero(pinbuf, pin_len);
+        free(pinbuf);
+    }
+    ncmp_secure_zero(lbl, sizeof(lbl));
+    ncmp_secure_zero(&id, sizeof(id));
+    return rc;
+}
+
+CK_RV token_specific_init_token_data(STDLL_TokData_t *tokdata,
+                                     CK_SLOT_ID slot_id)
+{
+    struct ncmp_private_data *priv = tokdata->private_data;
+    CK_RV rc;
+
+    UNUSED(slot_id);
+
+    /* Cache the physical token's identity (scanned in t_init) into the freshly
+     * initialized nv_token_data so label/serial/versions reflect the device. */
+    if (priv != NULL && priv->identity.valid)
+        ncmp_apply_identity(tokdata, &priv->identity);
+
+    /* Providing this hook replaces the common layer's default master-key setup,
+     * so generate and persist the master key the same way it would. */
+    rc = generate_master_key(tokdata, tokdata->master_key);
+    if (rc != CKR_OK) {
+        TRACE_ERROR("ncmp: generate_master_key failed rc=0x%lx\n", rc);
+        return CKR_FUNCTION_FAILED;
+    }
+    return save_masterkey_so(tokdata);
+}
+
+/*
+ * The STDLL keeps no extra on-disk state beyond the standard nv_token_data, so
+ * the load/save hooks are pass-throughs: they exist to satisfy the secure-key
+ * data-store contract and give the token a place to (de)serialize device state
+ * alongside the common record in the future.
+ */
+CK_RV token_specific_load_token_data(STDLL_TokData_t *tokdata,
+                                     CK_SLOT_ID slot_id, FILE *fh)
+{
+    UNUSED(tokdata);
+    UNUSED(slot_id);
+    UNUSED(fh);
+    return CKR_OK;
+}
+
+CK_RV token_specific_save_token_data(STDLL_TokData_t *tokdata,
+                                     CK_SLOT_ID slot_id, FILE *fh)
+{
+    UNUSED(tokdata);
+    UNUSED(slot_id);
+    UNUSED(fh);
+    return CKR_OK;
 }
 
 CK_RV token_specific_rng(STDLL_TokData_t *tokdata, CK_BYTE *output,
@@ -514,128 +676,6 @@ CK_RV token_specific_sha(STDLL_TokData_t *tokdata, DIGEST_CONTEXT *ctx,
     return CKR_OK;
 }
 
-CK_RV token_specific_aes_cbc(STDLL_TokData_t *tokdata, SESSION *sess,
-                             CK_BYTE *in_data, CK_ULONG in_data_len,
-                             CK_BYTE *out_data, CK_ULONG *out_data_len,
-                             OBJECT *key, CK_BYTE *init_v, CK_BYTE encrypt)
-{
-    struct ncmp_private_data *priv = tokdata->private_data;
-    CK_ATTRIBUTE *key_attr = NULL;
-    uint32_t out_len = 0;
-    CK_RV rc;
-
-    UNUSED(sess);
-
-    if (priv == NULL)
-        return CKR_FUNCTION_FAILED;
-    if ((in_data_len % NCMP_AES_BLOCK) != 0)
-        return CKR_DATA_LEN_RANGE;
-    if (out_data == NULL || *out_data_len < in_data_len) {
-        *out_data_len = in_data_len;
-        return CKR_BUFFER_TOO_SMALL;
-    }
-
-    /* Pull the raw key bytes from the key object. */
-    rc = template_attribute_get_non_empty(key->template, CKA_VALUE, &key_attr);
-    if (rc != CKR_OK)
-        return rc;
-
-    rc = ncmp_crypto_aes_cbc(&priv->client, priv->ncmp_slot, encrypt,
-                             key_attr->pValue, (uint32_t)key_attr->ulValueLen,
-                             init_v, NCMP_AES_BLOCK, in_data,
-                             (uint32_t)in_data_len, out_data,
-                             (uint32_t)*out_data_len, &out_len);
-    if (rc != CKR_OK)
-        return rc;
-    if (out_len != in_data_len)
-        return CKR_FUNCTION_FAILED;
-
-    *out_data_len = in_data_len;
-    return CKR_OK;
-}
-
-CK_RV token_specific_rsa_sign(STDLL_TokData_t *tokdata, SESSION *sess,
-                              CK_BYTE *in_data, CK_ULONG in_data_len,
-                              CK_BYTE *out_data, CK_ULONG *out_data_len,
-                              OBJECT *key)
-{
-    struct ncmp_private_data *priv = tokdata->private_data;
-    CK_ATTRIBUTE *mod_attr = NULL;
-    CK_ATTRIBUTE *exp_attr = NULL;
-    uint32_t out_len = 0;
-    CK_RV rc;
-
-    UNUSED(sess);
-
-    if (priv == NULL)
-        return CKR_FUNCTION_FAILED;
-
-    /* Asymmetric key: pull the modulus and private exponent from the object. */
-    rc = template_attribute_get_non_empty(key->template, CKA_MODULUS, &mod_attr);
-    if (rc != CKR_OK)
-        return rc;
-    rc = template_attribute_get_non_empty(key->template, CKA_PRIVATE_EXPONENT,
-                                          &exp_attr);
-    if (rc != CKR_OK)
-        return rc;
-
-    if (out_data == NULL || *out_data_len < mod_attr->ulValueLen) {
-        *out_data_len = mod_attr->ulValueLen;
-        return CKR_BUFFER_TOO_SMALL;
-    }
-
-    rc = ncmp_crypto_rsa_sign(&priv->client, priv->ncmp_slot,
-                              mod_attr->pValue, (uint32_t)mod_attr->ulValueLen,
-                              exp_attr->pValue, (uint32_t)exp_attr->ulValueLen,
-                              in_data, (uint32_t)in_data_len, out_data,
-                              (uint32_t)*out_data_len, &out_len);
-    if (rc != CKR_OK)
-        return rc;
-    if (out_len != mod_attr->ulValueLen)
-        return CKR_FUNCTION_FAILED;
-
-    *out_data_len = mod_attr->ulValueLen;
-    return CKR_OK;
-}
-
-CK_RV token_specific_aes_ecb(STDLL_TokData_t *tokdata, SESSION *sess,
-                             CK_BYTE *in_data, CK_ULONG in_data_len,
-                             CK_BYTE *out_data, CK_ULONG *out_data_len,
-                             OBJECT *key, CK_BYTE encrypt)
-{
-    struct ncmp_private_data *priv = tokdata->private_data;
-    CK_ATTRIBUTE *key_attr = NULL;
-    uint32_t out_len = 0;
-    CK_RV rc;
-
-    UNUSED(sess);
-
-    if (priv == NULL)
-        return CKR_FUNCTION_FAILED;
-    if ((in_data_len % NCMP_AES_BLOCK) != 0)
-        return CKR_DATA_LEN_RANGE;
-    if (out_data == NULL || *out_data_len < in_data_len) {
-        *out_data_len = in_data_len;
-        return CKR_BUFFER_TOO_SMALL;
-    }
-
-    rc = template_attribute_get_non_empty(key->template, CKA_VALUE, &key_attr);
-    if (rc != CKR_OK)
-        return rc;
-
-    rc = ncmp_crypto_aes_ecb(&priv->client, priv->ncmp_slot, encrypt,
-                             key_attr->pValue, (uint32_t)key_attr->ulValueLen,
-                             in_data, (uint32_t)in_data_len, out_data,
-                             (uint32_t)*out_data_len, &out_len);
-    if (rc != CKR_OK)
-        return rc;
-    if (out_len != in_data_len)
-        return CKR_FUNCTION_FAILED;
-
-    *out_data_len = in_data_len;
-    return CKR_OK;
-}
-
 CK_RV token_specific_aes_gcm_init(STDLL_TokData_t *tokdata, SESSION *sess,
                                   ENCR_DECR_CONTEXT *ctx, CK_MECHANISM *mech,
                                   CK_OBJECT_HANDLE key, CK_BYTE encrypt)
@@ -769,156 +809,6 @@ CK_RV token_specific_aes_ctr(STDLL_TokData_t *tokdata, CK_BYTE *in_data,
     return rc;
 }
 
-CK_RV token_specific_aes_ofb(STDLL_TokData_t *tokdata, CK_BYTE *in_data,
-                             CK_ULONG in_data_len, CK_BYTE *out_data,
-                             OBJECT *key, CK_BYTE *init_v, uint_32 encrypt)
-{
-    struct ncmp_private_data *priv = tokdata->private_data;
-
-    if (priv == NULL)
-        return CKR_FUNCTION_FAILED;
-    /* OFB output length equals input length; caller sizes out_data. */
-    return ncmp_aes_stream(priv, NCMP_CMD_AES_OFB, key, init_v, NCMP_AES_BLOCK,
-                           (CK_BYTE)(encrypt != 0), in_data, in_data_len,
-                           out_data, in_data_len);
-}
-
-CK_RV token_specific_aes_cfb(STDLL_TokData_t *tokdata, CK_BYTE *in_data,
-                             CK_ULONG in_data_len, CK_BYTE *out_data,
-                             OBJECT *key, CK_BYTE *init_v, uint_32 cfb_len,
-                             uint_32 encrypt)
-{
-    struct ncmp_private_data *priv = tokdata->private_data;
-
-    UNUSED(cfb_len); /* mock ignores the CFB segment size */
-
-    if (priv == NULL)
-        return CKR_FUNCTION_FAILED;
-    return ncmp_aes_stream(priv, NCMP_CMD_AES_CFB, key, init_v, NCMP_AES_BLOCK,
-                           (CK_BYTE)(encrypt != 0), in_data, in_data_len,
-                           out_data, in_data_len);
-}
-
-CK_RV token_specific_ec_sign(STDLL_TokData_t *tokdata, SESSION *sess,
-                             CK_BYTE *in_data, CK_ULONG in_data_len,
-                             CK_BYTE *out_data, CK_ULONG *out_data_len,
-                             OBJECT *key)
-{
-    struct ncmp_private_data *priv = tokdata->private_data;
-    CK_ATTRIBUTE *params_attr = NULL;
-    CK_ATTRIBUTE *val_attr = NULL;
-    uint32_t out_len = 0;
-    CK_ULONG siglen;
-    CK_RV rc;
-
-    UNUSED(sess);
-
-    if (priv == NULL)
-        return CKR_FUNCTION_FAILED;
-
-    /* EC private key: the curve (CKA_EC_PARAMS) and the private scalar
-     * (CKA_VALUE). ECDSA signature length is 2 * field length. */
-    rc = template_attribute_get_non_empty(key->template, CKA_EC_PARAMS,
-                                          &params_attr);
-    if (rc != CKR_OK)
-        return rc;
-    rc = template_attribute_get_non_empty(key->template, CKA_VALUE, &val_attr);
-    if (rc != CKR_OK)
-        return rc;
-
-    siglen = 2 * val_attr->ulValueLen;
-    if (out_data == NULL || *out_data_len < siglen) {
-        *out_data_len = siglen;
-        return CKR_BUFFER_TOO_SMALL;
-    }
-
-    rc = ncmp_crypto_ec_sign(&priv->client, priv->ncmp_slot,
-                             params_attr->pValue,
-                             (uint32_t)params_attr->ulValueLen,
-                             val_attr->pValue, (uint32_t)val_attr->ulValueLen,
-                             in_data, (uint32_t)in_data_len, out_data,
-                             (uint32_t)*out_data_len, &out_len);
-    if (rc != CKR_OK)
-        return rc;
-    if (out_len != siglen)
-        return CKR_FUNCTION_FAILED;
-
-    *out_data_len = siglen;
-    return CKR_OK;
-}
-
-CK_RV token_specific_rsa_verify(STDLL_TokData_t *tokdata, SESSION *sess,
-                                CK_BYTE *in_data, CK_ULONG in_data_len,
-                                CK_BYTE *signature, CK_ULONG sig_len,
-                                OBJECT *key)
-{
-    struct ncmp_private_data *priv = tokdata->private_data;
-    CK_ATTRIBUTE *mod_attr = NULL;
-    CK_ATTRIBUTE *exp_attr = NULL;
-    CK_RV rc;
-
-    UNUSED(sess);
-
-    if (priv == NULL)
-        return CKR_FUNCTION_FAILED;
-
-    /* Verify uses the public key: modulus + public exponent. */
-    rc = template_attribute_get_non_empty(key->template, CKA_MODULUS, &mod_attr);
-    if (rc != CKR_OK)
-        return rc;
-    rc = template_attribute_get_non_empty(key->template, CKA_PUBLIC_EXPONENT,
-                                          &exp_attr);
-    if (rc != CKR_OK)
-        return rc;
-
-    /* The adapter returns CKR_OK or the token's CKR_SIGNATURE_INVALID ACK. */
-    return ncmp_crypto_rsa_verify(&priv->client, priv->ncmp_slot,
-                                  mod_attr->pValue,
-                                  (uint32_t)mod_attr->ulValueLen,
-                                  exp_attr->pValue,
-                                  (uint32_t)exp_attr->ulValueLen, in_data,
-                                  (uint32_t)in_data_len, signature,
-                                  (uint32_t)sig_len);
-}
-
-CK_RV token_specific_ec_verify(STDLL_TokData_t *tokdata, SESSION *sess,
-                               CK_BYTE *in_data, CK_ULONG in_data_len,
-                               CK_BYTE *signature, CK_ULONG sig_len,
-                               OBJECT *key)
-{
-    struct ncmp_private_data *priv = tokdata->private_data;
-    CK_ATTRIBUTE *params_attr = NULL;
-    CK_ATTRIBUTE *point_attr = NULL;
-    CK_RV rc;
-
-    UNUSED(sess);
-
-    if (priv == NULL)
-        return CKR_FUNCTION_FAILED;
-
-    /* Verify uses the public key: curve params + public point. */
-    rc = template_attribute_get_non_empty(key->template, CKA_EC_PARAMS,
-                                          &params_attr);
-    if (rc != CKR_OK)
-        return rc;
-    rc = template_attribute_get_non_empty(key->template, CKA_EC_POINT,
-                                          &point_attr);
-    if (rc != CKR_OK)
-        return rc;
-
-    return ncmp_crypto_ec_verify(&priv->client, priv->ncmp_slot,
-                                 params_attr->pValue,
-                                 (uint32_t)params_attr->ulValueLen,
-                                 point_attr->pValue,
-                                 (uint32_t)point_attr->ulValueLen, in_data,
-                                 (uint32_t)in_data_len, signature,
-                                 (uint32_t)sig_len);
-}
-
-/* Defined later (keypair-gen section); used by generic_secret_key_gen below. */
-static CK_RV ncmp_tmpl_add(TEMPLATE *tmpl, CK_ATTRIBUTE_TYPE type,
-                           const uint8_t *data, uint32_t len);
-
 /** Fill @p buf with @p len random bytes generated by the token (RNG opcode). */
 static CK_RV ncmp_gen_random(struct ncmp_private_data *priv, CK_BYTE *buf,
                              CK_ULONG len)
@@ -963,488 +853,6 @@ CK_RV token_specific_aes_key_gen(STDLL_TokData_t *tokdata, TEMPLATE *tmpl,
     UNUSED(tmpl);
     return ncmp_symkey_gen(tokdata->private_data, key_value, key_len, keysize,
                            is_opaque);
-}
-
-CK_RV token_specific_des_key_gen(STDLL_TokData_t *tokdata, TEMPLATE *tmpl,
-                                 CK_BYTE **key_value, CK_ULONG *key_len,
-                                 CK_ULONG keysize, CK_BBOOL *is_opaque)
-{
-    UNUSED(tmpl);
-    /* DES (8) and 3DES (24) key material are random bytes like AES. */
-    return ncmp_symkey_gen(tokdata->private_data, key_value, key_len, keysize,
-                           is_opaque);
-}
-
-CK_RV token_specific_generic_secret_key_gen(STDLL_TokData_t *tokdata,
-                                            TEMPLATE *tmpl)
-{
-    struct ncmp_private_data *priv = tokdata->private_data;
-    CK_ULONG key_length = 0;
-    CK_BYTE *buf;
-    CK_RV rc;
-
-    if (priv == NULL)
-        return CKR_FUNCTION_FAILED;
-
-    rc = template_attribute_get_ulong(tmpl, CKA_VALUE_LEN, &key_length);
-    if (rc != CKR_OK)
-        return rc;
-    if (key_length == 0 || key_length > NCMP_MAX_PARAM_SIZE)
-        return CKR_KEY_SIZE_RANGE;
-
-    buf = (CK_BYTE *)malloc(key_length);
-    if (buf == NULL)
-        return CKR_HOST_MEMORY;
-
-    rc = ncmp_gen_random(priv, buf, key_length);
-    if (rc == CKR_OK)
-        rc = ncmp_tmpl_add(tmpl, CKA_VALUE, buf, (uint32_t)key_length);
-    free(buf); /* build_attribute deep-copies */
-    return rc;
-}
-
-/** Build one attribute from raw bytes and insert it into a template. */
-static CK_RV ncmp_tmpl_add(TEMPLATE *tmpl, CK_ATTRIBUTE_TYPE type,
-                           const uint8_t *data, uint32_t len)
-{
-    CK_ATTRIBUTE *attr = NULL;
-    CK_RV rc = build_attribute(type, (CK_BYTE *)data, len, &attr);
-
-    if (rc != CKR_OK)
-        return rc;
-    rc = template_update_attribute(tmpl, attr);
-    if (rc != CKR_OK)
-        free(attr); /* template did not take ownership on failure */
-    return rc;
-}
-
-CK_RV token_specific_rsa_generate_keypair(STDLL_TokData_t *tokdata,
-                                          TEMPLATE *publ_tmpl,
-                                          TEMPLATE *priv_tmpl)
-{
-    struct ncmp_private_data *priv = tokdata->private_data;
-    CK_ATTRIBUTE *pubexp = NULL;
-    CK_ULONG mod_bits = 0;
-    uint32_t nbytes, hbytes, total;
-    uint8_t *outbuf;
-    ncmp_rsa_keypair_t kp;
-    CK_RV rc;
-
-    if (priv == NULL)
-        return CKR_FUNCTION_FAILED;
-
-    rc = template_attribute_get_ulong(publ_tmpl, CKA_MODULUS_BITS, &mod_bits);
-    if (rc != CKR_OK)
-        return rc;
-    rc = template_attribute_get_non_empty(publ_tmpl, CKA_PUBLIC_EXPONENT,
-                                          &pubexp);
-    if (rc != CKR_OK)
-        return rc;
-    if (mod_bits < 512 || mod_bits > 4096 || (mod_bits % 8) != 0)
-        return CKR_KEY_SIZE_RANGE;
-
-    nbytes = (uint32_t)mod_bits / 8;
-    hbytes = nbytes / 2;
-    total = 2 * nbytes + 5 * hbytes;
-    outbuf = (uint8_t *)malloc(total);
-    if (outbuf == NULL)
-        return CKR_HOST_MEMORY;
-
-    /* Ask the token to generate the key: [modulus bits | public exponent] ->
-     * n, d, p, q, dp, dq, qinv (bytes land in outbuf, kp points at them). */
-    rc = ncmp_crypto_rsa_keygen(&priv->client, priv->ncmp_slot,
-                                (uint32_t)mod_bits, pubexp->pValue,
-                                (uint32_t)pubexp->ulValueLen, outbuf, total,
-                                &kp);
-    if (rc != CKR_OK) {
-        free(outbuf);
-        return rc;
-    }
-
-    /* Public key: modulus (+ the caller's public exponent stays in publ_tmpl).
-     * Private key: full component set. build_attribute deep-copies, so outbuf
-     * can be freed afterwards. */
-    rc = ncmp_tmpl_add(publ_tmpl, CKA_MODULUS, kp.modulus, kp.modulus_len);
-    if (rc == CKR_OK)
-        rc = ncmp_tmpl_add(priv_tmpl, CKA_MODULUS, kp.modulus, kp.modulus_len);
-    if (rc == CKR_OK)
-        rc = ncmp_tmpl_add(priv_tmpl, CKA_PUBLIC_EXPONENT,
-                           (const uint8_t *)pubexp->pValue,
-                           (uint32_t)pubexp->ulValueLen);
-    if (rc == CKR_OK)
-        rc = ncmp_tmpl_add(priv_tmpl, CKA_PRIVATE_EXPONENT, kp.priv_exp,
-                           kp.priv_exp_len);
-    if (rc == CKR_OK)
-        rc = ncmp_tmpl_add(priv_tmpl, CKA_PRIME_1, kp.prime1, kp.prime1_len);
-    if (rc == CKR_OK)
-        rc = ncmp_tmpl_add(priv_tmpl, CKA_PRIME_2, kp.prime2, kp.prime2_len);
-    if (rc == CKR_OK)
-        rc = ncmp_tmpl_add(priv_tmpl, CKA_EXPONENT_1, kp.exp1, kp.exp1_len);
-    if (rc == CKR_OK)
-        rc = ncmp_tmpl_add(priv_tmpl, CKA_EXPONENT_2, kp.exp2, kp.exp2_len);
-    if (rc == CKR_OK)
-        rc = ncmp_tmpl_add(priv_tmpl, CKA_COEFFICIENT, kp.coeff, kp.coeff_len);
-
-    free(outbuf);
-    return rc;
-}
-
-CK_RV token_specific_ec_generate_keypair(STDLL_TokData_t *tokdata,
-                                         TEMPLATE *publ_tmpl,
-                                         TEMPLATE *priv_tmpl)
-{
-    struct ncmp_private_data *priv = tokdata->private_data;
-    CK_ATTRIBUTE *params = NULL;
-    uint8_t outbuf[256];
-    ncmp_ec_keypair_t kp;
-    CK_RV rc;
-
-    if (priv == NULL)
-        return CKR_FUNCTION_FAILED;
-
-    rc = template_attribute_get_non_empty(publ_tmpl, CKA_EC_PARAMS, &params);
-    if (rc != CKR_OK)
-        return rc;
-
-    rc = ncmp_crypto_ec_keygen(&priv->client, priv->ncmp_slot, params->pValue,
-                               (uint32_t)params->ulValueLen, outbuf,
-                               sizeof(outbuf), &kp);
-    if (rc != CKR_OK)
-        return rc;
-
-    /* Public key: EC point. Private key: curve params + private value + point. */
-    rc = ncmp_tmpl_add(publ_tmpl, CKA_EC_POINT, kp.ec_point, kp.ec_point_len);
-    if (rc == CKR_OK)
-        rc = ncmp_tmpl_add(priv_tmpl, CKA_EC_PARAMS,
-                           (const uint8_t *)params->pValue,
-                           (uint32_t)params->ulValueLen);
-    if (rc == CKR_OK)
-        rc = ncmp_tmpl_add(priv_tmpl, CKA_VALUE, kp.priv, kp.priv_len);
-    if (rc == CKR_OK)
-        rc = ncmp_tmpl_add(priv_tmpl, CKA_EC_POINT, kp.ec_point,
-                           kp.ec_point_len);
-
-    return rc;
-}
-
-CK_RV token_specific_hmac_sign_init(STDLL_TokData_t *tokdata, SESSION *sess,
-                                    CK_MECHANISM *mech, CK_OBJECT_HANDLE key)
-{
-    UNUSED(tokdata);
-    UNUSED(sess);
-    UNUSED(key);
-    /* Key + mech live in sess->sign_ctx at one-shot time; just validate. */
-    return (ncmp_hmac_size((uint32_t)mech->mechanism) != 0)
-               ? CKR_OK : CKR_MECHANISM_INVALID;
-}
-
-CK_RV token_specific_hmac_verify_init(STDLL_TokData_t *tokdata, SESSION *sess,
-                                      CK_MECHANISM *mech, CK_OBJECT_HANDLE key)
-{
-    UNUSED(tokdata);
-    UNUSED(sess);
-    UNUSED(key);
-    return (ncmp_hmac_size((uint32_t)mech->mechanism) != 0)
-               ? CKR_OK : CKR_MECHANISM_INVALID;
-}
-
-CK_RV token_specific_hmac_sign(STDLL_TokData_t *tokdata, SESSION *sess,
-                               CK_BYTE *in_data, CK_ULONG in_data_len,
-                               CK_BYTE *out_data, CK_ULONG *out_data_len)
-{
-    struct ncmp_private_data *priv = tokdata->private_data;
-    SIGN_VERIFY_CONTEXT *ctx = &sess->sign_ctx;
-    uint32_t mech = (uint32_t)ctx->mech.mechanism;
-    uint32_t hsize = ncmp_hmac_size(mech);
-    OBJECT *key_obj = NULL;
-    CK_ATTRIBUTE *kv = NULL;
-    uint32_t out_len = 0;
-    CK_RV rc;
-
-    if (priv == NULL || hsize == 0)
-        return CKR_FUNCTION_FAILED;
-    if (out_data == NULL || *out_data_len < hsize) {
-        *out_data_len = hsize;
-        return CKR_BUFFER_TOO_SMALL;
-    }
-
-    rc = object_mgr_find_in_map1(tokdata, ctx->key, &key_obj, READ_LOCK);
-    if (rc != CKR_OK)
-        return rc;
-    rc = template_attribute_get_non_empty(key_obj->template, CKA_VALUE, &kv);
-    if (rc != CKR_OK) {
-        object_put(tokdata, key_obj, TRUE);
-        return rc;
-    }
-
-    rc = ncmp_crypto_hmac_sign(&priv->client, priv->ncmp_slot, mech, kv->pValue,
-                               (uint32_t)kv->ulValueLen, in_data,
-                               (uint32_t)in_data_len, out_data,
-                               (uint32_t)*out_data_len, &out_len);
-    object_put(tokdata, key_obj, TRUE);
-
-    if (rc != CKR_OK)
-        return rc;
-    if (out_len != hsize)
-        return CKR_FUNCTION_FAILED;
-    *out_data_len = hsize;
-    return CKR_OK;
-}
-
-CK_RV token_specific_hmac_verify(STDLL_TokData_t *tokdata, SESSION *sess,
-                                 CK_BYTE *in_data, CK_ULONG in_data_len,
-                                 CK_BYTE *signature, CK_ULONG sig_len)
-{
-    struct ncmp_private_data *priv = tokdata->private_data;
-    SIGN_VERIFY_CONTEXT *ctx = &sess->verify_ctx;
-    uint32_t mech = (uint32_t)ctx->mech.mechanism;
-    OBJECT *key_obj = NULL;
-    CK_ATTRIBUTE *kv = NULL;
-    CK_RV rc;
-
-    if (priv == NULL || ncmp_hmac_size(mech) == 0)
-        return CKR_FUNCTION_FAILED;
-
-    rc = object_mgr_find_in_map1(tokdata, ctx->key, &key_obj, READ_LOCK);
-    if (rc != CKR_OK)
-        return rc;
-    rc = template_attribute_get_non_empty(key_obj->template, CKA_VALUE, &kv);
-    if (rc != CKR_OK) {
-        object_put(tokdata, key_obj, TRUE);
-        return rc;
-    }
-
-    /* Adapter returns CKR_OK or the token's CKR_SIGNATURE_INVALID ACK. */
-    rc = ncmp_crypto_hmac_verify(&priv->client, priv->ncmp_slot, mech,
-                                 kv->pValue, (uint32_t)kv->ulValueLen, in_data,
-                                 (uint32_t)in_data_len, signature,
-                                 (uint32_t)sig_len);
-    object_put(tokdata, key_obj, TRUE);
-    return rc;
-}
-
-/** Forward an RSA-OAEP op resolving the key handle and modulus/exponent. */
-static CK_RV ncmp_rsa_oaep(STDLL_TokData_t *tokdata,
-                           struct ncmp_private_data *priv,
-                           ENCR_DECR_CONTEXT *ctx, uint32_t opcode,
-                           CK_ATTRIBUTE_TYPE exp_type, int need_modlen_out,
-                           CK_BYTE *in, CK_ULONG in_len,
-                           CK_BYTE *out, CK_ULONG *out_len)
-{
-    OBJECT *key_obj = NULL;
-    CK_ATTRIBUTE *mod = NULL;
-    CK_ATTRIBUTE *exp = NULL;
-    uint32_t out_bytes = 0;
-    CK_RV rc;
-
-    rc = object_mgr_find_in_map1(tokdata, ctx->key, &key_obj, READ_LOCK);
-    if (rc != CKR_OK)
-        return rc;
-    rc = template_attribute_get_non_empty(key_obj->template, CKA_MODULUS, &mod);
-    if (rc != CKR_OK)
-        goto out;
-    rc = template_attribute_get_non_empty(key_obj->template, exp_type, &exp);
-    if (rc != CKR_OK)
-        goto out;
-
-    if (need_modlen_out && (out == NULL || *out_len < mod->ulValueLen)) {
-        *out_len = mod->ulValueLen; /* ciphertext is one modulus long */
-        rc = CKR_BUFFER_TOO_SMALL;
-        goto out;
-    }
-    if (out == NULL) {
-        rc = CKR_ARGUMENTS_BAD;
-        goto out;
-    }
-
-    rc = ncmp_crypto_rsa_oaep(&priv->client, priv->ncmp_slot, opcode,
-                              mod->pValue, (uint32_t)mod->ulValueLen,
-                              exp->pValue, (uint32_t)exp->ulValueLen, in,
-                              (uint32_t)in_len, out, (uint32_t)*out_len,
-                              &out_bytes);
-    if (rc == CKR_OK)
-        *out_len = out_bytes;
-
-out:
-    object_put(tokdata, key_obj, TRUE);
-    return rc;
-}
-
-CK_RV token_specific_rsa_oaep_encrypt(STDLL_TokData_t *tokdata,
-                                      ENCR_DECR_CONTEXT *ctx, CK_BYTE *in_data,
-                                      CK_ULONG in_data_len, CK_BYTE *out_data,
-                                      CK_ULONG *out_data_len, CK_BYTE *hash,
-                                      CK_ULONG hlen)
-{
-    struct ncmp_private_data *priv = tokdata->private_data;
-
-    UNUSED(hash);
-    UNUSED(hlen); /* mock ignores the OAEP label hash */
-
-    if (priv == NULL)
-        return CKR_FUNCTION_FAILED;
-    return ncmp_rsa_oaep(tokdata, priv, ctx, NCMP_CMD_RSA_OAEP_ENC,
-                         CKA_PUBLIC_EXPONENT, 1, in_data, in_data_len,
-                         out_data, out_data_len);
-}
-
-CK_RV token_specific_rsa_oaep_decrypt(STDLL_TokData_t *tokdata,
-                                      ENCR_DECR_CONTEXT *ctx, CK_BYTE *in_data,
-                                      CK_ULONG in_data_len, CK_BYTE *out_data,
-                                      CK_ULONG *out_data_len, CK_BYTE *hash,
-                                      CK_ULONG hlen)
-{
-    struct ncmp_private_data *priv = tokdata->private_data;
-
-    UNUSED(hash);
-    UNUSED(hlen);
-
-    if (priv == NULL)
-        return CKR_FUNCTION_FAILED;
-    return ncmp_rsa_oaep(tokdata, priv, ctx, NCMP_CMD_RSA_OAEP_DEC,
-                         CKA_PRIVATE_EXPONENT, 0, in_data, in_data_len,
-                         out_data, out_data_len);
-}
-
-CK_RV token_specific_rsa_pss_sign(STDLL_TokData_t *tokdata, SESSION *sess,
-                                  SIGN_VERIFY_CONTEXT *ctx, CK_BYTE *in_data,
-                                  CK_ULONG in_data_len, CK_BYTE *sig,
-                                  CK_ULONG *sig_len)
-{
-    struct ncmp_private_data *priv = tokdata->private_data;
-    OBJECT *key_obj = NULL;
-    CK_ATTRIBUTE *mod = NULL;
-    CK_ATTRIBUTE *exp = NULL;
-    uint32_t out_len = 0;
-    CK_ULONG modlen;
-    CK_RV rc;
-
-    UNUSED(sess);
-
-    if (priv == NULL)
-        return CKR_FUNCTION_FAILED;
-
-    /* PSS signs with the private key; marshalling matches PKCS RSA sign. */
-    rc = object_mgr_find_in_map1(tokdata, ctx->key, &key_obj, READ_LOCK);
-    if (rc != CKR_OK)
-        return rc;
-    rc = template_attribute_get_non_empty(key_obj->template, CKA_MODULUS, &mod);
-    if (rc != CKR_OK)
-        goto out;
-    rc = template_attribute_get_non_empty(key_obj->template,
-                                          CKA_PRIVATE_EXPONENT, &exp);
-    if (rc != CKR_OK)
-        goto out;
-    modlen = mod->ulValueLen;
-    if (sig == NULL || *sig_len < modlen) {
-        *sig_len = modlen;
-        rc = CKR_BUFFER_TOO_SMALL;
-        goto out;
-    }
-
-    rc = ncmp_crypto_rsa_sign(&priv->client, priv->ncmp_slot, mod->pValue,
-                              (uint32_t)modlen, exp->pValue,
-                              (uint32_t)exp->ulValueLen, in_data,
-                              (uint32_t)in_data_len, sig, (uint32_t)*sig_len,
-                              &out_len);
-    if (rc != CKR_OK)
-        goto out;
-    if (out_len != modlen) {
-        rc = CKR_FUNCTION_FAILED;
-        goto out;
-    }
-    *sig_len = modlen;
-
-out:
-    object_put(tokdata, key_obj, TRUE);
-    return rc;
-}
-
-CK_RV token_specific_rsa_pss_verify(STDLL_TokData_t *tokdata, SESSION *sess,
-                                    SIGN_VERIFY_CONTEXT *ctx, CK_BYTE *in_data,
-                                    CK_ULONG in_data_len, CK_BYTE *signature,
-                                    CK_ULONG sig_len)
-{
-    struct ncmp_private_data *priv = tokdata->private_data;
-    OBJECT *key_obj = NULL;
-    CK_ATTRIBUTE *mod = NULL;
-    CK_ATTRIBUTE *exp = NULL;
-    CK_RV rc;
-
-    UNUSED(sess);
-
-    if (priv == NULL)
-        return CKR_FUNCTION_FAILED;
-
-    rc = object_mgr_find_in_map1(tokdata, ctx->key, &key_obj, READ_LOCK);
-    if (rc != CKR_OK)
-        return rc;
-    rc = template_attribute_get_non_empty(key_obj->template, CKA_MODULUS, &mod);
-    if (rc != CKR_OK)
-        goto out;
-    rc = template_attribute_get_non_empty(key_obj->template,
-                                          CKA_PUBLIC_EXPONENT, &exp);
-    if (rc != CKR_OK)
-        goto out;
-
-    rc = ncmp_crypto_rsa_verify(&priv->client, priv->ncmp_slot, mod->pValue,
-                                (uint32_t)mod->ulValueLen, exp->pValue,
-                                (uint32_t)exp->ulValueLen, in_data,
-                                (uint32_t)in_data_len, signature,
-                                (uint32_t)sig_len);
-
-out:
-    object_put(tokdata, key_obj, TRUE);
-    return rc;
-}
-
-CK_RV token_specific_dh_pkcs_derive(STDLL_TokData_t *tokdata, CK_BYTE *secret,
-                                    CK_ULONG *secret_len, CK_BYTE *pub,
-                                    CK_ULONG pub_len, CK_BYTE *priv_val,
-                                    CK_ULONG priv_len, CK_BYTE *prime,
-                                    CK_ULONG prime_len)
-{
-    struct ncmp_private_data *priv = tokdata->private_data;
-    uint32_t out_len = 0;
-    CK_RV rc;
-
-    if (priv == NULL || secret == NULL)
-        return CKR_FUNCTION_FAILED;
-
-    /* Raw values (no object): [prime | own private | peer public]. */
-    rc = ncmp_crypto_dh_derive(&priv->client, priv->ncmp_slot, prime,
-                               (uint32_t)prime_len, priv_val, (uint32_t)priv_len,
-                               pub, (uint32_t)pub_len, secret,
-                               (uint32_t)*secret_len, &out_len);
-    if (rc != CKR_OK)
-        return rc;
-    *secret_len = out_len;
-    return CKR_OK;
-}
-
-CK_RV token_specific_ecdh_pkcs_derive(STDLL_TokData_t *tokdata, CK_BYTE *priv_val,
-                                      CK_ULONG priv_len, CK_BYTE *pub,
-                                      CK_ULONG pub_len, CK_BYTE *secret,
-                                      CK_ULONG *secret_len, CK_BYTE *oid,
-                                      CK_ULONG oid_len, CK_BBOOL flag)
-{
-    struct ncmp_private_data *priv = tokdata->private_data;
-    uint32_t out_len = 0;
-    CK_RV rc;
-
-    UNUSED(flag);
-
-    if (priv == NULL || secret == NULL)
-        return CKR_FUNCTION_FAILED;
-
-    rc = ncmp_crypto_ecdh_derive(&priv->client, priv->ncmp_slot, oid,
-                                 (uint32_t)oid_len, priv_val, (uint32_t)priv_len,
-                                 pub, (uint32_t)pub_len, secret,
-                                 (uint32_t)*secret_len, &out_len);
-    if (rc != CKR_OK)
-        return rc;
-    *secret_len = out_len;
-    return CKR_OK;
 }
 
 /* ------------------------------------------------------------------------- *
@@ -1898,6 +1306,25 @@ CK_RV token_specific_get_token_info(STDLL_TokData_t *tokdata,
         pInfo->firmwareVersion.minor = 0;
         pInfo->hardwareVersion.major = 1;
         pInfo->hardwareVersion.minor = 0;
+    }
+
+    /*
+     * Override the PIN-length bounds and UTC time with the values the physical
+     * token reports (GET_TOKEN_PARAMS / GET_UTC_TIME). Best-effort: keep the
+     * common-layer defaults if the token cannot be reached.
+     */
+    if (priv != NULL) {
+        uint32_t minp = 0, maxp = 0;
+        uint8_t utc[NCMP_TOKEN_UTC_LEN];
+
+        if (ncmp_admin_get_token_params(&priv->client, priv->ncmp_slot, NULL,
+                                        NULL, &minp, &maxp) == CKR_OK) {
+            pInfo->ulMinPinLen = minp;
+            pInfo->ulMaxPinLen = maxp;
+        }
+        if (ncmp_admin_get_utc_time(&priv->client, priv->ncmp_slot, utc)
+                == CKR_OK)
+            memcpy(pInfo->utcTime, utc, NCMP_TOKEN_UTC_LEN);
     }
 
     return CKR_OK;

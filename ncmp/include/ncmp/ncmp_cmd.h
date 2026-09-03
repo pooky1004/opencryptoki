@@ -20,9 +20,17 @@
 /** High 16 bits carry flags/modifiers (see NCMP_MOCK_CMD_FAIL_BIT). */
 #define NCMP_CMD_FLAG_MASK   0xFFFF0000u
 
-/** Operation opcodes. Extend as crypto hooks are forwarded incrementally. */
+/*
+ * Operation opcodes. Only the operations the NCMP token actually implements are
+ * defined here: symmetric AES-GCM/CTR, SHA-2/SHA-3 digests, SHAKE XOF key
+ * derivation, and the post-quantum ML-DSA / ML-KEM suites, plus RNG, the token
+ * administration lifecycle, and the vendor datapath opcodes. Mechanisms outside
+ * the advertised surface (RSA, EC/ECDSA, DH/ECDH, HMAC, AES-CBC/ECB/OFB/CFB)
+ * were removed together with their marshalling adapters, mock handlers, and
+ * tests; the opcode gaps they leave are intentionally not reused.
+ */
 enum ncmp_opcode {
-    NCMP_CMD_NOP    = 0x0000, /**< No-op / echo (keepalive, mock default). */
+    NCMP_CMD_NOP    = 0x0000, /**< No-op / echo (keepalive, mock default, loopback). */
     NCMP_CMD_RNG    = 0x0001, /**< Random bytes: param0(req)=LE u32 count. */
     NCMP_CMD_DIGEST = 0x0002, /**< One-shot digest: param0=[mech LE u32|data]. */
     NCMP_CMD_GETMECHLIST = 0x0003, /**< Reserved: query token mechanism list. */
@@ -30,39 +38,25 @@ enum ncmp_opcode {
     NCMP_CMD_DIGEST_INIT   = 0x0004, /**< param0=mech -> resp param0=ctx_id. */
     NCMP_CMD_DIGEST_UPDATE = 0x0005, /**< params [ctx_id|data] -> (no output). */
     NCMP_CMD_DIGEST_FINAL  = 0x0006, /**< param0=ctx_id -> resp param0=digest. */
-    NCMP_CMD_HMAC_SIGN   = 0x0007, /**< [mech|key|data] -> [mac]. */
-    NCMP_CMD_HMAC_VERIFY = 0x0008, /**< [mech|key|data|mac] -> (ack). */
-    NCMP_CMD_SHAKE_DERIVE = 0x0009, /**< XOF: [mech|outlen(LE u32)|base] -> [out]. */
-    NCMP_CMD_AES_CBC = 0x0010, /**< AES-CBC: params [flags|key|iv|data]->[out]. */
-    NCMP_CMD_AES_ECB = 0x0011, /**< AES-ECB: params [flags|key|data]->[out]. */
+    NCMP_CMD_SHAKE_DERIVE  = 0x0009, /**< XOF: [mech|outlen(LE u32)|base] -> [out]. */
+    /* Symmetric: the only advertised AES modes are AEAD (GCM) and stream (CTR). */
     NCMP_CMD_AES_GCM = 0x0012, /**< AES-GCM: [flags|key|iv|aad|taglen|data]->[out]. */
     NCMP_CMD_AES_CTR = 0x0013, /**< AES-CTR: [flags|key|ctr|data]->[out] (stream). */
-    NCMP_CMD_AES_OFB = 0x0014, /**< AES-OFB: [flags|key|iv|data]->[out] (stream). */
-    NCMP_CMD_AES_CFB = 0x0015, /**< AES-CFB: [flags|key|iv|data]->[out] (stream). */
-    NCMP_CMD_RSA_SIGN = 0x0020, /**< RSA sign: params [mod|priv_exp|data]->[sig]. */
-    NCMP_CMD_RSA_VERIFY = 0x0022, /**< RSA verify: [mod|pub_exp|data|sig]->(ack). */
-    NCMP_CMD_EC_SIGN = 0x0021, /**< EC sign: params [ec_params|priv|data]->[sig]. */
-    NCMP_CMD_EC_VERIFY = 0x0023, /**< EC verify: [ec_params|ec_point|data|sig]->(ack). */
-    /* Key-pair generation (token generates and returns key components). */
-    NCMP_CMD_RSA_KEYGEN = 0x0024, /**< [modbits|pub_exp] -> [n|d|p|q|dp|dq|qinv]. */
-    NCMP_CMD_EC_KEYGEN = 0x0025, /**< [ec_params] -> [ec_point|priv_value]. */
-    NCMP_CMD_RSA_OAEP_ENC = 0x0026, /**< [mod|pub_exp|data] -> [ciphertext]. */
-    NCMP_CMD_RSA_OAEP_DEC = 0x0027, /**< [mod|priv_exp|ct] -> [plaintext]. */
-    NCMP_CMD_DH_DERIVE = 0x0028, /**< [prime|priv|peer_pub] -> [shared secret]. */
-    NCMP_CMD_ECDH_DERIVE = 0x0029, /**< [ec_params|priv|peer_point] -> [secret]. */
-    /* RSA-PSS reuses NCMP_CMD_RSA_SIGN / NCMP_CMD_RSA_VERIFY (same marshalling;
-     * the mock signature is deterministic regardless of PSS vs PKCS padding). */
 
     /*
-     * Token administration: PIN / login lifecycle. The physical token owns the
-     * PIN material; the STDLL forwards the caller's PIN and the token answers
-     * with a CKR_* ack (CKR_OK / CKR_PIN_INCORRECT / CKR_PIN_LEN_RANGE / ...).
+     * Token administration: PIN / login lifecycle and token queries. The
+     * physical token owns the PIN material; the STDLL forwards the caller's PIN
+     * and the token answers with a CKR_* ack (CKR_OK / CKR_PIN_INCORRECT /
+     * CKR_PIN_LEN_RANGE / ...).
      */
-    NCMP_CMD_LOGIN      = 0x0030, /**< [user_type(LE u32)|pin] -> (ack). */
+    NCMP_CMD_LOGIN      = 0x0030, /**< [user_type(LE u32)|flags(LE u32)|pin] -> (ack). */
     NCMP_CMD_LOGOUT     = 0x0031, /**< (no params) -> (ack). */
     NCMP_CMD_INIT_PIN   = 0x0032, /**< [new_pin] -> (ack) (SO sets user PIN). */
     NCMP_CMD_SET_PIN    = 0x0033, /**< [old_pin|new_pin] -> (ack). */
     NCMP_CMD_INIT_TOKEN = 0x0034, /**< [so_pin|label(32)] -> (ack). */
+    NCMP_CMD_GET_UTC_TIME     = 0x0035, /**< (no params) -> [utc(16)]. */
+    NCMP_CMD_GET_TOKEN_PARAMS = 0x0036, /**< (no params) -> [label(32)|serial(16)|minpin|maxpin]. */
+    NCMP_CMD_SET_UTC_TIME     = 0x0037, /**< [utc(16)] -> (ack) (SO only). */
 
     /*
      * Post-quantum (PKCS#11 3.2 ML-DSA / ML-KEM). All keys are forwarded as
@@ -78,11 +72,11 @@ enum ncmp_opcode {
     NCMP_CMD_MLKEM_DECAPS = 0x0055, /**< [set|pub_len|ss_len|priv|ct] -> [ss]. */
 
     /*
-     * Vendor-defined opcodes (0x0100+). They do not correspond to any standard
+     * Vendor-defined opcodes (0x0101+). They do not correspond to any standard
      * PKCS#11 function; they exercise the token datapath and query device-side
      * state. Implemented at the wire level by the mock token (mcu_scheduler.c).
+     * Loopback (echo) is served by NCMP_CMD_NOP, so no dedicated opcode exists.
      */
-    NCMP_CMD_VD_LOOPBACK  = 0x0100, /**< Echo param0 back verbatim. */
     NCMP_CMD_VD_MEM_WRITE = 0x0101, /**< [addr(LE u32)|bytes] -> (ack). */
     NCMP_CMD_VD_MEM_READ  = 0x0102, /**< [addr(LE u32)|len(LE u32)] -> [bytes]. */
     NCMP_CMD_VD_PING      = 0x0103, /**< No payload -> [token epoch LE u32]. */
@@ -119,24 +113,34 @@ enum ncmp_opcode {
 #define NCMP_TOKEN_INFO_WIRE_SIZE 104u
 
 /** PKCS#11 user types carried in the NCMP_CMD_LOGIN request (LE u32). */
-#define NCMP_CKU_SO   0u
-#define NCMP_CKU_USER 1u
+#define NCMP_CKU_SO               0u
+#define NCMP_CKU_USER             1u
+#define NCMP_CKU_CONTEXT_SPECIFIC 2u /**< Re-auth the logged-in user (always-auth). */
+
+/*
+ * Login modifier flags carried in parameter 1 of NCMP_CMD_LOGIN (LE u32). Beyond
+ * the SO/User role selector (parameter 0), these convey the other conditions the
+ * host must consider when logging in: a protected-authentication-path login
+ * enters the PIN on the token's own pad (the wire PIN is empty), and a
+ * context-specific re-authentication targets the already-logged-in user.
+ */
+#define NCMP_LOGIN_FLAG_NONE           0x00000000u
+#define NCMP_LOGIN_FLAG_PROTECTED_AUTH 0x00000001u /**< PIN entered on token pad. */
+#define NCMP_LOGIN_FLAG_CONTEXT        0x00000002u /**< CKU_CONTEXT_SPECIFIC re-auth. */
+
+/*
+ * Token-parameter query (NCMP_CMD_GET_TOKEN_PARAMS) response layout:
+ *   param0 = label  (NCMP_TI_LABEL_LEN,  NUL/space padded)
+ *   param1 = serial (NCMP_TI_SERIAL_LEN, NUL/space padded)
+ *   param2 = ulMinPinLen (LE u32)
+ *   param3 = ulMaxPinLen (LE u32)
+ * The UTC-time query (NCMP_CMD_GET_UTC_TIME) returns a fixed 16-byte field in
+ * param0, matching the PKCS#11 CK_TOKEN_INFO.utcTime convention.
+ */
+#define NCMP_TOKEN_UTC_LEN 16u
 
 /** Size (bytes) of the mock token's vendor scratch memory region. */
 #define NCMP_VD_MEM_SIZE (4u * 1024u)
-
-/** HMAC output size (bytes) for @p mech (CKM_*_HMAC), or 0 if unsupported. */
-static inline uint32_t ncmp_hmac_size(uint32_t mech)
-{
-    switch (mech) {
-    case 0x00000221u: return 20; /* CKM_SHA_1_HMAC   */
-    case 0x00000256u: return 28; /* CKM_SHA224_HMAC  */
-    case 0x00000251u: return 32; /* CKM_SHA256_HMAC  */
-    case 0x00000261u: return 48; /* CKM_SHA384_HMAC  */
-    case 0x00000271u: return 64; /* CKM_SHA512_HMAC  */
-    default:          return 0;
-    }
-}
 
 /** Sentinel for "no token-side digest context allocated yet". */
 #define NCMP_DIGEST_CTX_NONE 0xFFFFFFFFu
@@ -151,12 +155,10 @@ static inline uint32_t ncmp_hmac_size(uint32_t mech)
  * Digest mechanism identifiers on the wire. Numerically identical to the
  * PKCS#11 CKM_SHA* constants so the STDLL adapter can pass a CK mechanism
  * through unchanged, while the (PKCS#11-agnostic) emulator maps them via
- * ncmp_digest_size() below.
+ * ncmp_digest_size() below. Only the advertised hashes are recognised:
+ * SHA-256, SHA-512 and the SHA-3 family (SHA3-224/256/384/512).
  */
-#define NCMP_MECH_SHA_1   0x00000220u
 #define NCMP_MECH_SHA256  0x00000250u
-#define NCMP_MECH_SHA224  0x00000255u
-#define NCMP_MECH_SHA384  0x00000260u
 #define NCMP_MECH_SHA512  0x00000270u
 /* SHA-3 family (numerically identical to the CKM_SHA3_* constants). */
 #define NCMP_MECH_SHA3_256 0x000002B0u
@@ -168,10 +170,7 @@ static inline uint32_t ncmp_hmac_size(uint32_t mech)
 static inline uint32_t ncmp_digest_size(uint32_t mech)
 {
     switch (mech) {
-    case NCMP_MECH_SHA_1:   return 20;
-    case NCMP_MECH_SHA224:  return 28;
     case NCMP_MECH_SHA256:  return 32;
-    case NCMP_MECH_SHA384:  return 48;
     case NCMP_MECH_SHA512:  return 64;
     case NCMP_MECH_SHA3_224: return 28;
     case NCMP_MECH_SHA3_256: return 32;

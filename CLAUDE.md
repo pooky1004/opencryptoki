@@ -61,13 +61,27 @@ cmake/          FindLibUSB.cmake
   `t_init_token`) is forwarded to the physical token via the `ncmp_admin` adapter
   (`stdll/ncmp_admin.c`, opcodes `NCMP_CMD_LOGIN`..`NCMP_CMD_INIT_TOKEN`); the
   mock token stores/verifies PINs (default user `1234`, SO `12345678`).
+- `t_login` forwards the role **plus flags**: protected-auth (PIN entered on the
+  token pad, empty wire PIN) and context-specific re-auth
+  (`CKU_CONTEXT_SPECIFIC`, re-verifies the logged-in user's PIN without changing
+  login state).
+- `t_init_token` now does set→read-back→validate→persist: it sets PIN+label on
+  the token, reads the label back via `NCMP_CMD_VD_TOKEN_INFO` and validates it
+  matches, caches the identity into `nv_token_data`, persists it with
+  `save_token_data()` (data-store hooks `t_init_token_data`/`t_load_token_data`/
+  `t_save_token_data`), then zeroizes the temporary SO-PIN/label buffers. The
+  token is a secure-key token (`token_specific.secure_key_token = TRUE`): the
+  physical token owns all secrets; the STDLL only proxies and scrubs temporaries.
 
 ## Slot map & vendor opcodes
 - Slot map: `ncmptok.conf` (env `NCMP_TOK_CONF`) or `NCMP_SLOT_BASE` maps CK
   slot ids to physical ncmpd slots; keep it in sync with `opencryptoki.conf`.
-- Vendor-defined wire opcodes (0x0100+: loopback / mem read·write·fill·crc /
-  ping / selftest / fw) exercise the token datapath and query device state.
-  Defined in `ncmp/include/ncmp/ncmp_cmd.h`; mock implementation in
+- Vendor-defined wire opcodes (0x0101+: mem read·write·fill·crc / ping /
+  selftest / fw / token-info) exercise the token datapath and query device
+  state. Echo/loopback is served by `NCMP_CMD_NOP` (no dedicated opcode).
+  Token queries `NCMP_CMD_GET_UTC_TIME` (0x0035) and `NCMP_CMD_GET_TOKEN_PARAMS`
+  (0x0036, label/serial/ulMin·MaxPinLen) feed `C_GetTokenInfo`. Defined in
+  `ncmp/include/ncmp/ncmp_cmd.h`; mock implementation in
   `ncmp/mock/mcu_scheduler.c`.
 
 > Note: a self-contained dlopen-able PKCS#11 provider (`ncmp/pkcs11/`, p11_*.c)
@@ -151,6 +165,10 @@ PQC keys are opaque blobs stored whole in `CKA_VALUE` (private blob is prefixed
 with the public blob); blob sizes come from `struct pqc_oid` (pqc_supported.c).
 The standard `t_ml_dsa_*` / `t_ml_kem_*` / `t_shake_key_derive` hooks are used
 (NOT the IBM `t_ibm_*` variants). Tests: `ncmp/tests/test_pqc.c`.
+The wire opcodes (`enum ncmp_opcode`) and the CI (`CI_Cmd`, defined as opcode
+aliases) now contain **only** these mechanisms plus RNG / AES key-gen / admin —
+all legacy RSA/EC/DH/ECDH/HMAC/AES-block (CBC·ECB·OFB·CFB) paths were removed
+across opcodes, adapters, mock, and tests.
 
 ## PKCS#11 support target
 Full PKCS#11 2.x, 3.0, and 3.2; multi-application concurrent access.

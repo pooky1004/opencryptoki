@@ -30,7 +30,9 @@
 token_spec_t token_specific = {
     .token_directory = NCMP_CONFIG_PATH,
     .token_subdir = "ncmptok",
-    .secure_key_token = FALSE,
+    /* The physical FX3 token owns all key material and PIN secrets; the STDLL
+     * only proxies operations to it. Advertise this as a secure-key token. */
+    .secure_key_token = TRUE,
     .data_store = {
         .per_user = FALSE,
         .use_master_key = TRUE,
@@ -43,6 +45,12 @@ token_spec_t token_specific = {
     .t_init = &token_specific_init,
     .t_final = &token_specific_final,
 
+    /* Token data lifecycle: cache and persist the physical token's identity in
+     * the STDLL's nv_token_data across init / load / save. */
+    .t_init_token_data = &token_specific_init_token_data,
+    .t_load_token_data = &token_specific_load_token_data,
+    .t_save_token_data = &token_specific_save_token_data,
+
     /* PIN / login lifecycle: forwarded to the physical token via ncmpd. */
     .t_init_token = &token_specific_init_token,
     .t_login = &token_specific_login,
@@ -53,49 +61,20 @@ token_spec_t token_specific = {
     /* First forwarded crypto operation: RNG (NCMP_CMD_RNG over the wire). */
     .t_rng = &token_specific_rng,
 
-    /* One-shot digest forwarding (NCMP_CMD_DIGEST). Multipart update/final is
-     * added later once token-side context handles are wired. */
+    /* Digest forwarding (NCMP_CMD_DIGEST): SHA-256/512 and SHA3-224/256/384/512,
+     * one-shot and multipart. */
     .t_sha_init = &token_specific_sha_init,
     .t_sha = &token_specific_sha,
     .t_sha_update = &token_specific_sha_update,
     .t_sha_final = &token_specific_sha_final,
 
-    /* Symmetric AES: block modes (CBC/ECB), AEAD (GCM), stream (CTR/OFB/CFB). */
-    .t_aes_cbc = &token_specific_aes_cbc,
-    .t_aes_ecb = &token_specific_aes_ecb,
+    /* Symmetric AES: AEAD (GCM) and stream (CTR) - the advertised modes. */
     .t_aes_gcm_init = &token_specific_aes_gcm_init,
     .t_aes_gcm = &token_specific_aes_gcm,
     .t_aes_ctr = &token_specific_aes_ctr,
-    .t_aes_ofb = &token_specific_aes_ofb,
-    .t_aes_cfb = &token_specific_aes_cfb,
 
-    /* Asymmetric ops: RSA and EC (ECDSA) sign + verify; RSA-OAEP enc/dec. */
-    .t_rsa_sign = &token_specific_rsa_sign,
-    .t_rsa_verify = &token_specific_rsa_verify,
-    .t_ec_sign = &token_specific_ec_sign,
-    .t_ec_verify = &token_specific_ec_verify,
-    .t_rsa_oaep_encrypt = &token_specific_rsa_oaep_encrypt,
-    .t_rsa_oaep_decrypt = &token_specific_rsa_oaep_decrypt,
-    .t_rsa_pss_sign = &token_specific_rsa_pss_sign,
-    .t_rsa_pss_verify = &token_specific_rsa_pss_verify,
-
-    /* Key agreement: Diffie-Hellman and ECDH derive. */
-    .t_dh_pkcs_derive = &token_specific_dh_pkcs_derive,
-    .t_ecdh_pkcs_derive = &token_specific_ecdh_pkcs_derive,
-
-    /* Keyed MAC: HMAC sign + verify (one-shot). */
-    .t_hmac_sign_init = &token_specific_hmac_sign_init,
-    .t_hmac_sign = &token_specific_hmac_sign,
-    .t_hmac_verify_init = &token_specific_hmac_verify_init,
-    .t_hmac_verify = &token_specific_hmac_verify,
-
-    /* Key generation: symmetric (AES/DES/3DES/generic-secret) + RSA/EC key
-     * pairs (token generates; the STDLL populates the PKCS#11 templates). */
+    /* Key generation: AES keys for the GCM/CTR mechanisms. */
     .t_aes_key_gen = &token_specific_aes_key_gen,
-    .t_des_key_gen = &token_specific_des_key_gen,
-    .t_generic_secret_key_gen = &token_specific_generic_secret_key_gen,
-    .t_rsa_generate_keypair = &token_specific_rsa_generate_keypair,
-    .t_ec_generate_keypair = &token_specific_ec_generate_keypair,
 
     /* XOF: SHAKE-128/256 key derivation. */
     .t_shake_key_derive = &token_specific_shake_key_derive,

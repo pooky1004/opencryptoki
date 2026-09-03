@@ -20,6 +20,7 @@
 /* CKR_* values without pulling the full PKCS#11 headers into the emulator. */
 #define MOCK_CKR_OK 0u
 #define MOCK_CKR_FUNCTION_FAILED 0x6u
+#define MOCK_CKR_ARGUMENTS_BAD 0x7u
 #define MOCK_CKR_ENCRYPTED_DATA_INVALID 0x40u
 #define MOCK_CKR_DEVICE_MEMORY 0x31u
 #define MOCK_CKR_MECHANISM_INVALID 0x70u
@@ -29,6 +30,10 @@
 #define MOCK_CKR_USER_ALREADY_LOGGED_IN 0x100u
 #define MOCK_CKR_USER_NOT_LOGGED_IN 0x101u
 #define MOCK_CKR_USER_TYPE_INVALID 0x103u
+
+/* PIN-length bounds the mock token advertises (GET_TOKEN_PARAMS). */
+#define MOCK_MIN_PIN_LEN 4u
+#define MOCK_MAX_PIN_LEN NCMP_MOCK_PIN_MAX
 
 void mock_device_set_identity(mock_device_t *dev, uint32_t slot_id)
 {
@@ -54,6 +59,8 @@ void mock_device_set_identity(mock_device_t *dev, uint32_t slot_id)
     a->fw_major = 1;
     a->fw_minor = 0;
     a->flags = 0;
+    /* Default clock; SET_UTC_TIME overwrites it, GET_UTC_TIME reads it back. */
+    memcpy(a->utc, "2026090300000000", NCMP_TOKEN_UTC_LEN);
 
     /* Factory-default PINs (the physical token owns them). */
     memcpy(a->user_pin, "1234", 4);
@@ -77,12 +84,11 @@ static int mock_pin_ok(const mock_token_admin_t *a, uint32_t user_type,
 /**
  * @brief Expand an accumulator into a @p outlen-byte signature.
  *
- * Shared by sign and verify so a signature can be recomputed and checked. The
- * mock signature is a deterministic function of @p comp (a key component that
- * is available to BOTH signer and verifier - the RSA modulus or the EC curve
- * params) and the folded data; the private exponent / scalar is forwarded but
- * intentionally not folded, since the verifier never sees it. This is a mock
- * limitation, not real signature semantics - hardware performs true sign/verify.
+ * Shared by the PQC sign/verify and encaps/decaps paths (and SHAKE expansion)
+ * so an output can be recomputed and checked. The mock output is a deterministic
+ * function of @p comp (a component available to BOTH sides - e.g. the ML-DSA
+ * public prefix) and the folded data. This is a mock limitation, not real
+ * cryptographic semantics - hardware performs true operations.
  */
 static void mock_sig_expand(uint32_t acc, const uint8_t *comp, uint32_t complen,
                             uint8_t *out, uint32_t outlen)
@@ -288,41 +294,6 @@ static void mock_exec_command(mock_device_t *dev, NCMP_Message *msg)
         msg->header.ack = MOCK_CKR_OK;
         break;
     }
-    case NCMP_CMD_AES_CBC: {
-        /* Params: [0]=flags(LE u32), [1]=key, [2]=iv(16), [3]=data(mult of 16).
-         * The mock has no AES; it applies a reversible keystream XOR derived
-         * from key+iv+position (direction-agnostic, so encrypt then decrypt
-         * round-trips). Real firmware performs true AES-CBC. */
-        const uint8_t *pf, *pk, *piv, *pd;
-        uint32_t lf, lk, liv, ld;
-        uint8_t key[32], iv[NCMP_AES_BLOCK];
-
-        if (ncmp_msg_param(msg, 0, &pf, &lf) != NCMP_OK ||
-            ncmp_msg_param(msg, 1, &pk, &lk) != NCMP_OK ||
-            ncmp_msg_param(msg, 2, &piv, &liv) != NCMP_OK ||
-            ncmp_msg_param(msg, 3, &pd, &ld) != NCMP_OK ||
-            lf < 4 || (lk != 16 && lk != 24 && lk != 32) ||
-            liv != NCMP_AES_BLOCK || (ld % NCMP_AES_BLOCK) != 0) {
-            msg->param_len[0] = 0;
-            msg->header.ack = MOCK_CKR_MECHANISM_INVALID;
-            break;
-        }
-
-        /* Copy key/iv out before overwriting the payload; data stays in place
-         * because its offset (>= 4+lk+16) always leads the write cursor. */
-        memcpy(key, pk, lk);
-        memcpy(iv, piv, NCMP_AES_BLOCK);
-        for (uint32_t i = 0; i < ld; ++i) {
-            uint8_t ks = (uint8_t)(key[i % lk] ^ iv[i % NCMP_AES_BLOCK] ^
-                                   (uint8_t)i);
-            msg->payload[i] = (uint8_t)(pd[i] ^ ks);
-        }
-        msg->param_len[0] = ld;
-        for (int i = 1; i < NCMP_MAX_PARAM_COUNT; ++i)
-            msg->param_len[i] = 0;
-        msg->header.ack = MOCK_CKR_OK;
-        break;
-    }
     case NCMP_CMD_AES_GCM: {
         /* Params: [0]=flags(bit0 encrypt), [1]=key, [2]=iv, [3]=aad,
          * [4]=taglen(LE u32), [5]=data. AEAD (mock): reversible keystream XOR
@@ -398,413 +369,11 @@ static void mock_exec_command(mock_device_t *dev, NCMP_Message *msg)
         msg->header.ack = MOCK_CKR_OK;
         break;
     }
-    case NCMP_CMD_AES_ECB: {
-        /* Params: [0]=flags, [1]=key, [2]=data. Like AES-CBC without an IV:
-         * reversible per-position keystream XOR (mock only). */
-        const uint8_t *pf, *pk, *pd;
-        uint32_t lf, lk, ld;
-        uint8_t key[32];
-
-        if (ncmp_msg_param(msg, 0, &pf, &lf) != NCMP_OK ||
-            ncmp_msg_param(msg, 1, &pk, &lk) != NCMP_OK ||
-            ncmp_msg_param(msg, 2, &pd, &ld) != NCMP_OK ||
-            lf < 4 || (lk != 16 && lk != 24 && lk != 32) ||
-            (ld % NCMP_AES_BLOCK) != 0) {
-            msg->param_len[0] = 0;
-            msg->header.ack = MOCK_CKR_MECHANISM_INVALID;
-            break;
-        }
-        memcpy(key, pk, lk);
-        for (uint32_t i = 0; i < ld; ++i)
-            msg->payload[i] = (uint8_t)(pd[i] ^ (key[i % lk] ^ (uint8_t)i));
-        msg->param_len[0] = ld;
-        for (int i = 1; i < NCMP_MAX_PARAM_COUNT; ++i)
-            msg->param_len[i] = 0;
-        msg->header.ack = MOCK_CKR_OK;
-        break;
-    }
-    case NCMP_CMD_EC_SIGN: {
-        /* Params: [0]=EC params (curve), [1]=private scalar, [2]=data. Emit an
-         * ECDSA-shaped signature of 2*fieldlen bytes, folding curve+data (both
-         * available to EC_VERIFY). The private scalar sets the signature size
-         * and is forwarded but not folded. NOT real ECDSA. */
-        const uint8_t *pparams, *ppriv, *pdata;
-        uint32_t lp, lpriv, ldata, acc, siglen;
-        uint8_t params[64]; /* EC curve params (OID) are short */
-
-        if (ncmp_msg_param(msg, 0, &pparams, &lp) != NCMP_OK ||
-            ncmp_msg_param(msg, 1, &ppriv, &lpriv) != NCMP_OK ||
-            ncmp_msg_param(msg, 2, &pdata, &ldata) != NCMP_OK ||
-            lp == 0 || lp > sizeof(params) || lpriv == 0) {
-            msg->param_len[0] = 0;
-            msg->header.ack = MOCK_CKR_MECHANISM_INVALID;
-            break;
-        }
-        (void)ppriv;
-        siglen = 2u * lpriv;
-        /* Copy curve params before overwriting; fold curve+data first. */
-        memcpy(params, pparams, lp);
-        acc = mock_digest_fold(MOCK_DIGEST_SEED ^ lp, params, lp);
-        acc = mock_digest_fold(acc, pdata, ldata);
-        mock_sig_expand(acc, params, lp, msg->payload, siglen);
-        msg->param_len[0] = siglen;
-        for (int i = 1; i < NCMP_MAX_PARAM_COUNT; ++i)
-            msg->param_len[i] = 0;
-        msg->header.ack = MOCK_CKR_OK;
-        break;
-    }
-    case NCMP_CMD_EC_VERIFY: {
-        /* Params: [0]=EC params, [1]=EC point (public), [2]=data, [3]=sig.
-         * Recompute the signature from curve+data and compare. */
-        const uint8_t *pparams, *ppoint, *pdata, *psig;
-        uint32_t lp, lpoint, ldata, lsig, acc;
-        uint8_t params[64], sig[132]; /* up to 2*P-521 */
-
-        if (ncmp_msg_param(msg, 0, &pparams, &lp) != NCMP_OK ||
-            ncmp_msg_param(msg, 1, &ppoint, &lpoint) != NCMP_OK ||
-            ncmp_msg_param(msg, 2, &pdata, &ldata) != NCMP_OK ||
-            ncmp_msg_param(msg, 3, &psig, &lsig) != NCMP_OK ||
-            lp == 0 || lp > sizeof(params) || lsig == 0 || lsig > sizeof(sig)) {
-            msg->param_len[0] = 0;
-            msg->header.ack = MOCK_CKR_MECHANISM_INVALID;
-            break;
-        }
-        (void)ppoint;
-        (void)lpoint;
-        memcpy(params, pparams, lp);
-        acc = mock_digest_fold(MOCK_DIGEST_SEED ^ lp, params, lp);
-        acc = mock_digest_fold(acc, pdata, ldata);
-        mock_sig_expand(acc, params, lp, sig, lsig);
-        msg->param_len[0] = 0;
-        for (int i = 1; i < NCMP_MAX_PARAM_COUNT; ++i)
-            msg->param_len[i] = 0;
-        msg->header.ack = (memcmp(sig, psig, lsig) == 0)
-                              ? MOCK_CKR_OK : MOCK_CKR_SIGNATURE_INVALID;
-        break;
-    }
-    case NCMP_CMD_RSA_SIGN: {
-        /* Params: [0]=modulus, [1]=private exponent, [2]=data. Emit a
-         * signature of modulus length, folding modulus+data (the modulus is
-         * shared with the public key so RSA_VERIFY can recompute it). The
-         * private exponent is forwarded but not folded. Not real RSA. */
-        const uint8_t *pmod, *pexp, *pdata;
-        uint32_t lmod, lexp, ldata, acc;
-        uint8_t mod[512]; /* up to RSA-4096 */
-
-        if (ncmp_msg_param(msg, 0, &pmod, &lmod) != NCMP_OK ||
-            ncmp_msg_param(msg, 1, &pexp, &lexp) != NCMP_OK ||
-            ncmp_msg_param(msg, 2, &pdata, &ldata) != NCMP_OK ||
-            lmod == 0 || lmod > sizeof(mod)) {
-            msg->param_len[0] = 0;
-            msg->header.ack = MOCK_CKR_MECHANISM_INVALID;
-            break;
-        }
-        (void)pexp;
-        (void)lexp;
-        /* Copy modulus before overwriting; fold modulus+data (reads) first. */
-        memcpy(mod, pmod, lmod);
-        acc = mock_digest_fold(MOCK_DIGEST_SEED ^ lmod, mod, lmod);
-        acc = mock_digest_fold(acc, pdata, ldata);
-        mock_sig_expand(acc, mod, lmod, msg->payload, lmod);
-        msg->param_len[0] = lmod;
-        for (int i = 1; i < NCMP_MAX_PARAM_COUNT; ++i)
-            msg->param_len[i] = 0;
-        msg->header.ack = MOCK_CKR_OK;
-        break;
-    }
-    case NCMP_CMD_RSA_VERIFY: {
-        /* Params: [0]=modulus, [1]=public exponent, [2]=data, [3]=signature.
-         * Recompute the signature from modulus+data and compare. */
-        const uint8_t *pmod, *pexp, *pdata, *psig;
-        uint32_t lmod, lexp, ldata, lsig, acc;
-        uint8_t mod[512], sig[512];
-
-        if (ncmp_msg_param(msg, 0, &pmod, &lmod) != NCMP_OK ||
-            ncmp_msg_param(msg, 1, &pexp, &lexp) != NCMP_OK ||
-            ncmp_msg_param(msg, 2, &pdata, &ldata) != NCMP_OK ||
-            ncmp_msg_param(msg, 3, &psig, &lsig) != NCMP_OK ||
-            lmod == 0 || lmod > sizeof(mod) || lsig > sizeof(sig)) {
-            msg->param_len[0] = 0;
-            msg->header.ack = MOCK_CKR_MECHANISM_INVALID;
-            break;
-        }
-        (void)pexp;
-        (void)lexp;
-        msg->param_len[0] = 0;
-        for (int i = 1; i < NCMP_MAX_PARAM_COUNT; ++i)
-            msg->param_len[i] = 0;
-        if (lsig != lmod) {
-            msg->header.ack = MOCK_CKR_SIGNATURE_INVALID;
-            break;
-        }
-        memcpy(mod, pmod, lmod);
-        acc = mock_digest_fold(MOCK_DIGEST_SEED ^ lmod, mod, lmod);
-        acc = mock_digest_fold(acc, pdata, ldata);
-        mock_sig_expand(acc, mod, lmod, sig, lsig);
-        msg->header.ack = (memcmp(sig, psig, lsig) == 0)
-                              ? MOCK_CKR_OK : MOCK_CKR_SIGNATURE_INVALID;
-        break;
-    }
-    case NCMP_CMD_RSA_KEYGEN: {
-        /* Req: [0]=modulus bits (LE u32), [1]=public exponent. Resp: the seven
-         * private/public components n|d|p|q|dp|dq|qinv of appropriate sizes.
-         * NOT a real key - deterministic bytes so the STDLL can populate the
-         * PKCS#11 templates and tests can assert sizes; hardware generates a
-         * real keypair. */
-        const uint8_t *pbits, *pexp;
-        uint32_t lbits, lexp, mod_bits, nbytes, hbytes, seed, off;
-        uint32_t sizes[7];
-
-        if (ncmp_msg_param(msg, 0, &pbits, &lbits) != NCMP_OK ||
-            ncmp_msg_param(msg, 1, &pexp, &lexp) != NCMP_OK || lbits < 4) {
-            msg->param_len[0] = 0;
-            msg->header.ack = MOCK_CKR_MECHANISM_INVALID;
-            break;
-        }
-        mod_bits = ncmp_rd_u32le(pbits);
-        if (mod_bits < 512 || mod_bits > 4096 || (mod_bits % 8) != 0) {
-            msg->param_len[0] = 0;
-            msg->header.ack = MOCK_CKR_MECHANISM_INVALID;
-            break;
-        }
-        nbytes = mod_bits / 8;
-        hbytes = nbytes / 2;
-        /* Seed from key size + public exponent (reads) before writing. */
-        seed = mock_digest_fold(MOCK_DIGEST_SEED ^ mod_bits, pexp, lexp);
-
-        sizes[0] = nbytes; /* n  */
-        sizes[1] = nbytes; /* d  */
-        sizes[2] = hbytes; /* p  */
-        sizes[3] = hbytes; /* q  */
-        sizes[4] = hbytes; /* dp */
-        sizes[5] = hbytes; /* dq */
-        sizes[6] = hbytes; /* qinv */
-        off = 0;
-        for (int k = 0; k < 7; ++k) {
-            for (uint32_t i = 0; i < sizes[k]; ++i)
-                msg->payload[off + i] =
-                    (uint8_t)(seed + (uint32_t)k * 101u + i * 7u);
-            msg->param_len[k] = sizes[k];
-            off += sizes[k];
-        }
-        msg->param_len[7] = 0;
-        msg->header.ack = MOCK_CKR_OK;
-        break;
-    }
-    case NCMP_CMD_EC_KEYGEN: {
-        /* Req: [0]=EC params (curve). Resp: [ec_point | private value]. Mock
-         * uses a P-256-sized key (32-byte scalar, 65-byte uncompressed point);
-         * hardware honours the actual curve. */
-        const uint8_t *pparams;
-        uint32_t lp, seed;
-        uint8_t params[64];
-        const uint32_t privlen = 32;
-        const uint32_t pointlen = 1u + 2u * privlen; /* 0x04 || X || Y */
-
-        if (ncmp_msg_param(msg, 0, &pparams, &lp) != NCMP_OK ||
-            lp == 0 || lp > sizeof(params)) {
-            msg->param_len[0] = 0;
-            msg->header.ack = MOCK_CKR_MECHANISM_INVALID;
-            break;
-        }
-        memcpy(params, pparams, lp);
-        seed = mock_digest_fold(MOCK_DIGEST_SEED ^ lp, params, lp);
-
-        msg->payload[0] = 0x04; /* uncompressed point marker */
-        for (uint32_t i = 1; i < pointlen; ++i)
-            msg->payload[i] = (uint8_t)(seed + i * 13u);
-        for (uint32_t i = 0; i < privlen; ++i)
-            msg->payload[pointlen + i] = (uint8_t)(seed + 0x55u + i * 17u);
-        msg->param_len[0] = pointlen;
-        msg->param_len[1] = privlen;
-        for (int i = 2; i < NCMP_MAX_PARAM_COUNT; ++i)
-            msg->param_len[i] = 0;
-        msg->header.ack = MOCK_CKR_OK;
-        break;
-    }
     case NCMP_CMD_AES_CTR:
-    case NCMP_CMD_AES_OFB:
-    case NCMP_CMD_AES_CFB:
-        /* Stream modes: identical reversible keystream XOR in the mock. */
+        /* AES-CTR (the only advertised AES stream mode): reversible keystream
+         * XOR in the mock. Real firmware performs true AES-CTR. */
         mock_aes_stream(msg);
         break;
-    case NCMP_CMD_HMAC_SIGN: {
-        /* [mech | key | data] -> MAC (hash-sized). Folds key+data so sign and
-         * verify (which share the key) agree. */
-        const uint8_t *pmech, *pkey, *pdata;
-        uint32_t lmech, lkey, ldata, mech, hsize, acc;
-
-        if (ncmp_msg_param(msg, 0, &pmech, &lmech) != NCMP_OK || lmech < 4 ||
-            ncmp_msg_param(msg, 1, &pkey, &lkey) != NCMP_OK ||
-            ncmp_msg_param(msg, 2, &pdata, &ldata) != NCMP_OK) {
-            msg->param_len[0] = 0;
-            msg->header.ack = MOCK_CKR_MECHANISM_INVALID;
-            break;
-        }
-        mech = ncmp_rd_u32le(pmech);
-        hsize = ncmp_hmac_size(mech);
-        if (hsize == 0) {
-            msg->param_len[0] = 0;
-            msg->header.ack = MOCK_CKR_MECHANISM_INVALID;
-            break;
-        }
-        acc = mock_digest_fold(MOCK_DIGEST_SEED ^ mech, pkey, lkey);
-        acc = mock_digest_fold(acc, pdata, ldata);
-        mock_digest_finalize(acc, mech, msg->payload, hsize);
-        msg->param_len[0] = hsize;
-        for (int i = 1; i < NCMP_MAX_PARAM_COUNT; ++i)
-            msg->param_len[i] = 0;
-        msg->header.ack = MOCK_CKR_OK;
-        break;
-    }
-    case NCMP_CMD_HMAC_VERIFY: {
-        /* [mech | key | data | mac] -> recompute and compare. */
-        const uint8_t *pmech, *pkey, *pdata, *pmac;
-        uint32_t lmech, lkey, ldata, lmac, mech, hsize, acc;
-        uint8_t mac[64];
-
-        if (ncmp_msg_param(msg, 0, &pmech, &lmech) != NCMP_OK || lmech < 4 ||
-            ncmp_msg_param(msg, 1, &pkey, &lkey) != NCMP_OK ||
-            ncmp_msg_param(msg, 2, &pdata, &ldata) != NCMP_OK ||
-            ncmp_msg_param(msg, 3, &pmac, &lmac) != NCMP_OK) {
-            msg->param_len[0] = 0;
-            msg->header.ack = MOCK_CKR_MECHANISM_INVALID;
-            break;
-        }
-        mech = ncmp_rd_u32le(pmech);
-        hsize = ncmp_hmac_size(mech);
-        msg->param_len[0] = 0;
-        for (int i = 1; i < NCMP_MAX_PARAM_COUNT; ++i)
-            msg->param_len[i] = 0;
-        if (hsize == 0 || lmac != hsize) {
-            msg->header.ack = MOCK_CKR_SIGNATURE_INVALID;
-            break;
-        }
-        acc = mock_digest_fold(MOCK_DIGEST_SEED ^ mech, pkey, lkey);
-        acc = mock_digest_fold(acc, pdata, ldata);
-        mock_digest_finalize(acc, mech, mac, hsize);
-        msg->header.ack = (memcmp(mac, pmac, hsize) == 0)
-                              ? MOCK_CKR_OK : MOCK_CKR_SIGNATURE_INVALID;
-        break;
-    }
-    case NCMP_CMD_RSA_OAEP_ENC: {
-        /* [modulus | pub_exp | data] -> ciphertext (modulus length). Encodes
-         * [len | data | zero-pad] XORed with a modulus-derived keystream so
-         * RSA_OAEP_DEC recovers it. NOT real OAEP. */
-        const uint8_t *pmod, *pexp, *pdata;
-        uint32_t lmod, lexp, ldata;
-        uint8_t mod[512], block[512];
-
-        if (ncmp_msg_param(msg, 0, &pmod, &lmod) != NCMP_OK ||
-            ncmp_msg_param(msg, 1, &pexp, &lexp) != NCMP_OK ||
-            ncmp_msg_param(msg, 2, &pdata, &ldata) != NCMP_OK ||
-            lmod == 0 || lmod > sizeof(mod) || 4 + ldata > lmod) {
-            msg->param_len[0] = 0;
-            msg->header.ack = MOCK_CKR_MECHANISM_INVALID;
-            break;
-        }
-        (void)pexp;
-        (void)lexp;
-        memcpy(mod, pmod, lmod);
-        memset(block, 0, lmod);
-        ncmp_wr_u32le(block, ldata);
-        memcpy(block + 4, pdata, ldata);
-        for (uint32_t i = 0; i < lmod; ++i)
-            msg->payload[i] = (uint8_t)(block[i] ^ mod[i] ^ (i * 13u + 0xA5u));
-        msg->param_len[0] = lmod;
-        for (int i = 1; i < NCMP_MAX_PARAM_COUNT; ++i)
-            msg->param_len[i] = 0;
-        msg->header.ack = MOCK_CKR_OK;
-        break;
-    }
-    case NCMP_CMD_RSA_OAEP_DEC: {
-        /* [modulus | priv_exp | ciphertext] -> recovered plaintext. */
-        const uint8_t *pmod, *pexp, *pct;
-        uint32_t lmod, lexp, lct, plen;
-        uint8_t mod[512], block[512];
-
-        if (ncmp_msg_param(msg, 0, &pmod, &lmod) != NCMP_OK ||
-            ncmp_msg_param(msg, 1, &pexp, &lexp) != NCMP_OK ||
-            ncmp_msg_param(msg, 2, &pct, &lct) != NCMP_OK ||
-            lmod == 0 || lmod > sizeof(mod) || lct != lmod) {
-            msg->param_len[0] = 0;
-            msg->header.ack = MOCK_CKR_MECHANISM_INVALID;
-            break;
-        }
-        (void)pexp;
-        (void)lexp;
-        memcpy(mod, pmod, lmod);
-        for (uint32_t i = 0; i < lmod; ++i)
-            block[i] = (uint8_t)(pct[i] ^ mod[i] ^ (i * 13u + 0xA5u));
-        plen = ncmp_rd_u32le(block);
-        if (4 + plen > lmod) {
-            msg->param_len[0] = 0;
-            msg->header.ack = MOCK_CKR_ENCRYPTED_DATA_INVALID;
-            break;
-        }
-        memcpy(msg->payload, block + 4, plen);
-        msg->param_len[0] = plen;
-        for (int i = 1; i < NCMP_MAX_PARAM_COUNT; ++i)
-            msg->param_len[i] = 0;
-        msg->header.ack = MOCK_CKR_OK;
-        break;
-    }
-    case NCMP_CMD_DH_DERIVE: {
-        /* [prime | own private | peer public] -> shared secret (prime length).
-         * A one-sided key agreement in the mock: a deterministic function of
-         * all three inputs. NOT real DH (no modexp); hardware computes the true
-         * shared secret. */
-        const uint8_t *pprime, *ppriv, *ppub;
-        uint32_t lprime, lpriv, lpub, acc;
-        uint8_t prime[512];
-
-        if (ncmp_msg_param(msg, 0, &pprime, &lprime) != NCMP_OK ||
-            ncmp_msg_param(msg, 1, &ppriv, &lpriv) != NCMP_OK ||
-            ncmp_msg_param(msg, 2, &ppub, &lpub) != NCMP_OK ||
-            lprime == 0 || lprime > sizeof(prime)) {
-            msg->param_len[0] = 0;
-            msg->header.ack = MOCK_CKR_MECHANISM_INVALID;
-            break;
-        }
-        memcpy(prime, pprime, lprime);
-        acc = mock_digest_fold(MOCK_DIGEST_SEED ^ lprime, ppriv, lpriv);
-        acc = mock_digest_fold(acc, ppub, lpub);
-        mock_sig_expand(acc, prime, lprime, msg->payload, lprime);
-        msg->param_len[0] = lprime;
-        for (int i = 1; i < NCMP_MAX_PARAM_COUNT; ++i)
-            msg->param_len[i] = 0;
-        msg->header.ack = MOCK_CKR_OK;
-        break;
-    }
-    case NCMP_CMD_ECDH_DERIVE: {
-        /* [ec_params | own private | peer point] -> shared secret (one field
-         * element). Field length is inferred from the uncompressed peer point
-         * (0x04 || X || Y). Deterministic mock only. */
-        const uint8_t *poid, *ppriv, *ppub;
-        uint32_t loid, lpriv, lpub, acc, flen;
-        uint8_t oid[64];
-
-        if (ncmp_msg_param(msg, 0, &poid, &loid) != NCMP_OK ||
-            ncmp_msg_param(msg, 1, &ppriv, &lpriv) != NCMP_OK ||
-            ncmp_msg_param(msg, 2, &ppub, &lpub) != NCMP_OK ||
-            loid == 0 || loid > sizeof(oid) || lpub < 3) {
-            msg->param_len[0] = 0;
-            msg->header.ack = MOCK_CKR_MECHANISM_INVALID;
-            break;
-        }
-        flen = (lpub - 1u) / 2u; /* uncompressed point X||Y */
-        if (flen == 0 || flen > 66)
-            flen = 32; /* fall back to P-256 field size */
-        memcpy(oid, poid, loid);
-        acc = mock_digest_fold(MOCK_DIGEST_SEED ^ loid, ppriv, lpriv);
-        acc = mock_digest_fold(acc, ppub, lpub);
-        mock_sig_expand(acc, oid, loid, msg->payload, flen);
-        msg->param_len[0] = flen;
-        for (int i = 1; i < NCMP_MAX_PARAM_COUNT; ++i)
-            msg->param_len[i] = 0;
-        msg->header.ack = MOCK_CKR_OK;
-        break;
-    }
     case NCMP_CMD_VD_TOKEN_INFO: {
         /* No input -> emit the fixed 104-byte identity blob in param0. */
         mock_token_admin_t *a = &dev->admin;
@@ -827,13 +396,15 @@ static void mock_exec_command(mock_device_t *dev, NCMP_Message *msg)
         break;
     }
     case NCMP_CMD_LOGIN: {
-        /* [user_type(LE u32) | pin] -> verify against the stored PIN. */
+        /* [user_type(LE u32) | flags(LE u32) | pin] -> verify against the
+         * stored PIN, honouring the login modifier flags. */
         mock_token_admin_t *a = &dev->admin;
-        const uint8_t *put, *ppin;
-        uint32_t lut, lpin, ut;
+        const uint8_t *put, *pfl, *ppin;
+        uint32_t lut, lfl, lpin, ut, fl;
 
         if (ncmp_msg_param(msg, 0, &put, &lut) != NCMP_OK || lut < 4 ||
-            ncmp_msg_param(msg, 1, &ppin, &lpin) != NCMP_OK) {
+            ncmp_msg_param(msg, 1, &pfl, &lfl) != NCMP_OK || lfl < 4 ||
+            ncmp_msg_param(msg, 2, &ppin, &lpin) != NCMP_OK) {
             for (int i = 0; i < NCMP_MAX_PARAM_COUNT; ++i)
                 msg->param_len[i] = 0;
             msg->header.ack = MOCK_CKR_FUNCTION_FAILED;
@@ -842,7 +413,24 @@ static void mock_exec_command(mock_device_t *dev, NCMP_Message *msg)
         for (int i = 0; i < NCMP_MAX_PARAM_COUNT; ++i)
             msg->param_len[i] = 0;
         ut = ncmp_rd_u32le(put);
-        if (ut != 0u && ut != 1u) {
+        fl = ncmp_rd_u32le(pfl);
+
+        /* Context-specific: re-authenticate the already-logged-in user
+         * (PKCS#11 CKA_ALWAYS_AUTHENTICATE) without changing login state. */
+        if (ut == NCMP_CKU_CONTEXT_SPECIFIC ||
+            (fl & NCMP_LOGIN_FLAG_CONTEXT) != 0u) {
+            if (!a->logged_in) {
+                msg->header.ack = MOCK_CKR_USER_NOT_LOGGED_IN;
+                break;
+            }
+            if (!mock_pin_ok(a, a->login_user, ppin, lpin))
+                msg->header.ack = MOCK_CKR_PIN_INCORRECT;
+            else
+                msg->header.ack = MOCK_CKR_OK;
+            break;
+        }
+
+        if (ut != NCMP_CKU_SO && ut != NCMP_CKU_USER) {
             msg->header.ack = MOCK_CKR_USER_TYPE_INVALID;
             break;
         }
@@ -850,7 +438,10 @@ static void mock_exec_command(mock_device_t *dev, NCMP_Message *msg)
             msg->header.ack = MOCK_CKR_USER_ALREADY_LOGGED_IN;
             break;
         }
-        if (!mock_pin_ok(a, ut, ppin, lpin)) {
+        /* Protected-authentication path: the PIN is captured on the token's own
+         * pad, so the wire PIN is empty and the token authorises it directly. */
+        if ((fl & NCMP_LOGIN_FLAG_PROTECTED_AUTH) == 0u &&
+            !mock_pin_ok(a, ut, ppin, lpin)) {
             msg->header.ack = MOCK_CKR_PIN_INCORRECT;
             break;
         }
@@ -951,6 +542,66 @@ static void mock_exec_command(mock_device_t *dev, NCMP_Message *msg)
         memset(a->label, 0, sizeof(a->label));
         memcpy(a->label, plabel, llabel);
         a->logged_in = 0;
+        msg->header.ack = MOCK_CKR_OK;
+        break;
+    }
+    case NCMP_CMD_GET_UTC_TIME: {
+        /* No input -> 16-byte CK_TOKEN_INFO.utcTime ("YYYYMMDDhhmmssxx"), read
+         * back from the token clock (default, or whatever SET_UTC_TIME stored).
+         * The mock has no real RTC; real firmware reads its hardware clock. */
+        memcpy(msg->payload, dev->admin.utc, NCMP_TOKEN_UTC_LEN);
+        msg->param_len[0] = NCMP_TOKEN_UTC_LEN;
+        for (int i = 1; i < NCMP_MAX_PARAM_COUNT; ++i)
+            msg->param_len[i] = 0;
+        msg->header.ack = MOCK_CKR_OK;
+        break;
+    }
+    case NCMP_CMD_SET_UTC_TIME: {
+        /* [utc(16)] -> set the token clock. Only the SO may set the time; the
+         * field must be exactly NCMP_TOKEN_UTC_LEN bytes. */
+        mock_token_admin_t *a = &dev->admin;
+        const uint8_t *putc;
+        uint32_t lutc;
+
+        if (ncmp_msg_param(msg, 0, &putc, &lutc) != NCMP_OK) {
+            for (int i = 0; i < NCMP_MAX_PARAM_COUNT; ++i)
+                msg->param_len[i] = 0;
+            msg->header.ack = MOCK_CKR_FUNCTION_FAILED;
+            break;
+        }
+        for (int i = 0; i < NCMP_MAX_PARAM_COUNT; ++i)
+            msg->param_len[i] = 0;
+        if (!a->logged_in || a->login_user != NCMP_CKU_SO) {
+            msg->header.ack = MOCK_CKR_USER_NOT_LOGGED_IN;
+            break;
+        }
+        if (lutc != NCMP_TOKEN_UTC_LEN) {
+            msg->header.ack = MOCK_CKR_ARGUMENTS_BAD;
+            break;
+        }
+        memcpy(a->utc, putc, NCMP_TOKEN_UTC_LEN);
+        msg->header.ack = MOCK_CKR_OK;
+        break;
+    }
+    case NCMP_CMD_GET_TOKEN_PARAMS: {
+        /* No input -> [label(32) | serial(16) | ulMinPinLen | ulMaxPinLen]. */
+        mock_token_admin_t *a = &dev->admin;
+        uint8_t *p = msg->payload;
+        uint32_t off = 0;
+
+        memcpy(p + off, a->label, NCMP_TI_LABEL_LEN);
+        off += NCMP_TI_LABEL_LEN;
+        memcpy(p + off, a->serial, NCMP_TI_SERIAL_LEN);
+        off += NCMP_TI_SERIAL_LEN;
+        ncmp_wr_u32le(p + off, MOCK_MIN_PIN_LEN);
+        off += 4;
+        ncmp_wr_u32le(p + off, MOCK_MAX_PIN_LEN);
+        msg->param_len[0] = NCMP_TI_LABEL_LEN;
+        msg->param_len[1] = NCMP_TI_SERIAL_LEN;
+        msg->param_len[2] = 4;
+        msg->param_len[3] = 4;
+        for (int i = 4; i < NCMP_MAX_PARAM_COUNT; ++i)
+            msg->param_len[i] = 0;
         msg->header.ack = MOCK_CKR_OK;
         break;
     }
@@ -1159,10 +810,6 @@ static void mock_exec_command(mock_device_t *dev, NCMP_Message *msg)
         msg->header.ack = MOCK_CKR_OK;
         break;
     }
-    case NCMP_CMD_VD_LOOPBACK:
-        /* Echo param0 verbatim (payload already holds it). */
-        msg->header.ack = MOCK_CKR_OK;
-        break;
     case NCMP_CMD_VD_MEM_WRITE: {
         /* [addr(LE u32) | bytes] -> ack. Stores into the vendor scratch RAM. */
         const uint8_t *pa, *pb;

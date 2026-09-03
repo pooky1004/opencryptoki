@@ -68,21 +68,91 @@ unsigned long ncmp_admin_token_info(ncmp_client_t *c, uint32_t slot,
     return NCMP_CKR_OK;
 }
 
-unsigned long ncmp_admin_login(ncmp_client_t *c, uint32_t slot,
-                               uint32_t user_type, const uint8_t *pin,
-                               uint32_t pin_len)
+unsigned long ncmp_admin_get_utc_time(ncmp_client_t *c, uint32_t slot,
+                                      uint8_t *out)
 {
-    uint8_t ut[4];
-    const uint8_t *parts[2];
-    uint32_t lens[2];
+    uint8_t blob[NCMP_TOKEN_UTC_LEN];
+    uint32_t got = 0;
+    unsigned long rv;
+
+    if (out == NULL)
+        return NCMP_CKR_ARGUMENTS_BAD;
+
+    rv = admin_cmd(c, slot, NCMP_CMD_GET_UTC_TIME, NULL, 0, blob, sizeof(blob),
+                   &got);
+    if (rv != NCMP_CKR_OK)
+        return rv;
+    if (got != NCMP_TOKEN_UTC_LEN)
+        return NCMP_CKR_FUNCTION_FAILED;
+    memcpy(out, blob, NCMP_TOKEN_UTC_LEN);
+    return NCMP_CKR_OK;
+}
+
+unsigned long ncmp_admin_set_utc_time(ncmp_client_t *c, uint32_t slot,
+                                      const uint8_t *utc)
+{
+    if (utc == NULL)
+        return NCMP_CKR_ARGUMENTS_BAD;
+    return admin_cmd(c, slot, NCMP_CMD_SET_UTC_TIME, utc, NCMP_TOKEN_UTC_LEN,
+                     NULL, 0, NULL);
+}
+
+unsigned long ncmp_admin_get_token_params(ncmp_client_t *c, uint32_t slot,
+                                          uint8_t *label, uint8_t *serial,
+                                          uint32_t *min_pin, uint32_t *max_pin)
+{
+    uint8_t out[128];
+    NCMP_Message rsp;
+    const uint8_t *plabel, *pserial, *pmin, *pmax;
+    uint32_t llabel, lserial, lmin, lmax;
+    const uint8_t dummy = 0;         /* single zero-length request parameter */
+    const uint8_t *parts[1] = { &dummy };
+    uint32_t lens[1] = { 0 };
+    int nrc;
+
+    nrc = ncmp_client_command_mp(c, slot, NCMP_CMD_GET_TOKEN_PARAMS, parts,
+                                 lens, 1, out, sizeof(out), &rsp);
+    if (nrc != NCMP_OK)
+        return ncmp_err_to_ckr(nrc);
+    if (rsp.header.ack != NCMP_CKR_OK)
+        return rsp.header.ack;
+
+    if (ncmp_msg_param(&rsp, 0, &plabel, &llabel) != NCMP_OK ||
+        llabel != NCMP_TI_LABEL_LEN ||
+        ncmp_msg_param(&rsp, 1, &pserial, &lserial) != NCMP_OK ||
+        lserial != NCMP_TI_SERIAL_LEN ||
+        ncmp_msg_param(&rsp, 2, &pmin, &lmin) != NCMP_OK || lmin != 4 ||
+        ncmp_msg_param(&rsp, 3, &pmax, &lmax) != NCMP_OK || lmax != 4)
+        return NCMP_CKR_FUNCTION_FAILED;
+
+    if (label != NULL)
+        memcpy(label, plabel, NCMP_TI_LABEL_LEN);
+    if (serial != NULL)
+        memcpy(serial, pserial, NCMP_TI_SERIAL_LEN);
+    if (min_pin != NULL)
+        *min_pin = ncmp_rd_u32le(pmin);
+    if (max_pin != NULL)
+        *max_pin = ncmp_rd_u32le(pmax);
+    return NCMP_CKR_OK;
+}
+
+unsigned long ncmp_admin_login(ncmp_client_t *c, uint32_t slot,
+                               uint32_t user_type, uint32_t flags,
+                               const uint8_t *pin, uint32_t pin_len)
+{
+    uint8_t ut[4], fl[4];
+    const uint8_t *parts[3];
+    uint32_t lens[3];
 
     if (pin_len > NCMP_MAX_PARAM_SIZE)
         return NCMP_CKR_PIN_LEN_RANGE;
 
     ncmp_wr_u32le(ut, user_type);
+    ncmp_wr_u32le(fl, flags);
     parts[0] = ut;      lens[0] = sizeof(ut);
-    parts[1] = pin;     lens[1] = pin_len;
-    return admin_cmd_mp(c, slot, NCMP_CMD_LOGIN, parts, lens, 2);
+    parts[1] = fl;      lens[1] = sizeof(fl);
+    parts[2] = pin;     lens[2] = pin_len;
+    return admin_cmd_mp(c, slot, NCMP_CMD_LOGIN, parts, lens, 3);
 }
 
 unsigned long ncmp_admin_logout(ncmp_client_t *c, uint32_t slot)

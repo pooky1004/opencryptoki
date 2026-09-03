@@ -129,6 +129,10 @@ C_DigestFinal(sess)     →  최종 상태 load → 출력 생성 → 컨텍스�
   근거이므로 재부팅 후에도 동일해야 한다.
 - **주의**: serial은 공장에서 부여되며 불변. label은 `C_InitToken`으로 변경
   가능하므로 초기화 시 갱신된다.
+- **`C_InitToken` 절차(set→read-back→validate→persist)**: STDLL은 (1) SO PIN·label을
+  토큰에 설정(`INIT_TOKEN`)하고, (2) `VD_TOKEN_INFO`로 label을 **다시 읽어와 정밀
+  검증**한 뒤, (3) 검증된 정체성을 `nv_token_data`에 캐시하고 `save_token_data()`로
+  영속화한다. 사용한 **임시 SO PIN·label 버퍼는 즉시 zeroize**한다(아래 보안 원칙).
 
 ### N2. 토큰 플래그 / 초기화 상태
 - **내용**: `CKF_TOKEN_INITIALIZED`, `CKF_USER_PIN_INITIALIZED`,
@@ -146,6 +150,13 @@ C_DigestFinal(sess)     →  최종 상태 load → 출력 생성 → 컨텍스�
 - **보안**: 원문 PIN은 절대 NVM/로그에 남기지 않는다. 비교는 상수시간으로.
 - **호스트 매핑**: `NCMP_CMD_LOGIN/INIT_PIN/SET_PIN/INIT_TOKEN`(→
   [`SUMMARY.md`] 2.4). mock은 평문 비교이나 실제 토큰은 검증자 방식이어야 한다.
+- **secure-key 토큰**: `token_specific.secure_key_token = TRUE`. 즉 **모든 PIN·키
+  비밀은 물리 토큰이 소유**하고, STDLL은 프록시로서 임시로 보유한 비밀 버퍼(예:
+  `C_InitToken`의 SO PIN·label)를 사용 직후 **영구 소거(zeroize)** 한다.
+- **로그인 플래그**: `LOGIN` 요청은 SO/User 역할 외에 부가 플래그를 함께 싣는다 —
+  **protected-auth**(PIN을 토큰 패드에서 입력, 와이어 PIN 비움)와
+  **context-specific**(`CKU_CONTEXT_SPECIFIC`: 로그인 상태를 바꾸지 않고 현재
+  사용자의 PIN을 재검증; 미로그인 시 `CKR_USER_NOT_LOGGED_IN`).
 
 ### N5. 토큰 객체 (영속 키 · 데이터 객체)
 - **내용**: `CKA_TOKEN=TRUE`인 모든 객체와 **전 속성**:
@@ -217,6 +228,9 @@ C_DigestFinal(sess)     →  최종 상태 load → 출력 생성 → 컨텍스�
 - **주의**: 다중 애플리케이션이 동시에 접근하므로, "누가 로그인했는가"는
   **연결(애플리케이션) 단위**로 구분해 관리해야 한다(한 앱의 로그아웃이 다른 앱의
   세션에 영향 주지 않도록).
+- **context-specific 재인증**: `CKU_CONTEXT_SPECIFIC` 로그인은 로그인 상태를
+  바꾸지 않고 **현재 사용자의 PIN을 즉석 재검증**하는 흐름(예:
+  `CKA_ALWAYS_AUTHENTICATE` 키 사용 직전)이다. 성공해도 V2 상태는 그대로다.
 
 ### V3. 세션별 연산 컨텍스트 ★ (진행 중 연산의 중간 상태)
 "세션 별로 무엇을 하고 있었는지"를 담는 핵심 항목. 각 활성 세션은 **최대 몇 개의

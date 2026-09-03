@@ -27,41 +27,19 @@ int test_ack_error_propagation(void);
 int test_shm_create_attach(void);
 int test_shm_cross_mapping_visibility(void);
 int test_mock_loopback_echo(void);
-/* STDLL client round-trip over IPC */
+/* STDLL client round-trip over IPC (advertised surface only) */
 int test_client_roundtrip(void);
 int test_client_rng_forward(void);
 int test_client_digest_forward(void);
 int test_client_digest_multipart(void);
-int test_client_aes_cbc_forward(void);
-int test_client_aes_ecb_forward(void);
 int test_client_aes_gcm_forward(void);
 int test_client_aes_stream_forward(void);
-int test_client_rsa_sign_forward(void);
-int test_client_rsa_verify_forward(void);
-int test_client_ec_sign_forward(void);
-int test_client_ec_verify_forward(void);
-int test_client_rsa_keygen_forward(void);
-int test_client_ec_keygen_forward(void);
-int test_client_hmac_forward(void);
-int test_client_rsa_oaep_forward(void);
-int test_client_dh_derive_forward(void);
-int test_client_ecdh_derive_forward(void);
-/* Crypto marshalling adapter (ncmp_crypto): every op forwarded to the mock. */
+/* Crypto marshalling adapter (ncmp_crypto): every advertised op vs the mock. */
 int test_crypto_rng(void);
 int test_crypto_digest(void);
 int test_crypto_digest_multipart(void);
-int test_crypto_aes_ecb(void);
-int test_crypto_aes_cbc(void);
 int test_crypto_aes_stream(void);
 int test_crypto_aes_gcm(void);
-int test_crypto_rsa(void);
-int test_crypto_rsa_oaep(void);
-int test_crypto_ec(void);
-int test_crypto_hmac(void);
-int test_crypto_rsa_keygen(void);
-int test_crypto_ec_keygen(void);
-int test_crypto_dh_derive(void);
-int test_crypto_ecdh_derive(void);
 /* Token administration: identity, CK-slot binding, login/PIN lifecycle. */
 int test_admin_token_info(void);
 int test_admin_bind_by_serial(void);
@@ -74,6 +52,9 @@ int test_admin_login(void);
 int test_admin_set_pin(void);
 int test_admin_init_pin(void);
 int test_admin_init_token(void);
+int test_admin_token_params(void);
+int test_admin_login_flags(void);
+int test_admin_set_utc_time(void);
 /* SHA3 / XOF / post-quantum (ML-DSA, ML-KEM) adapter tests. */
 int test_pqc_sha3(void);
 int test_pqc_shake(void);
@@ -102,36 +83,14 @@ int main(void)
     NCMP_RUN(test_client_rng_forward);
     NCMP_RUN(test_client_digest_forward);
     NCMP_RUN(test_client_digest_multipart);
-    NCMP_RUN(test_client_aes_cbc_forward);
-    NCMP_RUN(test_client_aes_ecb_forward);
     NCMP_RUN(test_client_aes_gcm_forward);
     NCMP_RUN(test_client_aes_stream_forward);
-    NCMP_RUN(test_client_rsa_sign_forward);
-    NCMP_RUN(test_client_rsa_verify_forward);
-    NCMP_RUN(test_client_ec_sign_forward);
-    NCMP_RUN(test_client_ec_verify_forward);
-    NCMP_RUN(test_client_rsa_keygen_forward);
-    NCMP_RUN(test_client_ec_keygen_forward);
-    NCMP_RUN(test_client_hmac_forward);
-    NCMP_RUN(test_client_rsa_oaep_forward);
-    NCMP_RUN(test_client_dh_derive_forward);
-    NCMP_RUN(test_client_ecdh_derive_forward);
 
     NCMP_RUN(test_crypto_rng);
     NCMP_RUN(test_crypto_digest);
     NCMP_RUN(test_crypto_digest_multipart);
-    NCMP_RUN(test_crypto_aes_ecb);
-    NCMP_RUN(test_crypto_aes_cbc);
     NCMP_RUN(test_crypto_aes_stream);
     NCMP_RUN(test_crypto_aes_gcm);
-    NCMP_RUN(test_crypto_rsa);
-    NCMP_RUN(test_crypto_rsa_oaep);
-    NCMP_RUN(test_crypto_ec);
-    NCMP_RUN(test_crypto_hmac);
-    NCMP_RUN(test_crypto_rsa_keygen);
-    NCMP_RUN(test_crypto_ec_keygen);
-    NCMP_RUN(test_crypto_dh_derive);
-    NCMP_RUN(test_crypto_ecdh_derive);
 
     NCMP_RUN(test_admin_token_info);
     NCMP_RUN(test_admin_bind_by_serial);
@@ -144,6 +103,9 @@ int main(void)
     NCMP_RUN(test_admin_set_pin);
     NCMP_RUN(test_admin_init_pin);
     NCMP_RUN(test_admin_init_token);
+    NCMP_RUN(test_admin_token_params);
+    NCMP_RUN(test_admin_login_flags);
+    NCMP_RUN(test_admin_set_utc_time);
 
     NCMP_RUN(test_pqc_sha3);
     NCMP_RUN(test_pqc_shake);

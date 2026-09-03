@@ -66,65 +66,57 @@ enum {
 
 ## 2. 명령 목록 (CI_CMD_*)
 
+각 `CI_CMD_*`는 `ncmp_cmd.h`의 **`enum ncmp_opcode` 값을 그대로 별칭(alias)** 하도록
+정의된다. 두 열거형은 항상 lockstep으로 유지되며(같은 값·같은 순번), CI 문서와 와이어
+헤더가 서로 어긋날 수 없다.
+
 ```c
 typedef enum CI_Cmd {
     /* 기본 / 대칭 / 해시 */
-    CI_CMD_NOP           = 0x0000, /* 무동작 / 에코(keepalive) */
-    CI_CMD_RNG           = 0x0001, /* 난수 생성 */
-    CI_CMD_DIGEST        = 0x0002, /* 단발 해시 */
-    CI_CMD_GETMECHLIST   = 0x0003, /* (예약) 지원 mechanism 조회 */
-    CI_CMD_DIGEST_INIT   = 0x0004, /* 멀티파트 해시 시작 */
-    CI_CMD_DIGEST_UPDATE = 0x0005, /* 멀티파트 해시 갱신 */
-    CI_CMD_DIGEST_FINAL  = 0x0006, /* 멀티파트 해시 종료 */
-    CI_CMD_HMAC_SIGN     = 0x0007, /* HMAC 생성 */
-    CI_CMD_HMAC_VERIFY   = 0x0008, /* HMAC 검증 */
-    CI_CMD_SHAKE_DERIVE  = 0x0009, /* SHAKE XOF 키 유도 */
-    CI_CMD_AES_CBC       = 0x0010, /* AES-CBC 암복호 */
-    CI_CMD_AES_ECB       = 0x0011, /* AES-ECB 암복호 */
-    CI_CMD_AES_GCM       = 0x0012, /* AES-GCM AEAD */
-    CI_CMD_AES_CTR       = 0x0013, /* AES-CTR 스트림 */
-    CI_CMD_AES_OFB       = 0x0014, /* AES-OFB 스트림 */
-    CI_CMD_AES_CFB       = 0x0015, /* AES-CFB 스트림 */
-    /* 비대칭 (레거시 포워딩) */
-    CI_CMD_RSA_SIGN      = 0x0020, /* RSA 서명 */
-    CI_CMD_EC_SIGN       = 0x0021, /* ECDSA 서명 */
-    CI_CMD_RSA_VERIFY    = 0x0022, /* RSA 검증 */
-    CI_CMD_EC_VERIFY     = 0x0023, /* ECDSA 검증 */
-    CI_CMD_RSA_KEYGEN    = 0x0024, /* RSA 키페어 생성 */
-    CI_CMD_EC_KEYGEN     = 0x0025, /* EC 키페어 생성 */
-    CI_CMD_RSA_OAEP_ENC  = 0x0026, /* RSA-OAEP 암호화 */
-    CI_CMD_RSA_OAEP_DEC  = 0x0027, /* RSA-OAEP 복호화 */
-    CI_CMD_DH_DERIVE     = 0x0028, /* DH 키합의 */
-    CI_CMD_ECDH_DERIVE   = 0x0029, /* ECDH 키합의 */
-    /* 토큰 관리 / 로그인 */
-    CI_CMD_LOGIN         = 0x0030, /* 로그인(PIN 검증) */
-    CI_CMD_LOGOUT        = 0x0031, /* 로그아웃 */
-    CI_CMD_INIT_PIN      = 0x0032, /* SO가 사용자 PIN 설정 */
-    CI_CMD_SET_PIN       = 0x0033, /* PIN 변경 */
-    CI_CMD_INIT_TOKEN    = 0x0034, /* 토큰 초기화(라벨 설정) */
+    CI_CMD_NOP             = NCMP_CMD_NOP,             /* 0x0000 */
+    CI_CMD_RNG             = NCMP_CMD_RNG,             /* 0x0001 */
+    CI_CMD_DIGEST          = NCMP_CMD_DIGEST,          /* 0x0002 */
+    CI_CMD_GETMECHLIST     = NCMP_CMD_GETMECHLIST,     /* 0x0003 (예약) */
+    CI_CMD_DIGEST_INIT     = NCMP_CMD_DIGEST_INIT,     /* 0x0004 */
+    CI_CMD_DIGEST_UPDATE   = NCMP_CMD_DIGEST_UPDATE,   /* 0x0005 */
+    CI_CMD_DIGEST_FINAL    = NCMP_CMD_DIGEST_FINAL,    /* 0x0006 */
+    CI_CMD_SHAKE_DERIVE    = NCMP_CMD_SHAKE_DERIVE,    /* 0x0009 */
+    /* 대칭 (AEAD / 스트림) */
+    CI_CMD_AES_GCM         = NCMP_CMD_AES_GCM,         /* 0x0012 */
+    CI_CMD_AES_CTR         = NCMP_CMD_AES_CTR,         /* 0x0013 */
+    /* 토큰 관리 / 로그인 / 조회 */
+    CI_CMD_LOGIN           = NCMP_CMD_LOGIN,           /* 0x0030 */
+    CI_CMD_LOGOUT          = NCMP_CMD_LOGOUT,          /* 0x0031 */
+    CI_CMD_INIT_PIN        = NCMP_CMD_INIT_PIN,        /* 0x0032 */
+    CI_CMD_SET_PIN         = NCMP_CMD_SET_PIN,         /* 0x0033 */
+    CI_CMD_INIT_TOKEN      = NCMP_CMD_INIT_TOKEN,      /* 0x0034 */
+    CI_CMD_GET_UTC_TIME    = NCMP_CMD_GET_UTC_TIME,    /* 0x0035 */
+    CI_CMD_GET_TOKEN_PARAMS = NCMP_CMD_GET_TOKEN_PARAMS, /* 0x0036 */
+    CI_CMD_SET_UTC_TIME    = NCMP_CMD_SET_UTC_TIME,    /* 0x0037 */
     /* 포스트양자 (PKCS#11 3.2) */
-    CI_CMD_MLDSA_KEYGEN  = 0x0050, /* ML-DSA 키페어 생성 */
-    CI_CMD_MLDSA_SIGN    = 0x0051, /* ML-DSA 서명 */
-    CI_CMD_MLDSA_VERIFY  = 0x0052, /* ML-DSA 검증 */
-    CI_CMD_MLKEM_KEYGEN  = 0x0053, /* ML-KEM 키페어 생성 */
-    CI_CMD_MLKEM_ENCAPS  = 0x0054, /* ML-KEM 캡슐화 */
-    CI_CMD_MLKEM_DECAPS  = 0x0055, /* ML-KEM 역캡슐화 */
+    CI_CMD_MLDSA_KEYGEN    = NCMP_CMD_MLDSA_KEYGEN,    /* 0x0050 */
+    CI_CMD_MLDSA_SIGN      = NCMP_CMD_MLDSA_SIGN,      /* 0x0051 */
+    CI_CMD_MLDSA_VERIFY    = NCMP_CMD_MLDSA_VERIFY,    /* 0x0052 */
+    CI_CMD_MLKEM_KEYGEN    = NCMP_CMD_MLKEM_KEYGEN,    /* 0x0053 */
+    CI_CMD_MLKEM_ENCAPS    = NCMP_CMD_MLKEM_ENCAPS,    /* 0x0054 */
+    CI_CMD_MLKEM_DECAPS    = NCMP_CMD_MLKEM_DECAPS,    /* 0x0055 */
     /* 벤더 정의 (datapath / 디바이스 상태) */
-    CI_CMD_VD_LOOPBACK   = 0x0100, /* 에코 */
-    CI_CMD_VD_MEM_WRITE  = 0x0101, /* 스크래치 RAM 쓰기 */
-    CI_CMD_VD_MEM_READ   = 0x0102, /* 스크래치 RAM 읽기 */
-    CI_CMD_VD_PING       = 0x0103, /* epoch 조회 */
-    CI_CMD_VD_SELFTEST   = 0x0104, /* 셀프테스트 */
-    CI_CMD_VD_FW_INFO    = 0x0105, /* 펌웨어 버전 조회 */
-    CI_CMD_VD_MEM_FILL   = 0x0106, /* 스크래치 RAM 채우기 */
-    CI_CMD_VD_MEM_CRC    = 0x0107, /* 스크래치 RAM CRC32 */
-    CI_CMD_VD_TOKEN_INFO = 0x0108  /* 토큰 정체성 조회 */
+    CI_CMD_VD_MEM_WRITE    = NCMP_CMD_VD_MEM_WRITE,    /* 0x0101 */
+    CI_CMD_VD_MEM_READ     = NCMP_CMD_VD_MEM_READ,     /* 0x0102 */
+    CI_CMD_VD_PING         = NCMP_CMD_VD_PING,         /* 0x0103 */
+    CI_CMD_VD_SELFTEST     = NCMP_CMD_VD_SELFTEST,     /* 0x0104 */
+    CI_CMD_VD_FW_INFO      = NCMP_CMD_VD_FW_INFO,      /* 0x0105 */
+    CI_CMD_VD_MEM_FILL     = NCMP_CMD_VD_MEM_FILL,     /* 0x0106 */
+    CI_CMD_VD_MEM_CRC      = NCMP_CMD_VD_MEM_CRC,      /* 0x0107 */
+    CI_CMD_VD_TOKEN_INFO   = NCMP_CMD_VD_TOKEN_INFO    /* 0x0108 */
 } CI_Cmd;
 ```
 
-> **현재 advertised mechanism 표면**은 AES-GCM/CTR · SHA-2/3 · SHAKE · ML-KEM ·
-> ML-DSA 이다(→ [`SUMMARY.md`]). RSA/EC/DH/HMAC/AES-CBC·ECB·OFB·CFB 명령은 와이어에
-> 여전히 정의되어 있으나 표면에서는 광고되지 않는 **레거시 포워딩 경로**다.
+> **와이어 표면 = advertised mechanism 표면.** opcode/CI 목록은 이제 토큰이 실제로
+> 제공하는 mechanism(AES-GCM/CTR · SHA-2/3 · SHAKE · ML-KEM · ML-DSA)과 **정확히
+> 일치**한다. RSA/EC/DH/ECDH/HMAC/AES-CBC·ECB·OFB·CFB 등 비광고 mechanism은 opcode·CI
+> 구조체·어댑터·mock·테스트까지 **완전히 제거**되었다(레거시 포워딩 경로 없음).
+> 에코/loopback은 별도 opcode 없이 `CI_CMD_NOP`로 처리한다.
 
 ---
 
@@ -196,30 +188,7 @@ typedef struct CI_DigestFinalRsp {
 } CI_DigestFinalRsp;
 ```
 
-### 3.8 CI_CMD_HMAC_SIGN (0x0007) — HMAC 생성
-```c
-typedef struct CI_HmacSignReq {
-    uint32_t mech;    /* param0: HMAC mechanism (CKM_SHA*_HMAC) */
-    uint8_t  key[];   /* param1: HMAC 키 */
-    uint8_t  data[];  /* param2: 입력 메시지 */
-} CI_HmacSignReq;
-typedef struct CI_HmacSignRsp {
-    uint8_t  mac[];   /* param0: MAC (해시 크기) */
-} CI_HmacSignRsp;
-```
-
-### 3.9 CI_CMD_HMAC_VERIFY (0x0008) — HMAC 검증
-```c
-typedef struct CI_HmacVerifyReq {
-    uint32_t mech;    /* param0: HMAC mechanism */
-    uint8_t  key[];   /* param1: HMAC 키 */
-    uint8_t  data[];  /* param2: 입력 메시지 */
-    uint8_t  mac[];   /* param3: 대조할 MAC */
-} CI_HmacVerifyReq;
-typedef struct CI_HmacVerifyRsp { /* 없음. ack=CKR_OK 또는 CKR_SIGNATURE_INVALID */ } CI_HmacVerifyRsp;
-```
-
-### 3.10 CI_CMD_SHAKE_DERIVE (0x0009) — SHAKE XOF 키 유도
+### 3.8 CI_CMD_SHAKE_DERIVE (0x0009) — SHAKE XOF 키 유도
 ```c
 typedef struct CI_ShakeDeriveReq {
     uint32_t mech;    /* param0: CKM_SHAKE_128/256_KEY_DERIVATION */
@@ -240,30 +209,7 @@ typedef struct CI_ShakeDeriveRsp {
 enum { CI_AES_FLAG_ENCRYPT = 0x1 };  /* flags bit0: 1=암호화, 0=복호화 */
 ```
 
-### 4.1 CI_CMD_AES_CBC (0x0010)
-```c
-typedef struct CI_AesCbcReq {
-    uint32_t flags;   /* param0: bit0=암/복호 */
-    uint8_t  key[];   /* param1: AES 키 (16/24/32 B) */
-    uint8_t  iv[];    /* param2: 초기화 벡터 (16 B) */
-    uint8_t  data[];  /* param3: 입력 (16의 배수) */
-} CI_AesCbcReq;
-typedef struct CI_AesCbcRsp {
-    uint8_t  out[];   /* param0: 출력 (입력과 동일 길이) */
-} CI_AesCbcRsp;
-```
-
-### 4.2 CI_CMD_AES_ECB (0x0011)
-```c
-typedef struct CI_AesEcbReq {
-    uint32_t flags;   /* param0: bit0=암/복호 */
-    uint8_t  key[];   /* param1: AES 키 */
-    uint8_t  data[];  /* param2: 입력 (16의 배수) */
-} CI_AesEcbReq;
-typedef struct CI_AesEcbRsp { uint8_t out[]; /* param0: 출력 */ } CI_AesEcbRsp;
-```
-
-### 4.3 CI_CMD_AES_GCM (0x0012) — AEAD
+### 4.1 CI_CMD_AES_GCM (0x0012) — AEAD
 ```c
 typedef struct CI_AesGcmReq {
     uint32_t flags;    /* param0: bit0=암/복호 */
@@ -279,143 +225,58 @@ typedef struct CI_AesGcmRsp {
 ```
 > 복호화에서 태그 불일치 시 `ack = CKR_ENCRYPTED_DATA_INVALID`, 출력 없음.
 
-### 4.4 CI_CMD_AES_CTR / OFB / CFB (0x0013 / 0x0014 / 0x0015) — 스트림
-세 모드는 동일한 파라미터 레이아웃을 쓴다(`param2`가 카운터/IV).
+### 4.2 CI_CMD_AES_CTR (0x0013) — 스트림
+AES-CTR은 유일하게 광고되는 AES 스트림 모드다(`param2`가 카운터 블록).
 ```c
-typedef struct CI_AesStreamReq {
+typedef struct CI_AesCtrReq {
     uint32_t flags;   /* param0: bit0=암/복호 (스트림은 방향 대칭) */
-    uint8_t  key[];   /* param1: AES 키 */
-    uint8_t  iv[];    /* param2: 카운터 블록(CTR) 또는 IV(OFB/CFB) */
+    uint8_t  key[];   /* param1: AES 키 (16/24/32 B) */
+    uint8_t  iv[];    /* param2: 카운터 블록 (16 B) */
     uint8_t  data[];  /* param3: 입력 (임의 길이) */
-} CI_AesStreamReq;
-typedef struct CI_AesStreamRsp { uint8_t out[]; /* param0: 출력 (입력과 동일 길이) */ } CI_AesStreamRsp;
+} CI_AesCtrReq;
+typedef struct CI_AesCtrRsp { uint8_t out[]; /* param0: 출력 (입력과 동일 길이) */ } CI_AesCtrRsp;
 ```
 
 ---
 
-## 5. 비대칭키 명령 *(레거시 포워딩)*
-
-### 5.1 CI_CMD_RSA_SIGN (0x0020) / RSA_VERIFY (0x0022)
-```c
-typedef struct CI_RsaSignReq {
-    uint8_t  modulus[];   /* param0: RSA 모듈러스 n */
-    uint8_t  priv_exp[];  /* param1: 개인 지수 d */
-    uint8_t  data[];      /* param2: 서명 대상(해시된 값) */
-} CI_RsaSignReq;
-typedef struct CI_RsaSignRsp { uint8_t sig[]; /* param0: 서명 (모듈러스 길이) */ } CI_RsaSignRsp;
-
-typedef struct CI_RsaVerifyReq {
-    uint8_t  modulus[];   /* param0: RSA 모듈러스 n */
-    uint8_t  pub_exp[];   /* param1: 공개 지수 e */
-    uint8_t  data[];      /* param2: 원본(해시된 값) */
-    uint8_t  sig[];       /* param3: 대조할 서명 */
-} CI_RsaVerifyReq;
-typedef struct CI_RsaVerifyRsp { /* 없음. ack=OK/CKR_SIGNATURE_INVALID */ } CI_RsaVerifyRsp;
-```
-> RSA-PSS는 동일 마샬링(`CI_CMD_RSA_SIGN`/`_VERIFY`)을 재사용한다.
-
-### 5.2 CI_CMD_EC_SIGN (0x0021) / EC_VERIFY (0x0023)
-```c
-typedef struct CI_EcSignReq {
-    uint8_t  ec_params[]; /* param0: 곡선 파라미터(OID) */
-    uint8_t  priv[];      /* param1: 개인 스칼라 */
-    uint8_t  data[];      /* param2: 서명 대상 */
-} CI_EcSignReq;
-typedef struct CI_EcSignRsp { uint8_t sig[]; /* param0: ECDSA 서명 (2×필드 길이) */ } CI_EcSignRsp;
-
-typedef struct CI_EcVerifyReq {
-    uint8_t  ec_params[]; /* param0: 곡선 파라미터 */
-    uint8_t  ec_point[];  /* param1: 공개점 */
-    uint8_t  data[];      /* param2: 원본 */
-    uint8_t  sig[];       /* param3: 대조할 서명 */
-} CI_EcVerifyReq;
-typedef struct CI_EcVerifyRsp { /* 없음. ack=OK/CKR_SIGNATURE_INVALID */ } CI_EcVerifyRsp;
-```
-
-### 5.3 CI_CMD_RSA_KEYGEN (0x0024)
-```c
-typedef struct CI_RsaKeygenReq {
-    uint32_t mod_bits;    /* param0: 모듈러스 비트 수 (512..4096, 8의 배수) */
-    uint8_t  pub_exp[];   /* param1: 공개 지수 e */
-} CI_RsaKeygenReq;
-typedef struct CI_RsaKeygenRsp {
-    uint8_t  n[];         /* param0: 모듈러스 */
-    uint8_t  d[];         /* param1: 개인 지수 */
-    uint8_t  p[];         /* param2: 소수 1 */
-    uint8_t  q[];         /* param3: 소수 2 */
-    uint8_t  dp[];        /* param4: d mod (p-1) */
-    uint8_t  dq[];        /* param5: d mod (q-1) */
-    uint8_t  qinv[];      /* param6: q^-1 mod p */
-} CI_RsaKeygenRsp;
-```
-
-### 5.4 CI_CMD_EC_KEYGEN (0x0025)
-```c
-typedef struct CI_EcKeygenReq { uint8_t ec_params[]; /* param0: 곡선 파라미터 */ } CI_EcKeygenReq;
-typedef struct CI_EcKeygenRsp {
-    uint8_t  ec_point[];  /* param0: 공개점(비압축 0x04‖X‖Y) */
-    uint8_t  priv[];      /* param1: 개인 스칼라 */
-} CI_EcKeygenRsp;
-```
-
-### 5.5 CI_CMD_RSA_OAEP_ENC (0x0026) / RSA_OAEP_DEC (0x0027)
-```c
-typedef struct CI_RsaOaepEncReq {
-    uint8_t  modulus[];   /* param0: 모듈러스 n */
-    uint8_t  pub_exp[];   /* param1: 공개 지수 e */
-    uint8_t  data[];      /* param2: 평문 (4+len ≤ 모듈러스 길이) */
-} CI_RsaOaepEncReq;
-typedef struct CI_RsaOaepEncRsp { uint8_t ct[]; /* param0: 암호문 (모듈러스 길이) */ } CI_RsaOaepEncRsp;
-
-typedef struct CI_RsaOaepDecReq {
-    uint8_t  modulus[];   /* param0: 모듈러스 n */
-    uint8_t  priv_exp[];  /* param1: 개인 지수 d */
-    uint8_t  ct[];        /* param2: 암호문 (모듈러스 길이) */
-} CI_RsaOaepDecReq;
-typedef struct CI_RsaOaepDecRsp { uint8_t data[]; /* param0: 복원된 평문 */ } CI_RsaOaepDecRsp;
-```
-
-### 5.6 CI_CMD_DH_DERIVE (0x0028) / ECDH_DERIVE (0x0029)
-```c
-typedef struct CI_DhDeriveReq {
-    uint8_t  prime[];     /* param0: DH 소수 p */
-    uint8_t  priv[];      /* param1: 자신의 개인값 */
-    uint8_t  peer_pub[];  /* param2: 상대 공개값 */
-} CI_DhDeriveReq;
-typedef struct CI_DhDeriveRsp { uint8_t secret[]; /* param0: 공유 비밀 (소수 길이) */ } CI_DhDeriveRsp;
-
-typedef struct CI_EcdhDeriveReq {
-    uint8_t  ec_params[]; /* param0: 곡선 파라미터 */
-    uint8_t  priv[];      /* param1: 자신의 개인 스칼라 */
-    uint8_t  peer_point[];/* param2: 상대 공개점(비압축) */
-} CI_EcdhDeriveReq;
-typedef struct CI_EcdhDeriveRsp { uint8_t secret[]; /* param0: 공유 비밀 (1 필드 요소) */ } CI_EcdhDeriveRsp;
-```
-
----
-
-## 6. 토큰 관리 / 로그인 명령
+## 5. 토큰 관리 / 로그인 / 조회 명령
 
 ```c
-enum { CI_CKU_SO = 0, CI_CKU_USER = 1 };  /* user_type 값 */
+enum { CI_CKU_SO = 0, CI_CKU_USER = 1, CI_CKU_CONTEXT_SPECIFIC = 2 }; /* user_type */
+
+/* param1의 로그인 수정 플래그 (NCMP_LOGIN_FLAG_* 와 동일 값). */
+enum {
+    CI_LOGIN_FLAG_NONE           = 0x00000000u,
+    CI_LOGIN_FLAG_PROTECTED_AUTH = 0x00000001u, /* PIN을 토큰 패드에서 입력 */
+    CI_LOGIN_FLAG_CONTEXT        = 0x00000002u  /* CKU_CONTEXT_SPECIFIC 재인증 */
+};
 ```
 
-### 6.1 CI_CMD_LOGIN (0x0030)
+### 5.1 CI_CMD_LOGIN (0x0030)
+로그인은 SO/User 역할(`user_type`) **외에** 부가 조건을 `flags`로 함께 전달한다.
 ```c
 typedef struct CI_LoginReq {
-    uint32_t user_type;  /* param0: CI_CKU_SO(0) 또는 CI_CKU_USER(1) */
-    uint8_t  pin[];      /* param1: PIN 바이트 (protected-auth면 비어 있음) */
+    uint32_t user_type;  /* param0: CI_CKU_SO(0) / CI_CKU_USER(1) / CI_CKU_CONTEXT_SPECIFIC(2) */
+    uint32_t flags;      /* param1: CI_LOGIN_FLAG_* (protected-auth / context 재인증) */
+    uint8_t  pin[];      /* param2: PIN 바이트 (protected-auth면 비어 있음) */
 } CI_LoginReq;
 typedef struct CI_LoginRsp { /* 없음. ack=OK / CKR_PIN_INCORRECT / CKR_USER_* */ } CI_LoginRsp;
 ```
+- **protected-auth**(`CI_LOGIN_FLAG_PROTECTED_AUTH`): PIN을 토큰 자체 패드에서
+  입력하므로 와이어 PIN은 비어 있고, 토큰이 직접 인증을 승인한다.
+- **context-specific**(`user_type=2` 또는 `CI_LOGIN_FLAG_CONTEXT`): **현재
+  로그인된 사용자**의 PIN을 재검증(PKCS#11 `CKA_ALWAYS_AUTHENTICATE`)하며 로그인
+  상태는 바꾸지 않는다. 아무도 로그인하지 않았으면 `CKR_USER_NOT_LOGGED_IN`.
+- 잘못된 `user_type`은 `CKR_USER_TYPE_INVALID`, 중복 로그인은
+  `CKR_USER_ALREADY_LOGGED_IN`.
 
-### 6.2 CI_CMD_LOGOUT (0x0031)
+### 5.2 CI_CMD_LOGOUT (0x0031)
 ```c
 typedef struct CI_LogoutReq { /* 없음 */ } CI_LogoutReq;
 typedef struct CI_LogoutRsp { /* 없음. ack=CKR_OK */ } CI_LogoutRsp;
 ```
 
-### 6.3 CI_CMD_INIT_PIN (0x0032) — SO가 사용자 PIN 설정
+### 5.3 CI_CMD_INIT_PIN (0x0032) — SO가 사용자 PIN 설정
 ```c
 typedef struct CI_InitPinReq {
     uint8_t  new_pin[];  /* param0: 설정할 사용자 PIN */
@@ -423,7 +284,7 @@ typedef struct CI_InitPinReq {
 typedef struct CI_InitPinRsp { /* 없음. ack=OK / CKR_USER_NOT_LOGGED_IN / CKR_PIN_LEN_RANGE */ } CI_InitPinRsp;
 ```
 
-### 6.4 CI_CMD_SET_PIN (0x0033) — PIN 변경
+### 5.4 CI_CMD_SET_PIN (0x0033) — PIN 변경
 ```c
 typedef struct CI_SetPinReq {
     uint8_t  old_pin[];  /* param0: 현재 PIN */
@@ -432,7 +293,7 @@ typedef struct CI_SetPinReq {
 typedef struct CI_SetPinRsp { /* 없음. ack=OK / CKR_PIN_INCORRECT / CKR_PIN_LEN_RANGE */ } CI_SetPinRsp;
 ```
 
-### 6.5 CI_CMD_INIT_TOKEN (0x0034) — 토큰 초기화
+### 5.5 CI_CMD_INIT_TOKEN (0x0034) — 토큰 초기화
 ```c
 typedef struct CI_InitTokenReq {
     uint8_t  so_pin[];   /* param0: SO PIN(검증) */
@@ -440,6 +301,44 @@ typedef struct CI_InitTokenReq {
 } CI_InitTokenReq;
 typedef struct CI_InitTokenRsp { /* 없음. ack=OK / CKR_PIN_INCORRECT */ } CI_InitTokenRsp;
 ```
+> **호스트(STDLL) 후속 처리.** `INIT_TOKEN` 성공 후 STDLL은 `VD_TOKEN_INFO`로
+> **라벨을 다시 읽어와 요청 라벨과 정밀 검증**한다. 일치하면 토큰 정체성을
+> `nv_token_data`에 캐시하고 `save_token_data()`로 영속화한 뒤, 사용한 **임시 SO
+> PIN·라벨 버퍼를 즉시 0으로 소거(zeroization)** 한다. 라벨이 불일치하면
+> `CKR_FUNCTION_FAILED`.
+
+### 5.6 CI_CMD_GET_UTC_TIME (0x0035) — UTC 시각 조회
+```c
+typedef struct CI_GetUtcTimeReq { /* 없음 */ } CI_GetUtcTimeReq;
+typedef struct CI_GetUtcTimeRsp {
+    uint8_t  utc[16];    /* param0: CK_TOKEN_INFO.utcTime ("YYYYMMDDhhmmssxx") */
+} CI_GetUtcTimeRsp;
+```
+> STDLL은 이 값을 `C_GetTokenInfo`의 `utcTime` 필드에 반영한다.
+
+### 5.7 CI_CMD_GET_TOKEN_PARAMS (0x0036) — 라벨·시리얼·PIN 길이 조회
+```c
+typedef struct CI_GetTokenParamsReq { /* 없음 */ } CI_GetTokenParamsReq;
+typedef struct CI_GetTokenParamsRsp {
+    uint8_t  label[32];   /* param0: 토큰 라벨 (NUL/공백 패딩) */
+    uint8_t  serial[16];  /* param1: 시리얼 번호 (NUL/공백 패딩) */
+    uint32_t min_pin_len; /* param2: ulMinPinLen (LE u32) */
+    uint32_t max_pin_len; /* param3: ulMaxPinLen (LE u32) */
+} CI_GetTokenParamsRsp;
+```
+> STDLL은 `ulMinPinLen`/`ulMaxPinLen`을 `C_GetTokenInfo`에 반영한다.
+
+### 5.8 CI_CMD_SET_UTC_TIME (0x0037) — UTC 시각 설정
+```c
+typedef struct CI_SetUtcTimeReq {
+    uint8_t  utc[16];    /* param0: 설정할 CK_TOKEN_INFO.utcTime ("YYYYMMDDhhmmssxx") */
+} CI_SetUtcTimeReq;
+typedef struct CI_SetUtcTimeRsp { /* 없음. ack=OK / CKR_USER_NOT_LOGGED_IN / CKR_ARGUMENTS_BAD */ } CI_SetUtcTimeRsp;
+```
+> 토큰 클럭을 설정한다. **SO 로그인 상태에서만** 허용되며(그 외 `CKR_USER_NOT_LOGGED_IN`),
+> `utc`는 정확히 16바이트여야 한다(`CKR_ARGUMENTS_BAD`). 이후 `CI_CMD_GET_UTC_TIME`은
+> 설정한 값을 그대로 되돌려준다. PKCS#11에는 시각 설정용 표준 C_ 함수가 없어
+> 이 CI는 `ncmp_admin` 어댑터를 통한 관리 전용 경로다.
 
 ---
 
@@ -541,13 +440,10 @@ typedef struct CI_MlKemDecapsRsp {
 
 벤더 스크래치 RAM 크기는 `NCMP_VD_MEM_SIZE`(4 KB)이다.
 
-### 8.1 CI_CMD_VD_LOOPBACK (0x0100)
-```c
-typedef struct CI_VdLoopbackReq { uint8_t data[]; /* param0: 반향할 바이트 */ } CI_VdLoopbackReq;
-typedef struct CI_VdLoopbackRsp { uint8_t data[]; /* param0: 동일 바이트 */ } CI_VdLoopbackRsp;
-```
+> **에코/loopback**은 전용 opcode 없이 `CI_CMD_NOP`(0x0000)로 처리한다(요청 payload를
+> 그대로 반향). 과거의 `CI_CMD_VD_LOOPBACK`(0x0100)은 제거되었다.
 
-### 8.2 CI_CMD_VD_MEM_WRITE (0x0101)
+### 8.1 CI_CMD_VD_MEM_WRITE (0x0101)
 ```c
 typedef struct CI_VdMemWriteReq {
     uint32_t addr;    /* param0: 스크래치 RAM 오프셋 */
@@ -556,7 +452,7 @@ typedef struct CI_VdMemWriteReq {
 typedef struct CI_VdMemWriteRsp { /* 없음. ack=OK / CKR_DEVICE_MEMORY */ } CI_VdMemWriteRsp;
 ```
 
-### 8.3 CI_CMD_VD_MEM_READ (0x0102)
+### 8.2 CI_CMD_VD_MEM_READ (0x0102)
 ```c
 typedef struct CI_VdMemReadReq {
     uint32_t addr;    /* param0: 읽기 시작 오프셋 */
@@ -565,13 +461,13 @@ typedef struct CI_VdMemReadReq {
 typedef struct CI_VdMemReadRsp { uint8_t bytes[]; /* param0: 읽은 데이터 (len) */ } CI_VdMemReadRsp;
 ```
 
-### 8.4 CI_CMD_VD_PING (0x0103)
+### 8.3 CI_CMD_VD_PING (0x0103)
 ```c
 typedef struct CI_VdPingReq { /* 없음 */ } CI_VdPingReq;
 typedef struct CI_VdPingRsp { uint32_t epoch; /* param0: 토큰 epoch 카운터 */ } CI_VdPingRsp;
 ```
 
-### 8.5 CI_CMD_VD_SELFTEST (0x0104)
+### 8.4 CI_CMD_VD_SELFTEST (0x0104)
 ```c
 typedef struct CI_VdSelftestReq { /* 없음 */ } CI_VdSelftestReq;
 typedef struct CI_VdSelftestRsp {
@@ -579,7 +475,7 @@ typedef struct CI_VdSelftestRsp {
 } CI_VdSelftestRsp;
 ```
 
-### 8.6 CI_CMD_VD_FW_INFO (0x0105)
+### 8.5 CI_CMD_VD_FW_INFO (0x0105)
 ```c
 typedef struct CI_VdFwInfoReq { /* 없음 */ } CI_VdFwInfoReq;
 typedef struct CI_VdFwInfoRsp {  /* param0 = 아래 4개 LE u32 (16바이트) */
@@ -590,7 +486,7 @@ typedef struct CI_VdFwInfoRsp {  /* param0 = 아래 4개 LE u32 (16바이트) */
 } CI_VdFwInfoRsp;
 ```
 
-### 8.7 CI_CMD_VD_MEM_FILL (0x0106)
+### 8.6 CI_CMD_VD_MEM_FILL (0x0106)
 ```c
 typedef struct CI_VdMemFillReq {
     uint32_t addr;    /* param0: 시작 오프셋 */
@@ -600,7 +496,7 @@ typedef struct CI_VdMemFillReq {
 typedef struct CI_VdMemFillRsp { /* 없음. ack=OK / CKR_DEVICE_MEMORY */ } CI_VdMemFillRsp;
 ```
 
-### 8.8 CI_CMD_VD_MEM_CRC (0x0107)
+### 8.7 CI_CMD_VD_MEM_CRC (0x0107)
 ```c
 typedef struct CI_VdMemCrcReq {
     uint32_t addr;    /* param0: 시작 오프셋 */
@@ -609,7 +505,7 @@ typedef struct CI_VdMemCrcReq {
 typedef struct CI_VdMemCrcRsp { uint32_t crc32; /* param0: CRC-32 (0xEDB88320 다항식) */ } CI_VdMemCrcRsp;
 ```
 
-### 8.9 CI_CMD_VD_TOKEN_INFO (0x0108) — 토큰 정체성 조회
+### 8.8 CI_CMD_VD_TOKEN_INFO (0x0108) — 토큰 정체성 조회
 ```c
 /* param0 = 고정 104바이트 정체성 블롭 (문자 필드는 NUL 패딩). */
 typedef struct CI_TokenIdentity {
@@ -658,8 +554,8 @@ typedef struct CI_VdTokenInfoRsp { CI_TokenIdentity identity; /* param0 */ } CI_
 
 | CI 명령 그룹 | 호스트 어댑터 | 파일 |
 |--------------|---------------|------|
-| RNG·DIGEST·AES·RSA·EC·DH·HMAC·SHAKE·PQC | `ncmp_crypto_*` | `ncmp/stdll/ncmp_crypto.c` |
-| LOGIN·PIN·TOKEN_INFO | `ncmp_admin_*` | `ncmp/stdll/ncmp_admin.c` |
+| RNG·DIGEST·AES(GCM·CTR)·SHAKE·PQC(ML-DSA·ML-KEM) | `ncmp_crypto_*` | `ncmp/stdll/ncmp_crypto.c` |
+| LOGIN·PIN·TOKEN_INFO·GET/SET_UTC_TIME·GET_TOKEN_PARAMS | `ncmp_admin_*` | `ncmp/stdll/ncmp_admin.c` |
 | 전송 프리미티브(단일/다중 param) | `ncmp_client_command[_mp]` | `ncmp/stdll/ncmp_client.c` |
 | 프레임 인코딩/디코딩 | `ncmp_wire_encode/decode`, `ncmp_msg_*` | `ncmp/common/ncmp_wire.c` |
 | 참조 구현(디바이스 측) | opcode 실행 | `ncmp/mock/mcu_scheduler.c` |

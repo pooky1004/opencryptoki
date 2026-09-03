@@ -275,17 +275,17 @@ int test_admin_login(void)
     NCMP_CHECK(client_connect_retry(&c) == NCMP_OK);
 
     /* Wrong PIN is rejected. */
-    NCMP_CHECK(ncmp_admin_login(&c, 0, NCMP_CKU_USER, bad_pin, 4)
+    NCMP_CHECK(ncmp_admin_login(&c, 0, NCMP_CKU_USER, NCMP_LOGIN_FLAG_NONE, bad_pin, 4)
                == NCMP_CKR_PIN_INCORRECT);
     /* Correct user PIN logs in. */
-    NCMP_CHECK(ncmp_admin_login(&c, 0, NCMP_CKU_USER, user_pin, 4)
+    NCMP_CHECK(ncmp_admin_login(&c, 0, NCMP_CKU_USER, NCMP_LOGIN_FLAG_NONE, user_pin, 4)
                == NCMP_CKR_OK);
     /* A second login without logout is refused. */
-    NCMP_CHECK(ncmp_admin_login(&c, 0, NCMP_CKU_USER, user_pin, 4)
+    NCMP_CHECK(ncmp_admin_login(&c, 0, NCMP_CKU_USER, NCMP_LOGIN_FLAG_NONE, user_pin, 4)
                == NCMP_CKR_USER_ALREADY_LOGGED_IN);
     /* Logout, then log in as SO. */
     NCMP_CHECK(ncmp_admin_logout(&c, 0) == NCMP_CKR_OK);
-    NCMP_CHECK(ncmp_admin_login(&c, 0, NCMP_CKU_SO, so_pin, 8) == NCMP_CKR_OK);
+    NCMP_CHECK(ncmp_admin_login(&c, 0, NCMP_CKU_SO, NCMP_LOGIN_FLAG_NONE, so_pin, 8) == NCMP_CKR_OK);
     NCMP_CHECK(ncmp_admin_logout(&c, 0) == NCMP_CKR_OK);
 
     NCMP_CHECK(ncmp_client_fini(&c) == NCMP_OK);
@@ -304,14 +304,14 @@ int test_admin_set_pin(void)
     NCMP_CHECK(client_connect_retry(&c) == NCMP_OK);
 
     /* Change the user PIN, then prove the new one authenticates. */
-    NCMP_CHECK(ncmp_admin_login(&c, 0, NCMP_CKU_USER, old_pin, 4)
+    NCMP_CHECK(ncmp_admin_login(&c, 0, NCMP_CKU_USER, NCMP_LOGIN_FLAG_NONE, old_pin, 4)
                == NCMP_CKR_OK);
     NCMP_CHECK(ncmp_admin_set_pin(&c, 0, old_pin, 4, new_pin, 4)
                == NCMP_CKR_OK);
     NCMP_CHECK(ncmp_admin_logout(&c, 0) == NCMP_CKR_OK);
-    NCMP_CHECK(ncmp_admin_login(&c, 0, NCMP_CKU_USER, old_pin, 4)
+    NCMP_CHECK(ncmp_admin_login(&c, 0, NCMP_CKU_USER, NCMP_LOGIN_FLAG_NONE, old_pin, 4)
                == NCMP_CKR_PIN_INCORRECT);
-    NCMP_CHECK(ncmp_admin_login(&c, 0, NCMP_CKU_USER, new_pin, 4)
+    NCMP_CHECK(ncmp_admin_login(&c, 0, NCMP_CKU_USER, NCMP_LOGIN_FLAG_NONE, new_pin, 4)
                == NCMP_CKR_OK);
 
     NCMP_CHECK(ncmp_client_fini(&c) == NCMP_OK);
@@ -332,11 +332,11 @@ int test_admin_init_pin(void)
     /* init_pin requires the SO to be logged in. */
     NCMP_CHECK(ncmp_admin_init_pin(&c, 0, new_user, 4)
                == NCMP_CKR_USER_NOT_LOGGED_IN);
-    NCMP_CHECK(ncmp_admin_login(&c, 0, NCMP_CKU_SO, so_pin, 8) == NCMP_CKR_OK);
+    NCMP_CHECK(ncmp_admin_login(&c, 0, NCMP_CKU_SO, NCMP_LOGIN_FLAG_NONE, so_pin, 8) == NCMP_CKR_OK);
     NCMP_CHECK(ncmp_admin_init_pin(&c, 0, new_user, 4) == NCMP_CKR_OK);
     NCMP_CHECK(ncmp_admin_logout(&c, 0) == NCMP_CKR_OK);
     /* The SO-set user PIN now authenticates. */
-    NCMP_CHECK(ncmp_admin_login(&c, 0, NCMP_CKU_USER, new_user, 4)
+    NCMP_CHECK(ncmp_admin_login(&c, 0, NCMP_CKU_USER, NCMP_LOGIN_FLAG_NONE, new_user, 4)
                == NCMP_CKR_OK);
 
     NCMP_CHECK(ncmp_client_fini(&c) == NCMP_OK);
@@ -364,6 +364,106 @@ int test_admin_init_token(void)
     NCMP_CHECK(ncmp_admin_token_info(&c, 0, &id) == NCMP_CKR_OK);
     NCMP_CHECK(strncmp(id.label, "Relabelled", 10) == 0);
 
+    NCMP_CHECK(ncmp_client_fini(&c) == NCMP_OK);
+    harness_down(&hz);
+    return 0;
+}
+
+int test_admin_token_params(void)
+{
+    harness_t hz;
+    ncmp_client_t c;
+    uint8_t label[NCMP_TI_LABEL_LEN], serial[NCMP_TI_SERIAL_LEN];
+    uint8_t utc[NCMP_TOKEN_UTC_LEN];
+    uint32_t minp = 0, maxp = 0;
+
+    NCMP_CHECK(harness_up_n(&hz, 1) == 0);
+    NCMP_CHECK(client_connect_retry(&c) == NCMP_OK);
+
+    /* GET_TOKEN_PARAMS: label / serial / PIN bounds. */
+    NCMP_CHECK(ncmp_admin_get_token_params(&c, 0, label, serial, &minp, &maxp)
+               == NCMP_CKR_OK);
+    NCMP_CHECK(strncmp((const char *)label, "NCMPTOKEN0", 10) == 0);
+    NCMP_CHECK(strncmp((const char *)serial, "NCMPSN0000000", 13) == 0);
+    NCMP_CHECK(minp == 4 && maxp == NCMP_MOCK_PIN_MAX);
+
+    /* NULL out-params are accepted (fields skipped). */
+    NCMP_CHECK(ncmp_admin_get_token_params(&c, 0, NULL, NULL, NULL, NULL)
+               == NCMP_CKR_OK);
+
+    /* GET_UTC_TIME: fixed 16-byte timestamp field. */
+    NCMP_CHECK(ncmp_admin_get_utc_time(&c, 0, utc) == NCMP_CKR_OK);
+    NCMP_CHECK(strncmp((const char *)utc, "20260903", 8) == 0);
+
+    NCMP_CHECK(ncmp_client_fini(&c) == NCMP_OK);
+    harness_down(&hz);
+    return 0;
+}
+
+int test_admin_login_flags(void)
+{
+    harness_t hz;
+    ncmp_client_t c;
+    const uint8_t user_pin[] = "1234";
+    const uint8_t bad_pin[] = "0000";
+
+    NCMP_CHECK(harness_up_n(&hz, 1) == 0);
+    NCMP_CHECK(client_connect_retry(&c) == NCMP_OK);
+
+    /* Protected-authentication path: the PIN is entered on the token's own pad,
+     * so an empty wire PIN with the PROTECTED_AUTH flag still logs in. */
+    NCMP_CHECK(ncmp_admin_login(&c, 0, NCMP_CKU_USER,
+                                NCMP_LOGIN_FLAG_PROTECTED_AUTH, NULL, 0)
+               == NCMP_CKR_OK);
+
+    /* Context-specific re-authentication of the logged-in user: correct PIN OK,
+     * wrong PIN rejected, and the login state is left intact throughout. */
+    NCMP_CHECK(ncmp_admin_login(&c, 0, NCMP_CKU_CONTEXT_SPECIFIC,
+                                NCMP_LOGIN_FLAG_CONTEXT, user_pin, 4)
+               == NCMP_CKR_OK);
+    NCMP_CHECK(ncmp_admin_login(&c, 0, NCMP_CKU_CONTEXT_SPECIFIC,
+                                NCMP_LOGIN_FLAG_CONTEXT, bad_pin, 4)
+               == NCMP_CKR_PIN_INCORRECT);
+    NCMP_CHECK(ncmp_admin_logout(&c, 0) == NCMP_CKR_OK);
+
+    /* Context-specific re-auth with nobody logged in is rejected. */
+    NCMP_CHECK(ncmp_admin_login(&c, 0, NCMP_CKU_CONTEXT_SPECIFIC,
+                                NCMP_LOGIN_FLAG_CONTEXT, user_pin, 4)
+               == NCMP_CKR_USER_NOT_LOGGED_IN);
+
+    /* An invalid user type is rejected. */
+    NCMP_CHECK(ncmp_admin_login(&c, 0, 99u, NCMP_LOGIN_FLAG_NONE, user_pin, 4)
+               == NCMP_CKR_USER_TYPE_INVALID);
+
+    NCMP_CHECK(ncmp_client_fini(&c) == NCMP_OK);
+    harness_down(&hz);
+    return 0;
+}
+
+int test_admin_set_utc_time(void)
+{
+    harness_t hz;
+    ncmp_client_t c;
+    const uint8_t so_pin[] = "12345678";
+    const uint8_t newt[NCMP_TOKEN_UTC_LEN] = "2030123123595900";
+    uint8_t got[NCMP_TOKEN_UTC_LEN];
+
+    NCMP_CHECK(harness_up_n(&hz, 1) == 0);
+    NCMP_CHECK(client_connect_retry(&c) == NCMP_OK);
+
+    /* Setting the clock requires the SO to be logged in. */
+    NCMP_CHECK(ncmp_admin_set_utc_time(&c, 0, newt)
+               == NCMP_CKR_USER_NOT_LOGGED_IN);
+
+    NCMP_CHECK(ncmp_admin_login(&c, 0, NCMP_CKU_SO, NCMP_LOGIN_FLAG_NONE,
+                                so_pin, 8) == NCMP_CKR_OK);
+    NCMP_CHECK(ncmp_admin_set_utc_time(&c, 0, newt) == NCMP_CKR_OK);
+
+    /* The stored time reads back verbatim. */
+    NCMP_CHECK(ncmp_admin_get_utc_time(&c, 0, got) == NCMP_CKR_OK);
+    NCMP_CHECK(memcmp(got, newt, NCMP_TOKEN_UTC_LEN) == 0);
+
+    NCMP_CHECK(ncmp_admin_logout(&c, 0) == NCMP_CKR_OK);
     NCMP_CHECK(ncmp_client_fini(&c) == NCMP_OK);
     harness_down(&hz);
     return 0;

@@ -14,7 +14,7 @@ App ──링크──> libopencryptoki.so            (API 층: usr/lib/api/)
                     │  SC_*  →  공통 mgr(mech_aes 등)  →  token_specific.t_* 훅
                     ▼
              ncmp_specific.c                  (token_specific 구현: proxy)
-                    │  ncmp_client_command_mp(NCMP_CMD_AES_ECB, [flags,key,data])
+                    │  ncmp_client_command_mp(NCMP_CMD_AES_GCM, [flags,key,iv,aad,taglen,data])
                     ▼
              ncmpd  (UNIX socket + SHM robust 큐)  ──USB / mock──>  FX3
 ```
@@ -23,7 +23,7 @@ App ──링크──> libopencryptoki.so            (API 층: usr/lib/api/)
 
 - **함수 포인터 2단 디스패치.** 앱이 부르는 `C_Encrypt`(API 층)는 슬롯별
   `FcnList->ST_Encrypt`(= new_host 의 `SC_Encrypt`)를 간접 호출하고, 공통층은
-  다시 `token_specific.t_aes_ecb` 훅으로 분기한다.
+  다시 `token_specific.t_aes_gcm` 훅으로 분기한다.
 - **`pkcsslotd` 는 데이터 경로 밖.** 초기화 때 슬롯 구성(`opencryptoki.conf`)
   제공 + 전역 SHM 생성만 담당한다. 암·복호 왕복에는 관여하지 않는다.
 - **상태 소유권은 STDLL 프로세스 로컬.** 세션·객체·로그인·키 원문은
@@ -84,43 +84,44 @@ App ──링크──> libopencryptoki.so            (API 층: usr/lib/api/)
 - `encr_mgr_init(... &sess->encr_ctx ...)` — **mech 와 키 핸들을 세션의
   `encr_ctx` 에 저장**만 한다
 
-AES-ECB/CBC 같은 블록 암호는 이 시점에 토큰으로 내려가지 않는다(호스트 측
-컨텍스트 세팅만). GCM 은 `token_specific_aes_gcm_init`(`ncmp_specific.c:567`)이
-파라미터 유효성만 확인하고 상태를 만들지 않는다(프록시 토큰이라 per-init 상태
-불필요).
+이 시점에는 토큰으로 아무 것도 내려가지 않는다(호스트 측 컨텍스트 세팅만). AES-GCM은
+`token_specific_aes_gcm_init`(`usr/lib/ncmp_stdll/ncmp_specific.c`)이 GCM 파라미터
+유효성만 확인하고 상태를 만들지 않는다(프록시 토큰이라 per-init 상태 불필요). AES-CTR도
+동일하게 실제 왕복은 `C_Encrypt` 단계에서 일어난다.
 
 ## 5. 3단계 — `C_Encrypt`: 실제 토큰 왕복
 
-`C_Encrypt`(`api_interface.c:1524`) → `fcn->ST_Encrypt` →
-`SC_Encrypt`(`new_host.c:2290`) 이후 공통 mgr → token_specific 훅으로 내려간다:
+여기서는 **advertised mechanism인 AES-GCM**을 예로 든다.
+`C_Encrypt`(`api_interface.c`) → `fcn->ST_Encrypt` → `SC_Encrypt`(`new_host.c`)
+이후 공통 mgr → token_specific 훅으로 내려간다:
 
 | # | 위치 | 하는 일 |
 |---|------|---------|
-| 1 | `new_host.c:2317` | `encr_ctx.active` 확인 후 `encr_mgr_encrypt(...)` |
-| 2 | `mech_aes.c:30` | mech 분기 → `aes_ecb_encrypt` |
-| 3 | `mech_aes.c:4010` | `ckm_aes_ecb_encrypt` |
-| 4 | `mech_aes.c:4028` | `token_specific.t_aes_ecb == NULL` 확인 |
-| 5 | `mech_aes.c:4033` | `token_specific.t_aes_ecb(...)` 호출 |
-| 6 | `ncmp_specific.c:519` | `token_specific_aes_ecb` — 여기서 ncmpd 로 나감 |
+| 1 | `new_host.c` `SC_Encrypt` | `encr_ctx.active` 확인 후 `encr_mgr_encrypt(...)` |
+| 2 | `mech_aes.c` | mech 분기 → `aes_gcm_encrypt` |
+| 3 | `mech_aes.c` | `ckm_aes_gcm_encrypt` |
+| 4 | `mech_aes.c` | `token_specific.t_aes_gcm == NULL` 확인 |
+| 5 | `mech_aes.c` | `token_specific.t_aes_gcm(...)` 호출 |
+| 6 | `usr/lib/ncmp_stdll/ncmp_specific.c` | `token_specific_aes_gcm` — 여기서 ncmpd 로 나감 |
 
-`token_specific_aes_ecb`(`usr/lib/ncmp_stdll/ncmp_specific.c:519`) 요지:
+`token_specific_aes_gcm`(`usr/lib/ncmp_stdll/ncmp_specific.c`) 요지:
 
 ```c
 struct ncmp_private_data *priv = tokdata->private_data;   /* ST_Initialize 에서 세팅 */
-template_attribute_get_non_empty(key->template, CKA_VALUE, &key_attr); /* 키 원문 추출 */
-ncmp_wr_u32le(flags, encrypt ? NCMP_AES_FLAG_ENCRYPT : 0u);
-parts[0] = flags;            /* [0] 모드 플래그 */
-parts[1] = key_attr->pValue; /* [1] 키 원문   */
-parts[2] = in_data;          /* [2] 평문      */
-ncmp_client_command_mp(&priv->client, priv->ncmp_slot,
-                       NCMP_CMD_AES_ECB, parts, lens, 3, out_data, ...);
-if (rsp.header.ack != NCMP_CKR_OK) return (CK_RV)rsp.header.ack;  /* ack → CK_RV */
+CK_GCM_PARAMS *gcm = (CK_GCM_PARAMS *)ctx->mech.pParameter; /* IV/AAD/태그 길이 */
+object_mgr_find_in_map1(tokdata, ctx->key, &key_obj, READ_LOCK);        /* 키 핸들 해석 */
+template_attribute_get_non_empty(key_obj->template, CKA_VALUE, &key_attr); /* 키 원문 추출 */
+ncmp_crypto_aes_gcm(&priv->client, priv->ncmp_slot, encrypt,
+                    key_attr->pValue, key_attr->ulValueLen,
+                    gcm->pIv, gcm->ulIvLen, gcm->pAAD, gcm->ulAADLen,
+                    taglen, in_data, in_data_len, out_data, ..., &out_len);
+/* 어댑터가 [flags|key|iv|aad|taglen|data] 프레임을 만들어 왕복하고 ack(CKR_*)를 반환 */
 ```
 
-`ncmp_client_command_mp`(`ncmp/stdll/ncmp_client.c`)가 와이어 프레임을 만들어
-UNIX 소켓으로 ncmpd 에 보내고, ncmpd 는 SHM robust 큐(CAS 상태전이) + 슬롯별
-comm 스레드 → USB(또는 mock)로 전달한다. 응답의 `ack`(CKR_\*)를 되돌려 받아
-`ncmp_specific.c:558` 에서 `CK_RV` 로 변환해 올려보낸다.
+`ncmp_crypto_aes_gcm`(`ncmp/stdll/ncmp_crypto.c`)이 파라미터를 와이어 레이아웃으로
+패킹해 `ncmp_client_command_mp`(`ncmp/stdll/ncmp_client.c`)로 보내면, ncmpd 는 SHM
+robust 큐(CAS 상태전이) + 슬롯별 comm 스레드 → USB(또는 mock)로 전달한다. 응답의
+`ack`(CKR_\*)는 어댑터를 거쳐 `token_specific_aes_gcm`에서 `CK_RV`로 올라간다.
 
 > 이 지점부터 **STDLL → ncmpd → USB** 전송 1홉의 세부(요청 인코딩, MPSC CAS 큐
 > 전이, FX3 단발 프레임 수신, in-flight 예약/해제)는
@@ -138,6 +139,6 @@ comm 스레드 → USB(또는 mock)로 전달한다. 응답의 `ack`(CKR_\*)를 
 | STDLL 로드/`ST_Initialize` 호출 | `usr/lib/api/apiutil.c:632`, `:831`, `:838` |
 | SC_* 함수테이블 등록 | `usr/lib/common/new_host.c:4551`, `:4567`, `:4568` |
 | `SC_OpenSession`/`SC_EncryptInit`/`SC_Encrypt` | `usr/lib/common/new_host.c:1040`, `:2232`, `:2290` |
-| 공통 AES → token_specific 훅 | `usr/lib/common/mech_aes.c:4010`, `:4028`, `:4033` |
-| token_specific AES 프록시 | `usr/lib/ncmp_stdll/ncmp_specific.c:519` (ECB), `:567` (GCM) |
+| 공통 AES → token_specific 훅 | `usr/lib/common/mech_aes.c` (`ckm_aes_gcm_encrypt` → `t_aes_gcm`) |
+| token_specific AES 프록시 | `usr/lib/ncmp_stdll/ncmp_specific.c` (`token_specific_aes_gcm`, `_aes_ctr`) |
 | ncmp 전송층 | `ncmp/stdll/ncmp_client.c` (`ncmp_client_command_mp`) |

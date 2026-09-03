@@ -51,6 +51,7 @@ typedef struct mock_token_admin {
     char     model[NCMP_TI_MODEL_LEN];
     uint8_t  hw_major, hw_minor, fw_major, fw_minor;
     uint32_t flags;
+    char     utc[NCMP_TOKEN_UTC_LEN];     /**< Token clock (GET/SET_UTC_TIME). */
 
     uint8_t  so_pin[NCMP_MOCK_PIN_MAX];   /**< Security-officer PIN. */
     uint32_t so_pin_len;

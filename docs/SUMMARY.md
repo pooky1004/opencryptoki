@@ -15,13 +15,13 @@
 
 | 지표 | 값 |
 |------|-----|
-| 진행 단계 | STEP ①~⑨ + 연산 확장 + 토큰관리 + PQC/SHA3/XOF mechanism 재정의 완성 |
-| standalone 테스트 | **62/62 통과** (전송 32 + 크립토 15 + 토큰관리 11 + PQC/SHA3/XOF 4), ThreadSanitizer 0 races |
-| opencryptoki STDLL | `libpkcs11_ncmp.so.0.0.0` **실제 빌드 성공** (strict `-pedantic -Werror -std=c99`) |
-| `token_specific` 훅 | **48종** 배선 (crypto 30 + 라이프사이클/리포팅 6 + login/PIN 5 + XOF 1 + PQC 6) |
-| 와이어 opcode | 33종 + 벤더 9종 (loopback/mem·crc/ping/selftest/fw/token-info) |
+| 진행 단계 | STEP ①~⑨ + 토큰관리 + PQC/SHA3/XOF + **비광고 mechanism 정리(advertised-only)** 완성 |
+| standalone 테스트 | **43/43 통과** (인프라/전송 14 + 클라이언트 6 + 크립토 5 + 토큰관리 14 + PQC/SHA3/XOF 4), ThreadSanitizer 0 races |
+| opencryptoki STDLL | `libpkcs11_ncmp.so.0.0.0` (strict `-pedantic -Werror -std=c99`); `secure_key_token=TRUE` |
+| `token_specific` 훅 | **29종** 배선 (라이프사이클/데이터스토어 5 + login/PIN 5 + RNG 1 + SHA 4 + AES-GCM/CTR/keygen 4 + XOF 1 + PQC 6 + 리포팅 3) |
+| 와이어 opcode | 23종 + 벤더 8종 (mem·crc/ping/selftest/fw/token-info; loopback은 NOP로 통합) |
 | **advertised mechanism** | AES-GCM/CTR · SHA-256/512 · SHA3-224/256/384/512 · SHAKE-128/256 KDF · ML-KEM(+keygen) · ML-DSA(+keygen) |
-| 소스 규모 | `ncmp/` 서브트리 58파일 + opencryptoki 통합 4파일 |
+| 소스 규모 | `ncmp/` 서브트리 + opencryptoki 통합(`usr/lib/ncmp_stdll/`) |
 | **미완(하드웨어 필요)** | 실 FX3 브링업 (VID/PID/EP 확정, `pkcsconf` 런타임 검증, 실 암호 정합성) |
 
 ---
@@ -57,16 +57,19 @@ param) / `ncmp_client_command_mp`(다중 param). **아키텍처 패턴 8종 확�
 무상태-다중버퍼, 상태형-컨텍스트 핸들, 비대칭-다중키, AEAD-태그, sign/verify 왕복,
 키페어-템플릿 조작, 키합의-원시배열.
 
+> **주의(정리됨).** 초기에는 RSA/EC/DH/HMAC/AES-CBC·ECB·OFB·CFB 등 폭넓은 연산을
+> 포워딩했으나, 지금은 **토큰이 실제로 광고하는 mechanism만** 남기고 나머지는 opcode·
+> CI 구조체·어댑터·mock·테스트까지 전부 제거했다(→ §2.7). 현재 포워딩되는 연산:
+
 | 카테고리 | 연산 |
 |----------|------|
 | 난수 | RNG |
-| 해시 | SHA-1/224/256/384/512 (one-shot + 멀티파트 update/final) |
-| MAC | HMAC (sign/verify) |
-| 대칭 암복호 | AES — CBC · ECB · GCM(AEAD) · CTR · OFB · CFB |
-| 비대칭 암복호 | RSA-OAEP (encrypt/decrypt) |
-| 서명/검증 | RSA-PKCS · RSA-PSS · ECDSA |
-| 키 생성 | AES · DES · 3DES · generic-secret · RSA keypair · EC keypair |
-| 키 합의 | DH · ECDH |
+| 해시 | SHA-256/512, SHA3-224/256/384/512 (one-shot + 멀티파트 update/final) |
+| 대칭 암복호 | AES — GCM(AEAD) · CTR(스트림) |
+| XOF/키유도 | SHAKE-128/256 key derivation |
+| PQC 서명/검증 | ML-DSA (강도 1/3/5) |
+| PQC 키합의 | ML-KEM (강도 1/3/5, encaps/decaps) |
+| 키 생성 | AES 키 · ML-DSA/ML-KEM 키페어 |
 
 > **mock 토큰**은 결정론적 스텁(진짜 암호 아님)이지만, 왕복(encrypt∘decrypt=원문,
 > sign→verify, 변조→오류)·크기·키/입력 민감성을 검증해 **포워딩 정확성**을 보장.
@@ -121,6 +124,32 @@ opencryptoki 표준 STDLL(new_host 기반) 경로로 **일원화**하면서 해�
 벤더 와이어 opcode(0x0100+)는 토큰 datapath 기능이라 유지(`ncmp_cmd.h` +
 `mock/mcu_scheduler.c`).
 
+### 2.7 Mechanism 정리(advertised-only) · CI 동기화 · InitToken/Login 강화
+- **비광고 mechanism 전면 제거**: advertised 집합(AES-GCM/CTR · SHA-2/3 · SHAKE ·
+  ML-KEM · ML-DSA) **외의 모든 mechanism**(RSA sign/verify/PSS/OAEP/keygen, EC/ECDSA
+  sign/verify/keygen, DH/ECDH, HMAC, AES-CBC/ECB/OFB/CFB, DES/3DES·generic-secret
+  keygen)을 opcode(`ncmp_cmd.h`)·CI 구조체(`command-interface.md`)·크립토 어댑터
+  (`ncmp_crypto.c`)·mock(`mcu_scheduler.c`)·테스트에서 삭제. `token_specific` 표에서도
+  해당 훅 제거.
+- **secure_key_token = TRUE**: 물리 토큰이 모든 PIN·키 비밀을 소유하는 프록시
+  모델을 반영. STDLL은 임시 비밀 버퍼를 사용 직후 zeroize.
+- **CI ↔ opcode 동기화**: `command-interface.md`의 `typedef enum CI_Cmd`를
+  `enum ncmp_opcode`의 **별칭**으로 재정의(`CI_CMD_NOP = NCMP_CMD_NOP /* 0x0000 */`
+  형식)해 두 열거형을 lockstep 유지. `VD_LOOPBACK`(0x0100) 제거 — 에코는 `NOP`로 통합.
+- **신규 조회 CI**: `GET_UTC_TIME`(0x0035, `CK_TOKEN_INFO.utcTime` 16B),
+  `GET_TOKEN_PARAMS`(0x0036, label·serial·ulMinPinLen·ulMaxPinLen). STDLL
+  `get_token_info`가 이 값을 반영. 어댑터 `ncmp_admin_get_utc_time` /
+  `ncmp_admin_get_token_params`.
+- **Login flags 강화**: `LOGIN` 요청이 역할(SO/User/CONTEXT_SPECIFIC) 외에 flags를
+  운반 — protected-auth(토큰 패드 입력), context-specific 재인증
+  (`CKA_ALWAYS_AUTHENTICATE`). 어댑터/`token_specific_login`/mock 모두 반영.
+- **C_InitToken 개편**: set(PIN+label) → `VD_TOKEN_INFO`로 label read-back·정밀
+  검증 → 정체성을 `nv_token_data`에 캐시 → `save_token_data()` 영속화 → 임시 SO
+  PIN·label 버퍼 zeroize. 데이터스토어 훅
+  `t_init_token_data`/`t_load_token_data`/`t_save_token_data` 배선.
+- 테스트: 삭제된 mechanism 테스트 제거, 신규 `test_admin_token_params`·
+  `test_admin_login_flags`·`test_admin_set_utc_time` 추가 → **43/43 통과**.
+
 ---
 
 ## 3. 남은 과제 (TODO)
@@ -128,13 +157,14 @@ opencryptoki 표준 STDLL(new_host 기반) 경로로 **일원화**하면서 해�
 ### 3.1 하드웨어 필요 — STEP ⑩ (실질적 유일 잔여 작업)
 - [ ] `usb_transport.c`의 **VID/PID/엔드포인트를 실 FX3 펌웨어 값으로 확정**.
 - [ ] `ncmpd` 기동 후 `pkcsconf -t`로 **슬롯 인식·토큰 정보 런타임 검증**.
-- [ ] 실제 SHA/AES/RSA/EC 등 **암호 정합성**(mock 결정론 스텁 → 진짜 값) 확인.
+- [ ] 실제 SHA/AES-GCM·CTR/SHAKE/ML-DSA·ML-KEM **암호 정합성**(mock 결정론 스텁 →
+      진짜 값) 확인.
 - [ ] 다중 FX3 보드 시 opencryptoki 슬롯↔물리 슬롯 매핑(`ncmptok.conf`; 현재 최저
       online 슬롯 자동 선택).
 
 ### 3.2 순수 반복(새 패턴 없음, 필요 시)
-- [ ] HMAC 멀티파트(update/final), DH/EC 키페어 생성, 다이제스트-then-sign,
-      추가 mech(SHAKE, MD 등).
+- [ ] SHA/ML-DSA 멀티파트 확장, 다이제스트-then-sign(`CKM_HASH_ML_DSA*`) 등
+      **광고된 mechanism 범위 내** 추가 경로.
 - [ ] 기본 빌드(`--enable-ncmptok` 미지정) 전체 `make` 회귀 1회(조건부 배선이라
       구조적 무영향이나 확인 권장).
 
@@ -163,7 +193,7 @@ gcc -std=c11 -O2 -Wall -Wextra -D_GNU_SOURCE \
     ncmp/daemon/comm_thread.c ncmp/daemon/conn_thread.c \
     ncmp/mock/mock_transport.c ncmp/mock/fx3_dma.c ncmp/mock/container.c \
     ncmp/mock/mcu_scheduler.c -lpthread -lrt -o /tmp/ncmp_tests
-/tmp/ncmp_tests                                # -> SUITE PASSED (62/62)
+/tmp/ncmp_tests                                # -> SUITE PASSED (43/43)
 
 # ThreadSanitizer (ASLR off + 새로 빌드한 바이너리 필수):
 #   위 명령에 -fsanitize=thread 추가 후:  setarch $(uname -m) -R /tmp/ncmp_tests

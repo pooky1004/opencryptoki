@@ -46,9 +46,14 @@ typedef struct ncmp_header {
 /** Size of the parameter length array segment. */
 #define NCMP_PARAM_LEN_ARRAY_SIZE (NCMP_MAX_PARAM_COUNT * sizeof(uint32_t))
 
-/** Largest possible encoded frame: prefix + header + array + max payload. */
-#define NCMP_MAX_FRAME_SIZE \
-    (NCMP_FRAME_PREFIX_SIZE + NCMP_HEADER_WIRE_SIZE + NCMP_MAX_PAYLOAD_SIZE)
+/**
+ * Largest possible encoded frame. Sized to exactly one device SRAM container
+ * (NCMP_DEV_CONTAINER_SIZE) so a whole frame fits a single container/DMA
+ * buffer. By construction this equals
+ * NCMP_FRAME_PREFIX_SIZE + NCMP_HEADER_WIRE_SIZE + NCMP_MAX_PAYLOAD_SIZE
+ * (asserted in ncmp_wire.c).
+ */
+#define NCMP_MAX_FRAME_SIZE NCMP_DEV_CONTAINER_SIZE
 
 /**
  * Host-side view of a message being assembled or parsed. Owns no memory;

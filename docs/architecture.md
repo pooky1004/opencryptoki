@@ -60,7 +60,8 @@ Token NCMP는 Cypress EZ-USB FX3(CYUSB3KIT-003) 보드를 USB로 연결한 물�
 - 슬롯/토큰 최대 `PKCS11_MAX_SLOT_COUNT = 4`
 - 슬롯당 세션 최대 `PKCS11_MAX_SESSION_PER_SLOT = 8`
 - 시스템 총 세션 `PKCS11_MAX_TOTAL_SESSIONS = 32` (4 × 8)
-- 파라미터 개별 ≤ 32 KB, 결합 페이로드(길이 배열 + 파라미터) ≤ 40 KB
+- 파라미터 개별·결합 페이로드(길이 배열 + 파라미터) 각각 ≤ 65512 B
+  (= `NCMP_DEV_CONTAINER_SIZE - NCMP_WIRE_FRAME_OVERHEAD`)
 - 슬롯 in-flight 상한 기본값 = 장치 SRAM 컨테이너 수(4)
 
 ---
@@ -176,7 +177,7 @@ FREE → CLAIMED → POSTED → SENT → DONE → FREE      (정상)
 > 1번 단계까지 도달하는 전체 호출 흐름은
 > [`stdll-call-flow.md`](stdll-call-flow.md) 참고.
 
-1. STDLL: `ncmp_wire_validate_params`(≤32KB/≤40KB) → 요청 인코딩.
+1. STDLL: `ncmp_wire_validate_params`(파라미터·페이로드 각 ≤65512 B) → 요청 인코딩.
 2. `ncmp_queue_claim` → 엔트리의 `req_off` 버퍼에 프레임 기록 →
    `ncmp_queue_post`.
 3. `comm_thread`: POSTED 발견 → SENT 전이 → in-flight 예약(통계 갱신) →

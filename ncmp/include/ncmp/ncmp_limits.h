@@ -30,14 +30,29 @@
 /** Number of parameter slots carried in every message. */
 #define NCMP_MAX_PARAM_COUNT 8
 
-/** Maximum size (bytes) of a single parameter. */
-#define NCMP_MAX_PARAM_SIZE (32 * 1024)
+/**
+ * On-wire framing that precedes the payload: the 4-byte frame-length prefix
+ * plus the fixed 20-byte NCMP_Header. Kept as a literal here because ncmp_wire.h
+ * (which defines NCMP_FRAME_PREFIX_SIZE / NCMP_HEADER_WIRE_SIZE) includes this
+ * header, not the reverse; ncmp_wire.c static-asserts that this matches.
+ */
+#define NCMP_WIRE_FRAME_OVERHEAD (4 + 20)
+
+/**
+ * Maximum size (bytes) of a single parameter: one device SRAM container minus
+ * the wire framing overhead, so a whole parameter fits a single container/DMA
+ * buffer. A lone parameter of this exact size is further bounded by
+ * NCMP_MAX_PAYLOAD_SIZE (which also carries the 8-entry length array).
+ */
+#define NCMP_MAX_PARAM_SIZE (NCMP_DEV_CONTAINER_SIZE - NCMP_WIRE_FRAME_OVERHEAD)
 
 /**
  * Maximum combined payload size (bytes): the 8-entry length array plus the
- * concatenated parameter bytes. Enforced by the STDLL before enqueue.
+ * concatenated parameter bytes. Enforced by the STDLL before enqueue. Bounded
+ * so an encoded frame fits exactly one device container
+ * (NCMP_MAX_FRAME_SIZE == NCMP_DEV_CONTAINER_SIZE).
  */
-#define NCMP_MAX_PAYLOAD_SIZE (40 * 1024)
+#define NCMP_MAX_PAYLOAD_SIZE (NCMP_DEV_CONTAINER_SIZE - NCMP_WIRE_FRAME_OVERHEAD)
 
 /** All wire fields are aligned to this many bytes. */
 #define NCMP_WIRE_ALIGN 4

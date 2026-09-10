@@ -55,6 +55,11 @@ int test_admin_init_token(void);
 int test_admin_token_params(void);
 int test_admin_login_flags(void);
 int test_admin_set_utc_time(void);
+/* Object management: key registration + attribute forwarding to the token. */
+int test_object_add(void);
+int test_object_add_no_value(void);
+int test_object_set_attrs(void);
+int test_object_set_attrs_malformed(void);
 /* SHA3 / XOF / post-quantum (ML-DSA, ML-KEM) adapter tests. */
 int test_pqc_sha3(void);
 int test_pqc_shake(void);
@@ -106,6 +111,11 @@ int main(void)
     NCMP_RUN(test_admin_token_params);
     NCMP_RUN(test_admin_login_flags);
     NCMP_RUN(test_admin_set_utc_time);
+
+    NCMP_RUN(test_object_add);
+    NCMP_RUN(test_object_add_no_value);
+    NCMP_RUN(test_object_set_attrs);
+    NCMP_RUN(test_object_set_attrs_malformed);
 
     NCMP_RUN(test_pqc_sha3);
     NCMP_RUN(test_pqc_shake);

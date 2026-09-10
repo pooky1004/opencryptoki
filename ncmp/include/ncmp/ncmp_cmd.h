@@ -59,6 +59,17 @@ enum ncmp_opcode {
     NCMP_CMD_SET_UTC_TIME     = 0x0037, /**< [utc(16)] -> (ack) (SO only). */
 
     /*
+     * Object management. As a secure-key token, the physical token owns key
+     * material, so C_CreateObject / C_CopyObject / C_SetAttributeValue on a key
+     * object forward the key to the token to register/validate it as a secure
+     * key. Object enumeration (find), size and destroy stay in the opencryptoki
+     * common layer (no token_specific hook exists for them). Non-key objects
+     * (data/certificate) are handled locally and are not forwarded.
+     */
+    NCMP_CMD_OBJECT_ADD      = 0x0038, /**< [class|key_type|value] -> (ack). Register/import a key object. */
+    NCMP_CMD_OBJECT_SET_ATTR = 0x0039, /**< [class|key_type|attrs] -> (ack). Validate key attribute changes. */
+
+    /*
      * Post-quantum (PKCS#11 3.2 ML-DSA / ML-KEM). All keys are forwarded as
      * opaque blobs; the mock produces deterministic, size-correct outputs so
      * round-trips (sign->verify, encaps->decaps) succeed. param0 always carries

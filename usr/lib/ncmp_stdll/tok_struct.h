@@ -89,6 +89,14 @@ token_spec_t token_specific = {
     .t_ml_kem_encapsulate_key = &token_specific_ml_kem_encapsulate_key,
     .t_ml_kem_decapsulate_key = &token_specific_ml_kem_decapsulate_key,
 
+    /* Object management: as a secure-key token, key objects are registered /
+     * re-validated with the physical token. Object storage, handle mapping,
+     * find, size and destroy stay in the common layer (no hook exists for
+     * them); t_set_attrs_for_new_object / t_check_obj_access are left NULL
+     * (the generic behavior suffices). */
+    .t_object_add = &token_specific_object_add,
+    .t_set_attribute_values = &token_specific_set_attribute_values,
+
     /* Token/mechanism reporting. */
     .t_get_token_info = &token_specific_get_token_info,
     .t_get_mechanism_list = &token_specific_get_mechanism_list,

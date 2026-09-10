@@ -59,6 +59,9 @@ typedef struct mock_token_admin {
     uint32_t user_pin_len;
     int      logged_in;                   /**< Non-zero while a user is logged in. */
     uint32_t login_user;                  /**< Logged-in user type. */
+
+    uint32_t obj_count;                   /**< Key objects registered (OBJECT_ADD). */
+    uint32_t obj_setattr_count;           /**< Key attribute changes (OBJECT_SET_ATTR). */
 } mock_token_admin_t;
 
 /** Emulated device state. */

@@ -13,6 +13,8 @@ add_executable(ncmp_tests
     test_crypto.c
     # Token admin: identity query, CK-slot binding, login/PIN lifecycle.
     test_admin.c
+    # Object management: key registration + attribute forwarding to the token.
+    test_object.c
     # SHA3 / XOF / post-quantum (ML-DSA, ML-KEM) adapter tests.
     test_pqc.c
     # Daemon consumer + connection server exercised by the STEP 2/3 tests.

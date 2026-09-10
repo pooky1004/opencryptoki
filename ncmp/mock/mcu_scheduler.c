@@ -21,12 +21,15 @@
 #define MOCK_CKR_OK 0u
 #define MOCK_CKR_FUNCTION_FAILED 0x6u
 #define MOCK_CKR_ARGUMENTS_BAD 0x7u
+#define MOCK_CKR_ATTRIBUTE_VALUE_INVALID 0x13u
+#define MOCK_CKR_DATA_LEN_RANGE 0x21u
 #define MOCK_CKR_ENCRYPTED_DATA_INVALID 0x40u
 #define MOCK_CKR_DEVICE_MEMORY 0x31u
 #define MOCK_CKR_MECHANISM_INVALID 0x70u
 #define MOCK_CKR_SIGNATURE_INVALID 0xC0u
 #define MOCK_CKR_PIN_INCORRECT 0xA0u
 #define MOCK_CKR_PIN_LEN_RANGE 0xA2u
+#define MOCK_CKR_TEMPLATE_INCOMPLETE 0xD0u
 #define MOCK_CKR_USER_ALREADY_LOGGED_IN 0x100u
 #define MOCK_CKR_USER_NOT_LOGGED_IN 0x101u
 #define MOCK_CKR_USER_TYPE_INVALID 0x103u
@@ -603,6 +606,75 @@ static void mock_exec_command(mock_device_t *dev, NCMP_Message *msg)
         for (int i = 4; i < NCMP_MAX_PARAM_COUNT; ++i)
             msg->param_len[i] = 0;
         msg->header.ack = MOCK_CKR_OK;
+        break;
+    }
+    case NCMP_CMD_OBJECT_ADD: {
+        /* Register/import a key object: [class | key_type | value] -> (ack).
+         * A secure-key token would wrap the value into a backend blob; the mock
+         * validates the request shape and accepts it. No output params. */
+        const uint8_t *pcls, *pkt, *pval;
+        uint32_t lcls, lkt, lval;
+
+        if (ncmp_msg_param(msg, 0, &pcls, &lcls) != NCMP_OK || lcls != 4 ||
+            ncmp_msg_param(msg, 1, &pkt, &lkt) != NCMP_OK || lkt != 4) {
+            msg->header.ack = MOCK_CKR_ARGUMENTS_BAD;
+            break;
+        }
+        /* Key material must be present (a key object without CKA_VALUE is
+         * incomplete for import). */
+        if (ncmp_msg_param(msg, 2, &pval, &lval) != NCMP_OK || lval == 0) {
+            msg->header.ack = MOCK_CKR_TEMPLATE_INCOMPLETE;
+            break;
+        }
+        (void)pcls;
+        (void)pkt;
+        (void)pval;
+        dev->admin.obj_count++;
+        for (int i = 0; i < NCMP_MAX_PARAM_COUNT; ++i)
+            msg->param_len[i] = 0;
+        msg->header.ack = MOCK_CKR_OK;
+        break;
+    }
+    case NCMP_CMD_OBJECT_SET_ATTR: {
+        /* Validate key attribute changes: [class | key_type | attrs] -> (ack).
+         * attrs = count(u32), then count * { type(u32) | len(u32) | value }. The
+         * mock walks the list to confirm it is well-formed. No output params. */
+        const uint8_t *pcls, *pkt, *pa;
+        uint32_t lcls, lkt, la, count, off;
+
+        if (ncmp_msg_param(msg, 0, &pcls, &lcls) != NCMP_OK || lcls != 4 ||
+            ncmp_msg_param(msg, 1, &pkt, &lkt) != NCMP_OK || lkt != 4 ||
+            ncmp_msg_param(msg, 2, &pa, &la) != NCMP_OK || la < 4) {
+            msg->header.ack = MOCK_CKR_ARGUMENTS_BAD;
+            break;
+        }
+        count = ncmp_rd_u32le(pa);
+        off = 4;
+        for (uint32_t i = 0; i < count; ++i) {
+            uint32_t alen;
+            if (off + 8 > la) {              /* type(4) + len(4) */
+                msg->header.ack = MOCK_CKR_ATTRIBUTE_VALUE_INVALID;
+                goto object_set_attr_done;
+            }
+            alen = ncmp_rd_u32le(pa + off + 4);
+            off += 8;
+            if (alen > la - off) {           /* value bytes */
+                msg->header.ack = MOCK_CKR_ATTRIBUTE_VALUE_INVALID;
+                goto object_set_attr_done;
+            }
+            off += alen;
+        }
+        if (off != la) {                     /* trailing garbage */
+            msg->header.ack = MOCK_CKR_ATTRIBUTE_VALUE_INVALID;
+            break;
+        }
+        (void)pcls;
+        (void)pkt;
+        dev->admin.obj_setattr_count++;
+        for (int i = 0; i < NCMP_MAX_PARAM_COUNT; ++i)
+            msg->param_len[i] = 0;
+        msg->header.ack = MOCK_CKR_OK;
+object_set_attr_done:
         break;
     }
     case NCMP_CMD_SHAKE_DERIVE: {

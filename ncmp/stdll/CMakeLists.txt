@@ -16,6 +16,7 @@ add_library(ncmp_stdll_client STATIC
     ncmp_ckr.c
     ncmp_crypto.c
     ncmp_admin.c
+    ncmp_object.c
 )
 
 target_link_libraries(ncmp_stdll_client PUBLIC ncmp_common)

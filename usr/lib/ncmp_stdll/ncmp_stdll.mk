@@ -51,4 +51,5 @@ opencryptoki_stdll_libpkcs11_ncmp_la_SOURCES =				\
 	ncmp/common/ncmp_slot.c ncmp/common/ncmp_slotmap.c		\
 	ncmp/common/ncmp_ipc.c						\
 	ncmp/stdll/ncmp_client.c ncmp/stdll/ncmp_ckr.c		\
-	ncmp/stdll/ncmp_crypto.c ncmp/stdll/ncmp_admin.c
+	ncmp/stdll/ncmp_crypto.c ncmp/stdll/ncmp_admin.c	\
+	ncmp/stdll/ncmp_object.c

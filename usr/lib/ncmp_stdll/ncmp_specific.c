@@ -29,6 +29,7 @@
 #include "ncmp/ncmp_client.h"
 #include "ncmp/ncmp_crypto.h"
 #include "ncmp/ncmp_admin.h"
+#include "ncmp/ncmp_object.h"
 #include "ncmp/ncmp_slotmap.h"
 #include "ncmp/ncmp_ckr.h"
 #include "ncmp/ncmp_cmd.h"
@@ -1275,6 +1276,158 @@ static void ncmp_copy_padded(CK_CHAR *dst, size_t dst_len, const char *src,
         dst[n] = (CK_CHAR)src[n];
     for (; n < dst_len; ++n)
         dst[n] = ' ';
+}
+
+/* ------------------------------------------------------------------------- *
+ * Object management.
+ *
+ * The opencryptoki common object manager (obj_mgr.c / object.c) owns object
+ * storage, handle mapping, enumeration (C_FindObjects), size and destroy - none
+ * of which have a token_specific hook. As a secure-key token, though, key
+ * material must be registered with the physical token: t_object_add forwards a
+ * newly created/imported key (C_CreateObject), and t_set_attribute_values
+ * forwards a key's changed attributes (C_SetAttributeValue / C_CopyObject).
+ * Non-key objects (data / certificate) carry no key material and are handled
+ * entirely by the common layer. t_set_attrs_for_new_object and
+ * t_check_obj_access are intentionally left NULL: the generic defaults and
+ * private/public/session access checks suffice, and a NULL hook is equivalent
+ * to a hook that just returns CKR_OK.
+ * ------------------------------------------------------------------------- */
+
+/**
+ * @brief Serialize a TEMPLATE's attributes into the OBJECT_SET_ATTR wire blob.
+ *
+ * Layout: count(LE u32), then @p count entries of
+ * { type(LE u32) | len(LE u32) | value[len] }. Caller frees @p *out (and should
+ * scrub it, as changed attributes may include key bytes).
+ */
+static CK_RV ncmp_serialize_template(TEMPLATE *tmpl, uint8_t **out,
+                                     uint32_t *out_len)
+{
+    DL_NODE *node;
+    uint64_t total = 4; /* leading count field */
+    uint32_t count = 0;
+    uint8_t *buf, *p;
+
+    *out = NULL;
+    *out_len = 0;
+
+    for (node = tmpl ? tmpl->attribute_list : NULL; node; node = node->next) {
+        CK_ATTRIBUTE *a = node->data;
+
+        if (a == NULL)
+            continue;
+        total += 8 + (uint64_t)a->ulValueLen; /* type + len + value */
+        count++;
+        if (total > NCMP_MAX_PARAM_SIZE)
+            return CKR_DATA_LEN_RANGE;
+    }
+
+    buf = malloc((size_t)total);
+    if (buf == NULL)
+        return CKR_HOST_MEMORY;
+
+    p = buf;
+    ncmp_wr_u32le(p, count);
+    p += 4;
+    for (node = tmpl ? tmpl->attribute_list : NULL; node; node = node->next) {
+        CK_ATTRIBUTE *a = node->data;
+
+        if (a == NULL)
+            continue;
+        ncmp_wr_u32le(p, (uint32_t)a->type);
+        p += 4;
+        ncmp_wr_u32le(p, (uint32_t)a->ulValueLen);
+        p += 4;
+        if (a->ulValueLen != 0 && a->pValue != NULL)
+            memcpy(p, a->pValue, a->ulValueLen);
+        p += a->ulValueLen;
+    }
+
+    *out = buf;
+    *out_len = (uint32_t)total;
+    return CKR_OK;
+}
+
+/**
+ * @brief C_CreateObject on a key object: register the key with the token.
+ *
+ * Only key objects are forwarded; a non-key object (no CKA_KEY_TYPE) or a key
+ * with no clear CKA_VALUE (e.g. token-generated) is left to the common layer.
+ */
+CK_RV token_specific_object_add(STDLL_TokData_t *tokdata, SESSION *sess,
+                                OBJECT *obj)
+{
+    struct ncmp_private_data *priv = tokdata->private_data;
+    CK_ULONG keytype, class;
+    CK_ATTRIBUTE *val = NULL;
+    CK_RV rc;
+
+    UNUSED(sess);
+
+    if (priv == NULL)
+        return CKR_FUNCTION_FAILED;
+
+    /* Not a key -> no secure-key material to register; handled locally. */
+    rc = template_attribute_get_ulong(obj->template, CKA_KEY_TYPE, &keytype);
+    if (rc != CKR_OK)
+        return CKR_OK;
+
+    rc = template_attribute_get_ulong(obj->template, CKA_CLASS, &class);
+    if (rc != CKR_OK)
+        class = obj->class;
+
+    /* No clear key material to forward (e.g. sensitive/opaque key). */
+    rc = template_attribute_get_non_empty(obj->template, CKA_VALUE, &val);
+    if (rc != CKR_OK || val->ulValueLen == 0)
+        return CKR_OK;
+
+    return ncmp_object_add(&priv->client, priv->ncmp_slot, (uint32_t)class,
+                           (uint32_t)keytype, val->pValue,
+                           (uint32_t)val->ulValueLen);
+}
+
+/**
+ * @brief C_SetAttributeValue / C_CopyObject on a key object: forward the
+ *        changed attributes to the token for validation.
+ */
+CK_RV token_specific_set_attribute_values(STDLL_TokData_t *tokdata,
+                                          SESSION *sess, OBJECT *obj,
+                                          TEMPLATE *tmpl)
+{
+    struct ncmp_private_data *priv = tokdata->private_data;
+    CK_ULONG keytype, class;
+    uint8_t *blob = NULL;
+    uint32_t blob_len = 0;
+    unsigned long arc;
+    CK_RV rc;
+
+    UNUSED(sess);
+
+    if (priv == NULL)
+        return CKR_FUNCTION_FAILED;
+
+    /* Only key objects are backed by the token. */
+    rc = template_attribute_get_ulong(obj->template, CKA_KEY_TYPE, &keytype);
+    if (rc != CKR_OK)
+        return CKR_OK;
+
+    rc = template_attribute_get_ulong(obj->template, CKA_CLASS, &class);
+    if (rc != CKR_OK)
+        class = obj->class;
+
+    rc = ncmp_serialize_template(tmpl, &blob, &blob_len);
+    if (rc != CKR_OK)
+        return rc;
+
+    arc = ncmp_object_set_attrs(&priv->client, priv->ncmp_slot,
+                                (uint32_t)class, (uint32_t)keytype, blob,
+                                blob_len);
+    if (blob != NULL) {
+        ncmp_secure_zero(blob, blob_len); /* changed attrs may hold key bytes */
+        free(blob);
+    }
+    return arc;
 }
 
 CK_RV token_specific_get_token_info(STDLL_TokData_t *tokdata,

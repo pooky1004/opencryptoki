@@ -100,7 +100,10 @@ Real hardware build: omit `-DENABLE_MOCK_TOKEN` (requires libusb-1.0 dev pkg).
 - `PKCS11_MAX_SLOT_COUNT` = 4
 - `PKCS11_MAX_SESSION_PER_SLOT` = 8
 - `PKCS11_MAX_TOTAL_SESSIONS` = 32
-- Single parameter <= 32 KB; combined payload (len array + params) <= 40 KB.
+- Single parameter and combined payload (len array + params) each
+  <= `NCMP_DEV_CONTAINER_SIZE - NCMP_WIRE_FRAME_OVERHEAD` = 65512 B, so an
+  encoded frame fills exactly one 64 KB device container
+  (`NCMP_MAX_FRAME_SIZE == NCMP_DEV_CONTAINER_SIZE`).
 - Per-slot in-flight ceiling defaults to the 4 device SRAM containers.
 All limits are defined once in `ncmp/include/ncmp/ncmp_limits.h`.
 
@@ -166,9 +169,22 @@ with the public blob); blob sizes come from `struct pqc_oid` (pqc_supported.c).
 The standard `t_ml_dsa_*` / `t_ml_kem_*` / `t_shake_key_derive` hooks are used
 (NOT the IBM `t_ibm_*` variants). Tests: `ncmp/tests/test_pqc.c`.
 The wire opcodes (`enum ncmp_opcode`) and the CI (`CI_Cmd`, defined as opcode
-aliases) now contain **only** these mechanisms plus RNG / AES key-gen / admin —
-all legacy RSA/EC/DH/ECDH/HMAC/AES-block (CBC·ECB·OFB·CFB) paths were removed
-across opcodes, adapters, mock, and tests.
+aliases) now contain **only** these mechanisms plus RNG / AES key-gen / admin /
+object management — all legacy RSA/EC/DH/ECDH/HMAC/AES-block (CBC·ECB·OFB·CFB)
+paths were removed across opcodes, adapters, mock, and tests.
+
+## Object handling
+Object CRUD, handle mapping, find, size and destroy are handled generically by
+the opencryptoki common object manager (`obj_mgr.c`/`object.c`) + local data
+store — no token_specific hook exists for them. As a secure-key token, NCMP only
+forwards *key* objects to the physical token: `t_object_add` (C_CreateObject)
+sends `NCMP_CMD_OBJECT_ADD` `[class|key_type|value]`, and
+`t_set_attribute_values` (C_SetAttributeValue/C_CopyObject) sends
+`NCMP_CMD_OBJECT_SET_ATTR` `[class|key_type|attrs]` (attrs = `count` then
+`{type|len|value}*`). Non-key objects (data/certificate) stay local.
+`t_set_attrs_for_new_object` / `t_check_obj_access` are left NULL (a NULL hook ==
+one returning CKR_OK). Adapter `ncmp/stdll/ncmp_object.c`; mock in
+`mcu_scheduler.c`; tests `ncmp/tests/test_object.c`.
 
 ## PKCS#11 support target
 Full PKCS#11 2.x, 3.0, and 3.2; multi-application concurrent access.

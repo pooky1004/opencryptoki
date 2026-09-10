@@ -40,7 +40,9 @@ typedef struct CI_Message {
 **불변식(invariant)**
 - `frame_len == 20 + payload_len`
 - `payload_len == 32 + Σ param_len[i]` (0..7)
-- 단일 파라미터 ≤ 32 KB, 결합 payload(길이배열+파라미터) ≤ 40 KB
+- 단일 파라미터·결합 payload(길이배열+파라미터) 각각 ≤ 65512 B
+  (= `NCMP_DEV_CONTAINER_SIZE - NCMP_WIRE_FRAME_OVERHEAD`; 인코딩된 프레임은
+  장치 컨테이너 1개에 정확히 들어감)
 - FX3 bulk-IN은 **단발 수신**: 응답 프레임 1개를 한 전송으로 읽는다.
 
 ```c
@@ -93,6 +95,9 @@ typedef enum CI_Cmd {
     CI_CMD_GET_UTC_TIME    = NCMP_CMD_GET_UTC_TIME,    /* 0x0035 */
     CI_CMD_GET_TOKEN_PARAMS = NCMP_CMD_GET_TOKEN_PARAMS, /* 0x0036 */
     CI_CMD_SET_UTC_TIME    = NCMP_CMD_SET_UTC_TIME,    /* 0x0037 */
+    /* 객체 관리 (secure-key: 키 객체를 토큰에 등록/검증) */
+    CI_CMD_OBJECT_ADD      = NCMP_CMD_OBJECT_ADD,      /* 0x0038 */
+    CI_CMD_OBJECT_SET_ATTR = NCMP_CMD_OBJECT_SET_ATTR, /* 0x0039 */
     /* 포스트양자 (PKCS#11 3.2) */
     CI_CMD_MLDSA_KEYGEN    = NCMP_CMD_MLDSA_KEYGEN,    /* 0x0050 */
     CI_CMD_MLDSA_SIGN      = NCMP_CMD_MLDSA_SIGN,      /* 0x0051 */
@@ -131,7 +136,7 @@ typedef struct CI_NopRsp { uint8_t data[]; /* param0: 요청 payload 그대로 *
 ### 3.2 CI_CMD_RNG (0x0001) — 난수 생성
 ```c
 typedef struct CI_RngReq {
-    uint32_t count;   /* param0: 요청 난수 바이트 수 (≤ 32 KB) */
+    uint32_t count;   /* param0: 요청 난수 바이트 수 (≤ 65512 B) */
 } CI_RngReq;
 typedef struct CI_RngRsp {
     uint8_t  bytes[]; /* param0: count 바이트의 난수 */
@@ -339,6 +344,31 @@ typedef struct CI_SetUtcTimeRsp { /* 없음. ack=OK / CKR_USER_NOT_LOGGED_IN / C
 > `utc`는 정확히 16바이트여야 한다(`CKR_ARGUMENTS_BAD`). 이후 `CI_CMD_GET_UTC_TIME`은
 > 설정한 값을 그대로 되돌려준다. PKCS#11에는 시각 설정용 표준 C_ 함수가 없어
 > 이 CI는 `ncmp_admin` 어댑터를 통한 관리 전용 경로다.
+
+### 5.9 CI_CMD_OBJECT_ADD (0x0038) — 키 객체 등록/임포트
+```c
+typedef struct CI_ObjectAddReq {
+    uint32_t obj_class;  /* param0: CKO_* */
+    uint32_t key_type;   /* param1: CKK_* */
+    uint8_t  value[];    /* param2: 키 데이터 (CKA_VALUE) */
+} CI_ObjectAddReq;
+typedef struct CI_ObjectAddRsp { /* 없음. ack=OK / CKR_TEMPLATE_INCOMPLETE / CKR_ARGUMENTS_BAD */ } CI_ObjectAddRsp;
+```
+> 보안키 토큰으로서 `C_CreateObject`로 임포트된 **키 객체**를 토큰에 등록한다
+> (`t_object_add`). 비키 객체(데이터·인증서) 및 키 데이터가 없는 객체는 전달하지 않고
+> 공통 계층이 로컬 처리한다. 객체 저장·핸들·열거·삭제는 공통 계층 전용이다.
+
+### 5.10 CI_CMD_OBJECT_SET_ATTR (0x0039) — 키 속성 변경 검증
+```c
+typedef struct CI_ObjectSetAttrReq {
+    uint32_t obj_class;  /* param0: CKO_* */
+    uint32_t key_type;   /* param1: CKK_* */
+    uint8_t  attrs[];    /* param2: count(u32) 다음 count개의 {type(u32)|len(u32)|value[len]} */
+} CI_ObjectSetAttrReq;
+typedef struct CI_ObjectSetAttrRsp { /* 없음. ack=OK / CKR_ATTRIBUTE_VALUE_INVALID */ } CI_ObjectSetAttrRsp;
+```
+> `C_SetAttributeValue`/`C_CopyObject`로 키 객체의 속성이 바뀌면 변경분을 토큰에
+> 전달해 검증한다(`t_set_attribute_values`). STDLL은 전달 후 직렬화 버퍼를 소거한다.
 
 ---
 
@@ -556,6 +586,7 @@ typedef struct CI_VdTokenInfoRsp { CI_TokenIdentity identity; /* param0 */ } CI_
 |--------------|---------------|------|
 | RNG·DIGEST·AES(GCM·CTR)·SHAKE·PQC(ML-DSA·ML-KEM) | `ncmp_crypto_*` | `ncmp/stdll/ncmp_crypto.c` |
 | LOGIN·PIN·TOKEN_INFO·GET/SET_UTC_TIME·GET_TOKEN_PARAMS | `ncmp_admin_*` | `ncmp/stdll/ncmp_admin.c` |
+| OBJECT_ADD·OBJECT_SET_ATTR | `ncmp_object_*` | `ncmp/stdll/ncmp_object.c` |
 | 전송 프리미티브(단일/다중 param) | `ncmp_client_command[_mp]` | `ncmp/stdll/ncmp_client.c` |
 | 프레임 인코딩/디코딩 | `ncmp_wire_encode/decode`, `ncmp_msg_*` | `ncmp/common/ncmp_wire.c` |
 | 참조 구현(디바이스 측) | opcode 실행 | `ncmp/mock/mcu_scheduler.c` |

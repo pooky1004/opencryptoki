@@ -13,6 +13,19 @@
 _Static_assert(sizeof(NCMP_Header) == NCMP_HEADER_WIRE_SIZE,
                "NCMP_Header must serialize to exactly 20 bytes");
 
+/* The literal framing overhead in ncmp_limits.h must equal the real wire
+ * prefix + header sizes (ncmp_limits.h cannot see these symbols directly). */
+_Static_assert(NCMP_WIRE_FRAME_OVERHEAD ==
+                   NCMP_FRAME_PREFIX_SIZE + NCMP_HEADER_WIRE_SIZE,
+               "NCMP_WIRE_FRAME_OVERHEAD must equal frame prefix + header");
+
+/* A full frame must fit exactly one device container: prefix + header + the
+ * combined payload ceiling equal NCMP_MAX_FRAME_SIZE (== container size). */
+_Static_assert(NCMP_MAX_FRAME_SIZE ==
+                   NCMP_FRAME_PREFIX_SIZE + NCMP_HEADER_WIRE_SIZE +
+                       NCMP_MAX_PAYLOAD_SIZE,
+               "encoded frame must fill exactly one device container");
+
 /* -------------------------------------------------------------------------
  * Little-endian scalar helpers (portable regardless of host byte order).
  * ------------------------------------------------------------------------- */

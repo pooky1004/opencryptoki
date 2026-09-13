@@ -149,7 +149,7 @@ NCMP는 openCryptoki 사설 포크에 추가된 PKCS#11 토큰과 그 통신 서
 - 토큰 관리: 로그인/로그아웃, PIN 초기화/변경, 토큰 초기화, UTC 시각 조회/설정, 토큰 파라미터 조회.
 - 다중 프로세스·다중 세션 동시 접근(슬롯당 최대 8, 전역 최대 32).
 
-광고 메커니즘 표면은 `ncmp_mech_list[]`(`ncmp_specific.c:99`)에 정의되며, 8.1절에 상세히 기술한다. RSA·EC/ECDSA·DH/ECDH·HMAC·AES 블록 모드(CBC/ECB/OFB/CFB)는 지원 대상이 아니며 코드·CI·모의·시험에서 제거되었다.
+광고 메커니즘 표면은 `ncmp_mech_list[]`(`ncmp_specific.c:109`)에 정의되며, 8.1절에 상세히 기술한다. RSA·EC/ECDSA·DH/ECDH·HMAC·AES 블록 모드(CBC/ECB/OFB/CFB)는 지원 대상이 아니며 코드·CI·모의·시험에서 제거되었다.
 
 ### 2.4 시스템 구성 요소 정의
 
@@ -327,11 +327,11 @@ flowchart LR
     CM1 --> USB1[USB 슬롯1]
 ```
 
-- 데몬 프로세스는 SHM과 USB 링크를 소유한다. 연결 스레드(`ncmpd_conn_thread`, `conn_thread.c:64`) 1개와 온라인 슬롯당 통신 스레드(`ncmpd_comm_thread`, `comm_thread.c:152`)를 기동한다(`main.c:170-171`, `main.c:189`).
+- 데몬 프로세스는 SHM과 USB 링크를 소유한다. 연결 스레드(`ncmpd_conn_thread`, `conn_thread.c:64`) 1개와 온라인 슬롯당 통신 스레드(`ncmpd_comm_thread`, `comm_thread.c:443`)를 기동한다(`main.c:170-171`, `main.c:189`).
 - 응용 프로세스는 STDLL을 적재하여 다수 클라이언트 스레드가 동일 슬롯의 명령 링에 명령을 적재한다.
 - 동기화 객체:
   - 강건·프로세스공유 뮤텍스: SHM 전역 락(`global_lock`, `ncmp_shm.h:120`)과 슬롯별 세션 락(`sess_lock`, `ncmp_shm.h:85`).
-  - 원자 연산: 큐 엔트리 상태 CAS(`ncmp_qentry_cas`, `ncmp_queue.h:63`), 인플라이트 카운터(`comm_thread.c:48,54`).
+  - 원자 연산: 큐 엔트리 상태 CAS(`ncmp_qentry_cas`, `ncmp_queue.h:63`), 인플라이트 카운터(`comm_thread.c:315,321`).
   - 스레드 정지 플래그: 원자 적재/저장(`ncmpd_request_stop`/`ncmpd_should_stop`, `ncmpd.h:28,34`).
 
 동시성 규칙(엄격)은 CLAUDE.md에 정의되며 본 설계에 반영된다. SHM에는 원시 포인터를 저장하지 않고 배열 인덱스·바이트 오프셋만 사용한다(`ncmp_shm.h:5-8`). 뮤텍스는 `ncmp_mutex_lock`/`ncmp_mutex_unlock`을 통해서만 접근하며 `EOWNERDEAD`를 복구한다(4.3절 및 5.3절 참조). 큐 상태는 CAS로만 변경한다. 세션 카운터는 `sess_lock` 하에서만 변경한다.
@@ -407,17 +407,17 @@ SHM 매직은 `NCMP_SHM_MAGIC = 0x4E434D50`("NCMP"), 버전은 `NCMP_SHM_VERSION
 
 #### 5.1.1 산출물 및 초기화·종료 흐름
 
-산출물은 `libpkcs11_ncmp.so`이며, token_specific SPI는 `usr/lib/ncmp_stdll/ncmp_specific.c`(1500행)에 구현된다. 프로세스별 상태는 구조체 `ncmp_private_data`(정의 `ncmp_specific.c:48`)에 보관하며, 그 필드는 클라이언트 핸들 `client`(`ncmp_specific.c:49`), 물리 슬롯 `ncmp_slot`(`ncmp_specific.c:50`), CK 슬롯 `ck_slot`(`ncmp_specific.c:51`), 캐시된 식별정보 `identity`(`ncmp_specific.c:52`)이다. 이 구조체는 `STDLL_TokData_t::private_data`에 저장된다(설정 `ncmp_specific.c:219`).
+산출물은 `libpkcs11_ncmp.so`이며, token_specific SPI는 `usr/lib/ncmp_stdll/ncmp_specific.c`(1500행)에 구현된다. 프로세스별 상태는 구조체 `ncmp_private_data`(정의 `ncmp_specific.c:58`)에 보관하며, 그 필드는 클라이언트 핸들 `client`(`ncmp_specific.c:59`), 물리 슬롯 `ncmp_slot`(`ncmp_specific.c:60`), CK 슬롯 `ck_slot`(`ncmp_specific.c:61`), 캐시된 식별정보 `identity`(`ncmp_specific.c:62`)이다. 이 구조체는 `STDLL_TokData_t::private_data`에 저장된다(설정 `ncmp_specific.c:229`).
 
-초기화(`token_specific_init`, `ncmp_specific.c:134`)는 다음을 수행한다.
+초기화(`token_specific_init`, `ncmp_specific.c:144`)는 다음을 수행한다.
 
-1. 클라이언트 연결: `ncmp_client_init(&priv->client, NULL)`(`ncmp_specific.c:166`). 데몬 IPC 연결 및 SHM 부착.
-2. 슬롯 바인딩: `ncmp_slot_bind(...)`(`ncmp_specific.c:199-200`)로 CK 슬롯을 물리 토큰에 결속하고 물리 슬롯 인덱스를 할당한다(`ncmp_specific.c:209`).
-3. 식별정보 조회: `ncmp_slot_get_identity(...)`(`ncmp_specific.c:216`).
+1. 클라이언트 연결: `ncmp_client_init(&priv->client, NULL)`(`ncmp_specific.c:176`). 데몬 IPC 연결 및 SHM 부착.
+2. 슬롯 바인딩: `ncmp_slot_bind(...)`(`ncmp_specific.c:209-210`)로 CK 슬롯을 물리 토큰에 결속하고 물리 슬롯 인덱스를 할당한다(`ncmp_specific.c:219`).
+3. 식별정보 조회: `ncmp_slot_get_identity(...)`(`ncmp_specific.c:226`).
 
-바인딩에서 사용하는 희망 라벨/시리얼은 환경변수에서 결정한다. `ncmp_desired_identity`(`ncmp_specific.c:65`)는 CK 슬롯별 접미사 형식 `NCMP_TOK_LABEL<n>` / `NCMP_TOK_SERIAL<n>`을 우선 조회하고, 없으면 일반형 `NCMP_TOK_LABEL` / `NCMP_TOK_SERIAL`을 조회한다(`ncmp_specific.c:74-84`). 미설정 값은 무선호(no preference)로 처리한다.
+바인딩에서 사용하는 희망 라벨/시리얼은 환경변수에서 결정한다. `ncmp_desired_identity`(`ncmp_specific.c:75`)는 CK 슬롯별 접미사 형식 `NCMP_TOK_LABEL<n>` / `NCMP_TOK_SERIAL<n>`을 우선 조회하고, 없으면 일반형 `NCMP_TOK_LABEL` / `NCMP_TOK_SERIAL`을 조회한다(`ncmp_specific.c:84-94`). 미설정 값은 무선호(no preference)로 처리한다.
 
-종료(`token_specific_final`, `ncmp_specific.c:227`)는 `ncmp_client_fini(&priv->client)`(`ncmp_specific.c:245`)로 SHM 부착을 해제하고 소켓을 닫는다. CK 슬롯-물리 토큰 바인딩은 데몬 수명 동안 유지되며 토큰 최종화 시 해제하지 않는다(`ncmp_slotmap.h:78-81`).
+종료(`token_specific_final`, `ncmp_specific.c:237`)는 `ncmp_client_fini(&priv->client)`(`ncmp_specific.c:255`)로 SHM 부착을 해제하고 소켓을 닫는다. CK 슬롯-물리 토큰 바인딩은 데몬 수명 동안 유지되며 토큰 최종화 시 해제하지 않는다(`ncmp_slotmap.h:78-81`).
 
 #### 5.1.2 구현 PKCS#11 함수 지원 범위
 
@@ -427,21 +427,21 @@ SHM 매직은 `NCMP_SHM_MAGIC = 0x4E434D50`("NCMP"), 버전은 `NCMP_SHM_VERSION
 
 | 훅 | 배선 위치 | 구현 위치 | 지원 |
 |---|---|---|---|
-| `t_init` / `t_final` | `tok_struct.h:45-46` | `ncmp_specific.c:134` / `:227` | 지원 |
-| `t_init_token_data` / `t_load_token_data` / `t_save_token_data` | `tok_struct.h:50-52` | `ncmp_specific.c:451` / `:480` / `:489` | 지원 |
-| `t_init_token` | `tok_struct.h:55` | `ncmp_specific.c:382` | 지원 |
-| `t_login` / `t_logout` | `tok_struct.h:56-57` | `ncmp_specific.c:272` / `:304` | 지원 |
-| `t_init_pin` / `t_set_pin` | `tok_struct.h:58-59` | `ncmp_specific.c:314` / `:328` | 지원 |
-| `t_rng` | `tok_struct.h:62` | `ncmp_specific.c:498` | 지원 |
-| `t_sha_init/sha/sha_update/sha_final` | `tok_struct.h:66-69` | `ncmp_specific.c:533` / `:651` / `:587` / `:616` | 지원 |
-| `t_aes_gcm_init` / `t_aes_gcm` / `t_aes_ctr` | `tok_struct.h:72-74` | `ncmp_specific.c:679` / `:698` / `:786` | 지원 |
-| `t_aes_key_gen` | `tok_struct.h:77` | `ncmp_specific.c:849` | 지원 |
-| `t_shake_key_derive` | `tok_struct.h:80` | `ncmp_specific.c:1204` | 지원 |
-| `t_ml_dsa_generate_keypair/sign/verify` | `tok_struct.h:85-87` | `ncmp_specific.c:898` / `:945` / `:990` | 지원 |
-| `t_ml_kem_generate_keypair/encapsulate/decapsulate` | `tok_struct.h:88-90` | `ncmp_specific.c:1019` / `:1115` / `:1164` | 지원 |
-| `t_object_add` / `t_set_attribute_values` | `tok_struct.h:97-98` | `ncmp_specific.c:1358` / `:1394` | 지원 |
+| `t_init` / `t_final` | `tok_struct.h:45-46` | `ncmp_specific.c:144` / `:237` | 지원 |
+| `t_init_token_data` / `t_load_token_data` / `t_save_token_data` | `tok_struct.h:50-52` | `ncmp_specific.c:461` / `:490` / `:499` | 지원 |
+| `t_init_token` | `tok_struct.h:55` | `ncmp_specific.c:392` | 지원 |
+| `t_login` / `t_logout` | `tok_struct.h:56-57` | `ncmp_specific.c:282` / `:314` | 지원 |
+| `t_init_pin` / `t_set_pin` | `tok_struct.h:58-59` | `ncmp_specific.c:324` / `:338` | 지원 |
+| `t_rng` | `tok_struct.h:62` | `ncmp_specific.c:508` | 지원 |
+| `t_sha_init/sha/sha_update/sha_final` | `tok_struct.h:66-69` | `ncmp_specific.c:551` / `:670` / `:605` / `:635` | 지원 |
+| `t_aes_gcm_init` / `t_aes_gcm` / `t_aes_ctr` | `tok_struct.h:74-78` | `ncmp_specific.c:715` / `:749` / `:1059` | 지원 |
+| `t_aes_key_gen` | `tok_struct.h:81` | `ncmp_specific.c:1122` | 지원 |
+| `t_shake_key_derive` | `tok_struct.h:84` | `ncmp_specific.c:1477` | 지원 |
+| `t_ml_dsa_generate_keypair/sign/verify` | `tok_struct.h:89-91` | `ncmp_specific.c:1171` / `:1218` / `:1263` | 지원 |
+| `t_ml_kem_generate_keypair/encapsulate/decapsulate` | `tok_struct.h:92-94` | `ncmp_specific.c:1292` / `:1388` / `:1437` | 지원 |
+| `t_object_add` / `t_set_attribute_values` | `tok_struct.h:101-102` | `ncmp_specific.c:1630` / `:1666` | 지원 |
 | `t_set_attrs_for_new_object` / `t_check_obj_access` | (미배선) | (미구현) | 미배선(일반 처리) |
-| `t_get_token_info` / `t_get_mechanism_list` / `t_get_mechanism_info` | `tok_struct.h:101-103` | `ncmp_specific.c:1433` / `:1486` / `:1494` | 지원 |
+| `t_get_token_info` / `t_get_mechanism_list` / `t_get_mechanism_info` | `tok_struct.h:105-107` | `ncmp_specific.c:1705` / `:1758` / `:1766` | 지원 |
 | RSA/EC/DH/ECDH/HMAC/AES 블록 모드 훅 | (미배선) | (미구현) | 미지원 |
 
 미배선 훅은 NULL이며, 공통 계층이 `CKR_MECHANISM_INVALID`/`CKR_FUNCTION_NOT_SUPPORTED`로 보고한다(`tok_struct.h:6-8`). `t_set_attrs_for_new_object`/`t_check_obj_access`는 의도적으로 NULL이며(공통 계층의 기본 속성·접근 검사로 충분), NULL 훅은 `CKR_OK`를 반환하는 훅과 동일하게 처리된다. 미지원 메커니즘 판단 근거는 광고 메커니즘 표면(8.1절)과 opcode 정의(`ncmp_cmd.h:32`)이다.
@@ -454,51 +454,51 @@ SHM 매직은 `NCMP_SHM_MAGIC = 0x4E434D50`("NCMP"), 버전은 `NCMP_SHM_VERSION
 
 | PKCS#11 함수 | token_specific 훅 | 어댑터 함수(호출 위치) | CI opcode |
 |---|---|---|---|
-| C_Login | `token_specific_login` (`:272`) | `ncmp_admin_login` (`:299`) | `NCMP_CMD_LOGIN` |
-| C_Logout | `token_specific_logout` (`:304`) | `ncmp_admin_logout` (`:311`) | `NCMP_CMD_LOGOUT` |
-| C_InitPIN | `token_specific_init_pin` (`:314`) | `ncmp_admin_init_pin` (`:324`) | `NCMP_CMD_INIT_PIN` |
-| C_SetPIN | `token_specific_set_pin` (`:328`) | `ncmp_admin_set_pin` (`:339`) | `NCMP_CMD_SET_PIN` |
-| C_InitToken | `token_specific_init_token` (`:382`) | `ncmp_admin_init_token` (`:411`), `ncmp_admin_token_info` (`:419`) | `NCMP_CMD_INIT_TOKEN`, `NCMP_CMD_VD_TOKEN_INFO` |
-| C_GetTokenInfo | `token_specific_get_token_info` (`:1433`) | `ncmp_admin_get_token_params`, `ncmp_admin_get_utc_time` | `NCMP_CMD_GET_TOKEN_PARAMS`, `NCMP_CMD_GET_UTC_TIME` |
-| C_CreateObject (키) | `token_specific_object_add` (`:1358`) | `ncmp_object_add` (`ncmp_object.c:43`) | `NCMP_CMD_OBJECT_ADD` |
-| C_SetAttributeValue / C_CopyObject (키) | `token_specific_set_attribute_values` (`:1394`) | `ncmp_object_set_attrs` (`ncmp_object.c:51`) | `NCMP_CMD_OBJECT_SET_ATTR` |
-| C_GenerateRandom | `token_specific_rng` (`:498`) | `ncmp_crypto_rng` (`:513`) | `NCMP_CMD_RNG` |
-| C_DigestInit | `token_specific_sha_init` (`:533`) | `ncmp_crypto_digest_init` (지연, `:577`) | `NCMP_CMD_DIGEST_INIT` |
-| C_Digest | `token_specific_sha` (`:651`) | `ncmp_crypto_digest` (`:668`) | `NCMP_CMD_DIGEST` |
-| C_DigestUpdate | `token_specific_sha_update` (`:587`) | `ncmp_crypto_digest_update` (`:606`) | `NCMP_CMD_DIGEST_UPDATE` |
-| C_DigestFinal | `token_specific_sha_final` (`:616`) | `ncmp_crypto_digest_final` (`:638`) | `NCMP_CMD_DIGEST_FINAL` |
-| C_Encrypt/Decrypt (GCM) | `token_specific_aes_gcm` (`:698`) | `ncmp_crypto_aes_gcm` (`:741`) | `NCMP_CMD_AES_GCM` |
-| C_Encrypt/Decrypt (CTR) | `token_specific_aes_ctr` (`:786`) | `ncmp_crypto_aes_stream` (`:773`) | `NCMP_CMD_AES_CTR` |
-| C_GenerateKey (AES) | `token_specific_aes_key_gen` (`:849`) | `ncmp_crypto_rng` (RNG로 평문 키 생성, `:819`) | `NCMP_CMD_RNG` |
-| C_DeriveKey (SHAKE) | `token_specific_shake_key_derive` (`:1204`) | `ncmp_crypto_shake_derive` (`:1233`) | `NCMP_CMD_SHAKE_DERIVE` |
-| C_GenerateKeyPair (ML-DSA) | `token_specific_ml_dsa_generate_keypair` (`:898`) | `ncmp_crypto_mldsa_keygen` (`:921`) | `NCMP_CMD_MLDSA_KEYGEN` |
-| C_Sign (ML-DSA) | `token_specific_ml_dsa_sign` (`:945`) | `ncmp_crypto_mldsa_sign` (`:980`) | `NCMP_CMD_MLDSA_SIGN` |
-| C_Verify (ML-DSA) | `token_specific_ml_dsa_verify` (`:990`) | `ncmp_crypto_mldsa_verify` (`:1012`) | `NCMP_CMD_MLDSA_VERIFY` |
-| C_GenerateKeyPair (ML-KEM) | `token_specific_ml_kem_generate_keypair` (`:1019`) | `ncmp_crypto_mlkem_keygen` (`:1042`) | `NCMP_CMD_MLKEM_KEYGEN` |
-| C_EncapsulateKey (ML-KEM) | `token_specific_ml_kem_encapsulate_key` (`:1115`) | `ncmp_crypto_mlkem_encaps` (`:1151`) | `NCMP_CMD_MLKEM_ENCAPS` |
-| C_DecapsulateKey (ML-KEM) | `token_specific_ml_kem_decapsulate_key` (`:1164`) | `ncmp_crypto_mlkem_decaps` (`:1191`) | `NCMP_CMD_MLKEM_DECAPS` |
+| C_Login | `token_specific_login` (`:282`) | `ncmp_admin_login` (`:309`) | `NCMP_CMD_LOGIN` |
+| C_Logout | `token_specific_logout` (`:314`) | `ncmp_admin_logout` (`:321`) | `NCMP_CMD_LOGOUT` |
+| C_InitPIN | `token_specific_init_pin` (`:324`) | `ncmp_admin_init_pin` (`:334`) | `NCMP_CMD_INIT_PIN` |
+| C_SetPIN | `token_specific_set_pin` (`:338`) | `ncmp_admin_set_pin` (`:349`) | `NCMP_CMD_SET_PIN` |
+| C_InitToken | `token_specific_init_token` (`:392`) | `ncmp_admin_init_token` (`:421`), `ncmp_admin_token_info` (`:429`) | `NCMP_CMD_INIT_TOKEN`, `NCMP_CMD_VD_TOKEN_INFO` |
+| C_GetTokenInfo | `token_specific_get_token_info` (`:1705`) | `ncmp_admin_get_token_params`, `ncmp_admin_get_utc_time` | `NCMP_CMD_GET_TOKEN_PARAMS`, `NCMP_CMD_GET_UTC_TIME` |
+| C_CreateObject (키) | `token_specific_object_add` (`:1630`) | `ncmp_object_add` (`ncmp_object.c:43`) | `NCMP_CMD_OBJECT_ADD` |
+| C_SetAttributeValue / C_CopyObject (키) | `token_specific_set_attribute_values` (`:1666`) | `ncmp_object_set_attrs` (`ncmp_object.c:51`) | `NCMP_CMD_OBJECT_SET_ATTR` |
+| C_GenerateRandom | `token_specific_rng` (`:508`) | `ncmp_crypto_rng` (`:523`) | `NCMP_CMD_RNG` |
+| C_DigestInit | `token_specific_sha_init` (`:551`) | `ncmp_crypto_digest_init` (지연, `:595`) | `NCMP_CMD_DIGEST_INIT` |
+| C_Digest | `token_specific_sha` (`:670`) | `ncmp_crypto_digest` (`:687`) | `NCMP_CMD_DIGEST` |
+| C_DigestUpdate | `token_specific_sha_update` (`:605`) | `ncmp_crypto_digest_update` (`:624`) | `NCMP_CMD_DIGEST_UPDATE` |
+| C_DigestFinal | `token_specific_sha_final` (`:635`) | `ncmp_crypto_digest_final` (`:657`) | `NCMP_CMD_DIGEST_FINAL` |
+| C_Encrypt/Decrypt (GCM) | `token_specific_aes_gcm` (`:749`) | `ncmp_crypto_aes_gcm` (`:792`) | `NCMP_CMD_AES_GCM` |
+| C_Encrypt/Decrypt (CTR) | `token_specific_aes_ctr` (`:1059`) | `ncmp_crypto_aes_stream` (`:824`) | `NCMP_CMD_AES_CTR` |
+| C_GenerateKey (AES) | `token_specific_aes_key_gen` (`:1122`) | `ncmp_crypto_rng` (RNG로 평문 키 생성, `:1092`) | `NCMP_CMD_RNG` |
+| C_DeriveKey (SHAKE) | `token_specific_shake_key_derive` (`:1477`) | `ncmp_crypto_shake_derive` (`:1506`) | `NCMP_CMD_SHAKE_DERIVE` |
+| C_GenerateKeyPair (ML-DSA) | `token_specific_ml_dsa_generate_keypair` (`:1171`) | `ncmp_crypto_mldsa_keygen` (`:1194`) | `NCMP_CMD_MLDSA_KEYGEN` |
+| C_Sign (ML-DSA) | `token_specific_ml_dsa_sign` (`:1218`) | `ncmp_crypto_mldsa_sign` (`:1253`) | `NCMP_CMD_MLDSA_SIGN` |
+| C_Verify (ML-DSA) | `token_specific_ml_dsa_verify` (`:1263`) | `ncmp_crypto_mldsa_verify` (`:1285`) | `NCMP_CMD_MLDSA_VERIFY` |
+| C_GenerateKeyPair (ML-KEM) | `token_specific_ml_kem_generate_keypair` (`:1292`) | `ncmp_crypto_mlkem_keygen` (`:1315`) | `NCMP_CMD_MLKEM_KEYGEN` |
+| C_EncapsulateKey (ML-KEM) | `token_specific_ml_kem_encapsulate_key` (`:1388`) | `ncmp_crypto_mlkem_encaps` (`:1424`) | `NCMP_CMD_MLKEM_ENCAPS` |
+| C_DecapsulateKey (ML-KEM) | `token_specific_ml_kem_decapsulate_key` (`:1437`) | `ncmp_crypto_mlkem_decaps` (`:1464`) | `NCMP_CMD_MLKEM_DECAPS` |
 
-주: 파일 접두사 없는 라인 번호는 모두 `usr/lib/ncmp_stdll/ncmp_specific.c` 기준이다. AES-GCM 초기화(`token_specific_aes_gcm_init`, `:679`)는 파라미터 검증만 수행하고 CI를 전달하지 않는다.
+주: 파일 접두사 없는 라인 번호는 모두 `usr/lib/ncmp_stdll/ncmp_specific.c` 기준이다. AES-GCM 초기화(`token_specific_aes_gcm_init`, `:715`)는 파라미터 검증만 수행하고 CI를 전달하지 않는다.
 
 #### 5.1.4 보안 강화: C_InitToken 및 C_Login
 
-C_InitToken 처리(`token_specific_init_token`, `ncmp_specific.c:382-449`)는 설정→재조회→검증→영속→소거 절차를 따른다.
+C_InitToken 처리(`token_specific_init_token`, `ncmp_specific.c:392-459`)는 설정→재조회→검증→영속→소거 절차를 따른다.
 
-1. 라벨 정규화: 입력 32바이트 라벨을 지역 버퍼 `lbl`에 복사하고 NUL 종단한다(`ncmp_specific.c:398-399`).
-2. PIN 사본: `pin_len > 0`일 때 `pinbuf = malloc(pin_len)` 후 복사한다(`ncmp_specific.c:404-407`).
-3. 설정: `ncmp_admin_init_token(...)`로 SO PIN과 라벨을 토큰에 설정한다(`ncmp_specific.c:411-412`).
-4. 재조회: `ncmp_admin_token_info(...)`로 식별정보를 다시 읽는다(`ncmp_specific.c:419`).
-5. 정밀 검증: `ncmp_trim_len()`(`ncmp_specific.c:349`)으로 설정 라벨과 재조회 라벨의 유효 길이를 계산하여 길이·내용을 비교한다. 불일치 시 `CKR_FUNCTION_FAILED`(`ncmp_specific.c:425-432`).
-6. 캐시·영속: 식별정보를 `priv->identity`에 저장하고(`ncmp_specific.c:436`), `ncmp_apply_identity()`(`ncmp_specific.c:361`)로 `nv_token_data->token_info`에 반영한 뒤 `save_token_data()`로 영속화한다(`ncmp_specific.c:437-438`).
-7. 소거(Zeroization): 임시 버퍼를 즉시 영구 삭제한다. `ncmp_secure_zero(pinbuf, pin_len)` 후 해제(`ncmp_specific.c:442-445`), `ncmp_secure_zero(lbl, ...)`(`ncmp_specific.c:446`), `ncmp_secure_zero(&id, ...)`(`ncmp_specific.c:447`). 소거 함수는 volatile 접근 기반의 최선노력 스크럽이다(`ncmp_secure_zero`, `ncmp_specific.c:254`).
+1. 라벨 정규화: 입력 32바이트 라벨을 지역 버퍼 `lbl`에 복사하고 NUL 종단한다(`ncmp_specific.c:408-409`).
+2. PIN 사본: `pin_len > 0`일 때 `pinbuf = malloc(pin_len)` 후 복사한다(`ncmp_specific.c:414-417`).
+3. 설정: `ncmp_admin_init_token(...)`로 SO PIN과 라벨을 토큰에 설정한다(`ncmp_specific.c:421-422`).
+4. 재조회: `ncmp_admin_token_info(...)`로 식별정보를 다시 읽는다(`ncmp_specific.c:429`).
+5. 정밀 검증: `ncmp_trim_len()`(`ncmp_specific.c:359`)으로 설정 라벨과 재조회 라벨의 유효 길이를 계산하여 길이·내용을 비교한다. 불일치 시 `CKR_FUNCTION_FAILED`(`ncmp_specific.c:435-442`).
+6. 캐시·영속: 식별정보를 `priv->identity`에 저장하고(`ncmp_specific.c:446`), `ncmp_apply_identity()`(`ncmp_specific.c:371`)로 `nv_token_data->token_info`에 반영한 뒤 `save_token_data()`로 영속화한다(`ncmp_specific.c:447-448`).
+7. 소거(Zeroization): 임시 버퍼를 즉시 영구 삭제한다. `ncmp_secure_zero(pinbuf, pin_len)` 후 해제(`ncmp_specific.c:452-455`), `ncmp_secure_zero(lbl, ...)`(`ncmp_specific.c:456`), `ncmp_secure_zero(&id, ...)`(`ncmp_specific.c:457`). 소거 함수는 volatile 접근 기반의 최선노력 스크럽이다(`ncmp_secure_zero`, `ncmp_specific.c:264`).
 
-C_Login 처리(`token_specific_login`, `ncmp_specific.c:272-302`)는 SO/User 역할 외의 조건을 종합하여 로그인 플래그를 계산한다.
+C_Login 처리(`token_specific_login`, `ncmp_specific.c:282-312`)는 SO/User 역할 외의 조건을 종합하여 로그인 플래그를 계산한다.
 
-- 보호 인증 경로(protected authentication path): `pin == NULL`이거나 `token_info.flags`에 `CKF_PROTECTED_AUTHENTICATION_PATH`가 설정된 경우 `NCMP_LOGIN_FLAG_PROTECTED_AUTH`를 설정한다(`ncmp_specific.c:292-295`). 이 경우 PIN은 토큰 패드에서 입력되며 와이어 PIN은 비운다.
-- 문맥 특정 재인증(context-specific re-auth): `user_type == CKU_CONTEXT_SPECIFIC`일 때 `NCMP_LOGIN_FLAG_CONTEXT`를 설정한다(`ncmp_specific.c:296-297`). 로그인 상태를 바꾸지 않고 현재 로그인 사용자의 PIN을 재검증한다.
-- 역할 매핑: `ncmp_wire_user_type()`(`ncmp_specific.c:263`)로 CK 사용자 유형을 와이어 유형(`NCMP_CKU_*`)으로 변환한다. 최종 전달은 `ncmp_admin_login(&priv->client, priv->ncmp_slot, ncmp_wire_user_type(user_type), flags, pin, pin_len)`이다(`ncmp_specific.c:299-301`).
+- 보호 인증 경로(protected authentication path): `pin == NULL`이거나 `token_info.flags`에 `CKF_PROTECTED_AUTHENTICATION_PATH`가 설정된 경우 `NCMP_LOGIN_FLAG_PROTECTED_AUTH`를 설정한다(`ncmp_specific.c:302-305`). 이 경우 PIN은 토큰 패드에서 입력되며 와이어 PIN은 비운다.
+- 문맥 특정 재인증(context-specific re-auth): `user_type == CKU_CONTEXT_SPECIFIC`일 때 `NCMP_LOGIN_FLAG_CONTEXT`를 설정한다(`ncmp_specific.c:306-307`). 로그인 상태를 바꾸지 않고 현재 로그인 사용자의 PIN을 재검증한다.
+- 역할 매핑: `ncmp_wire_user_type()`(`ncmp_specific.c:273`)로 CK 사용자 유형을 와이어 유형(`NCMP_CKU_*`)으로 변환한다. 최종 전달은 `ncmp_admin_login(&priv->client, priv->ncmp_slot, ncmp_wire_user_type(user_type), flags, pin, pin_len)`이다(`ncmp_specific.c:309-311`).
 
-데이터 저장 훅(`token_specific_init_token_data`, `ncmp_specific.c:451`)은 유효 식별정보가 있으면 `ncmp_apply_identity()`로 반영한 뒤 마스터 키를 생성하고(`generate_master_key`, `ncmp_specific.c:466`) `save_masterkey_so()`로 저장한다(`ncmp_specific.c:471`). `t_load_token_data`(`:480`)와 `t_save_token_data`(`:489`)는 통과(pass-through)로 `CKR_OK`를 반환한다.
+데이터 저장 훅(`token_specific_init_token_data`, `ncmp_specific.c:461`)은 유효 식별정보가 있으면 `ncmp_apply_identity()`로 반영한 뒤 마스터 키를 생성하고(`generate_master_key`, `ncmp_specific.c:476`) `save_masterkey_so()`로 저장한다(`ncmp_specific.c:481`). `t_load_token_data`(`:490`)와 `t_save_token_data`(`:499`)는 통과(pass-through)로 `CKR_OK`를 반환한다.
 
 ### 5.2 NCMP 데몬 (ncmpd)
 
@@ -527,17 +527,17 @@ C_Login 처리(`token_specific_login`, `ncmp_specific.c:272-302`)는 SO/User 역
 | 키 | 유형 | 기본값 | 기본값/파싱 정의 위치 | 설명 |
 |---|---|---|---|---|
 | `NCMP_SOCK_PATH` | 환경변수 | `NCMP_IPC_SOCK_PATH` (`/run/ncmpd/ncmpd.sock`) | 파싱 `main.c:183`, 기본값 `ncmp_ipc.h:15` | 데몬 IPC 소켓 경로. |
-| `NCMP_TOK_LABEL` / `NCMP_TOK_LABEL<n>` | 환경변수 | (미설정 시 무선호) | 파싱 `ncmp_specific.c:74-77` | 바인딩 희망 라벨(CK 슬롯별 우선). |
-| `NCMP_TOK_SERIAL` / `NCMP_TOK_SERIAL<n>` | 환경변수 | (미설정 시 무선호) | 파싱 `ncmp_specific.c:81-84` | 바인딩 희망 시리얼(CK 슬롯별 우선). |
+| `NCMP_TOK_LABEL` / `NCMP_TOK_LABEL<n>` | 환경변수 | (미설정 시 무선호) | 파싱 `ncmp_specific.c:84-87` | 바인딩 희망 라벨(CK 슬롯별 우선). |
+| `NCMP_TOK_SERIAL` / `NCMP_TOK_SERIAL<n>` | 환경변수 | (미설정 시 무선호) | 파싱 `ncmp_specific.c:91-94` | 바인딩 희망 시리얼(CK 슬롯별 우선). |
 | `ncmptok.conf` 슬롯맵 | 설정 파일 | 항등 매핑 | 샘플 `ncmptok.conf:21-22` | CK 슬롯↔물리 슬롯 매핑(샘플). |
 | `NCMP_TOK_CONF` / `NCMP_SLOT_BASE` | 환경변수 | - | TBD: 코드에서 확인 불가 (확인 필요: 슬롯맵/베이스 파서 미구현) | `ncmptok.conf`·프로젝트 규칙 주석에만 존재하며 현재 코드에서 파싱되지 않음. |
 
 #### 5.2.3 요청 처리 루프 및 동시성
 
-슬롯별 통신 스레드(`ncmpd_comm_thread`, `comm_thread.c:152`)는 디스패치/드레인 루프를 수행한다(`comm_thread.c:157-162`).
+슬롯별 통신 스레드(`ncmpd_comm_thread`, `comm_thread.c:443`)는 디스패치/드레인 루프를 수행한다(`comm_thread.c:453-458`).
 
-- 디스패치(`comm_dispatch`, `comm_thread.c:86`): 인플라이트 상한 미만인 동안(`comm_inflight(slot) < slot->max_inflight`, `comm_thread.c:92`) POSTED 엔트리를 SENT로 전이하여 USB로 전송한다. 인플라이트 예약은 `comm_reserve_inflight`(`comm_thread.c:40`)에서 통계를 갱신하고 원자 증가한다. 전송 실패 시 예약을 되돌리고 SENT→POSTED로 재적재한다(`comm_thread.c:103-105`).
-- 드레인(`comm_drain`, `comm_thread.c:116`): 응답 1건을 수신하여 `owner_sess`+`sequence_id`로 정합하는 SENT 엔트리를 찾고(`comm_match_sent`, `comm_thread.c:69`), 응답을 기록한 뒤 SENT→DONE으로 전이한다(`comm_thread.c:147`). 정합 엔트리가 없으면(클라이언트가 포기) 예약을 해제한다(`comm_thread.c:131-135`). 늦은 응답 대상 엔트리는 ABANDONED→FREE로 회수한다(`comm_thread.c:148`).
+- 디스패치(`comm_dispatch`, `comm_thread.c:353`): 인플라이트 상한 미만인 동안(`comm_inflight(slot) < slot->max_inflight`, `comm_thread.c:359`) POSTED 엔트리를 SENT로 전이하여 USB로 전송한다. 인플라이트 예약은 `comm_reserve_inflight`(`comm_thread.c:307`)에서 통계를 갱신하고 원자 증가한다. 전송 실패 시 예약을 되돌리고 SENT→POSTED로 재적재한다(`comm_thread.c:383-385`).
+- 드레인(`comm_drain`, `comm_thread.c:397`): 응답 1건을 수신하여 `owner_sess`+`sequence_id`로 정합하는 SENT 엔트리를 찾고(`comm_match_sent`, `comm_thread.c:336`), 응답을 기록한 뒤 SENT→DONE으로 전이한다(`comm_thread.c:438`). 정합 엔트리가 없으면(클라이언트가 포기) 예약을 해제한다(`comm_thread.c:412-416`). 늦은 응답 대상 엔트리는 ABANDONED→FREE로 회수한다(`comm_thread.c:439`).
 
 큐 상태 기계는 생산자·소비자 규칙을 따른다(그림 5-1).
 
@@ -559,7 +559,7 @@ stateDiagram-v2
 
 #### 5.2.4 로그
 
-로그는 `fprintf(stderr, ...)` 기반 평문이다. 식별 배너(`main.c:116`), 슬롯 개방(`main.c:162`), 실행 배너와 슬롯 마스크(`main.c:194`), 정지(`main.c:215`) 등이 출력된다. 각 스레드는 루프 종료 시 자체 인플라이트·처리량 요약을 출력한다(`comm_thread.c:165-170`). 로그 레벨 체계나 파일 출력 경로는 별도 정의되지 않는다(TBD: 로그 레벨/출력 경로 정책).
+로그는 `fprintf(stderr, ...)` 기반 평문이다. 식별 배너(`main.c:116`), 슬롯 개방(`main.c:162`), 실행 배너와 슬롯 마스크(`main.c:194`), 정지(`main.c:215`) 등이 출력된다. 각 스레드는 루프 종료 시 자체 인플라이트·처리량 요약을 출력한다(`comm_thread.c:461-466`). 로그 레벨 체계나 파일 출력 경로는 별도 정의되지 않는다(TBD: 로그 레벨/출력 경로 정책).
 
 ### 5.3 공통 모듈
 
@@ -569,19 +569,19 @@ stateDiagram-v2
 
 | 모듈 | 주요 함수(정의 위치) | 역할 |
 |---|---|---|
-| 와이어 | `ncmp_wire_validate_params` (`ncmp_wire.c:34`), `ncmp_wire_encode` (`:52`), `ncmp_msg_pack` (`:102`), `ncmp_msg_param` (`:136`), `ncmp_wire_decode_header` (`:152`), `ncmp_wire_decode` (`:177`) | 프레임 직렬화·역직렬화·파라미터 팩/언팩·검증. |
-| 큐 | `ncmp_queue_claim` (`ncmp_queue.c:10`), `ncmp_queue_post` (`:24`) | FREE→CLAIMED, CLAIMED→POSTED CAS 전이. |
-| 슬롯(생산자) | `ncmp_slot_enqueue` (`ncmp_slot.c:14`), `ncmp_slot_wait` (`:56`) | 요청 적재 및 응답 대기·타임아웃. |
-| SHM | `ncmp_shm_create` (`ncmp_shm.c:36`), `ncmp_shm_attach` (`:112`), `ncmp_shm_detach` (`:151`), `ncmp_shm_destroy` (`:165`) | SHM 생성/부착/해제/파기 및 뮤텍스·링 초기화. |
-| 뮤텍스 | `ncmp_mutex_init` (`ncmp_mutex.c:19`), `ncmp_mutex_lock` (`:39`), `ncmp_mutex_unlock` (`:62`) | 강건·프로세스공유 뮤텍스 및 `EOWNERDEAD` 복구. |
-| 슬롯맵 | `ncmp_token_info_unpack` (`ncmp_slotmap.c:31`), `ncmp_slot_set_identity` (`:53`), `ncmp_slot_get_identity` (`:75`), `ncmp_slot_bind` (`:105`), `ncmp_slot_unbind` (`:183`) | 식별정보 디코드·캐시 및 CK↔물리 슬롯 바인딩. |
-| IPC | `ncmp_ipc_connect` (`ncmp_ipc.c:60`), `ncmp_ipc_listen` (`:101`) | 클라이언트 연결·데몬 리슨. |
+| 와이어 | `ncmp_wire_validate_params` (`ncmp_wire.c:34`), `ncmp_wire_encode` (`:62`), `ncmp_msg_pack` (`:112`), `ncmp_msg_param` (`:146`), `ncmp_wire_decode_header` (`:162`), `ncmp_wire_decode` (`:187`) | 프레임 직렬화·역직렬화·파라미터 팩/언팩·검증. |
+| 큐 | `ncmp_queue_claim` (`ncmp_queue.c:10`), `ncmp_queue_post` (`:34`) | FREE→CLAIMED, CLAIMED→POSTED CAS 전이. |
+| 슬롯(생산자) | `ncmp_slot_enqueue` (`ncmp_slot.c:14`), `ncmp_slot_wait` (`:66`) | 요청 적재 및 응답 대기·타임아웃. |
+| SHM | `ncmp_shm_create` (`ncmp_shm.c:36`), `ncmp_shm_attach` (`:122`), `ncmp_shm_detach` (`:161`), `ncmp_shm_destroy` (`:175`) | SHM 생성/부착/해제/파기 및 뮤텍스·링 초기화. |
+| 뮤텍스 | `ncmp_mutex_init` (`ncmp_mutex.c:19`), `ncmp_mutex_lock` (`:49`), `ncmp_mutex_unlock` (`:72`) | 강건·프로세스공유 뮤텍스 및 `EOWNERDEAD` 복구. |
+| 슬롯맵 | `ncmp_token_info_unpack` (`ncmp_slotmap.c:31`), `ncmp_slot_set_identity` (`:63`), `ncmp_slot_get_identity` (`:85`), `ncmp_slot_bind` (`:115`), `ncmp_slot_unbind` (`:193`) | 식별정보 디코드·캐시 및 CK↔물리 슬롯 바인딩. |
+| IPC | `ncmp_ipc_connect` (`ncmp_ipc.c:60`), `ncmp_ipc_listen` (`:111`) | 클라이언트 연결·데몬 리슨. |
 | 세션 | `ncmp_session_open` (`ncmp_session.c`), `ncmp_session_close` | `sess_lock` 하 세션 카운터 증감. |
 | 오류 변환 | `ncmp_err_to_ckr` (`ncmp_ckr.c:12`) | `NCMP_ERR_*` → `CKR_*` 매핑. |
 
 강건 뮤텍스 복구는 다음과 같다. 초기화 시 `PTHREAD_PROCESS_SHARED`(`ncmp_mutex.c:31`)와 `PTHREAD_MUTEX_ROBUST`(`ncmp_mutex.c:32`)를 설정한다. 잠금 중 소유자 사망(`EOWNERDEAD`)이 감지되면(`ncmp_mutex.c:50`) `pthread_mutex_consistent()`로 상태를 복구하고(`ncmp_mutex.c:53`) `NCMP_MUTEX_RECOVERED`를 반환한다(`ncmp_mutex.c:55`). 복구 불가 시 `NCMP_ERR_MUTEX`를 반환한다(`ncmp_mutex.c:59`).
 
-슬롯 바인딩 우선순위(`ncmp_slot_bind`, `ncmp_slotmap.c:105`)는 온라인 슬롯을 대상으로 (1) 동일 CK 슬롯에 이미 바인딩된 슬롯(멱등, `ncmp_slotmap.c:121-128`), (2) 시리얼 일치 미청구 슬롯(`:131-144`), (3) 라벨 일치 미청구 슬롯(`:147-160`), (4) 첫 미청구 온라인 슬롯(`:163-169`) 순이다.
+슬롯 바인딩 우선순위(`ncmp_slot_bind`, `ncmp_slotmap.c:105`)는 온라인 슬롯을 대상으로 (1) 동일 CK 슬롯에 이미 바인딩된 슬롯(멱등, `ncmp_slotmap.c:121-128`), (2) 시리얼 일치 미청구 슬롯(`:141-154`), (3) 라벨 일치 미청구 슬롯(`:157-170`), (4) 첫 미청구 온라인 슬롯(`:173-179`) 순이다.
 
 ## 6. CI (Command Interface) 명세
 
@@ -591,7 +591,7 @@ stateDiagram-v2
 
 CI는 PKCS#11 비의존 전송 프로토콜이다. 전송 계층(`ncmp/` 서브트리)은 opcode로 태깅된 불투명 바이트 블롭을 전달하며, STDLL 어댑터가 `CK_*` 버퍼를 파라미터 페이로드로 마샬링한다(`ncmp_cmd.h:8-11`).
 
-요청/응답 모델은 단일 왕복(request-response)이다. 명령 식별자 `command_id`는 32비트로, 하위 16비트가 오퍼레이션 opcode(`enum ncmp_opcode`), 상위 16비트가 플래그/수정자(`NCMP_CMD_FLAG_*`)이다(`ncmp_cmd.h:4-6`, 마스크 `ncmp_cmd.h:19-21`). opcode 추출은 `ncmp_cmd_opcode()`(`ncmp_cmd.h:195`)를 사용한다.
+요청/응답 모델은 단일 왕복(request-response)이다. 명령 식별자 `command_id`는 32비트로, 하위 16비트가 오퍼레이션 opcode(`enum ncmp_opcode`), 상위 16비트가 플래그/수정자(`NCMP_CMD_FLAG_*`)이다(`ncmp_cmd.h:4-6`, 마스크 `ncmp_cmd.h:19-21`). opcode 추출은 `ncmp_cmd_opcode()`(`ncmp_cmd.h:234`)를 사용한다.
 
 버전 관리는 별도 CI 버전 필드 없이 IPC/SHM 버전으로 수행한다. IPC 프로토콜 버전은 `NCMP_IPC_VERSION = 1`(`ncmp_ipc.h:18`), SHM 버전은 `NCMP_SHM_VERSION = 2`(`ncmp_shm.h:20`)이다. 설계 문서(`command-interface.md`)의 `typedef enum CI_Cmd`는 `enum ncmp_opcode`의 별칭으로 정의되어 두 정의가 일치를 유지한다.
 
@@ -617,32 +617,32 @@ CI는 PKCS#11 비의존 전송 프로토콜이다. 전송 계층(`ncmp/` 서브�
 | 0x0015 | `NCMP_CMD_AES_GCM_UPDATE` | `ncmp_cmd.h:48` | AesGcmUpdate | AES-GCM 멀티파트 데이터. | 불필요 |
 | 0x0016 | `NCMP_CMD_AES_GCM_FINAL` | `ncmp_cmd.h:49` | AesGcmFinal | AES-GCM 멀티파트 종료(태그). | 불필요 |
 | 0x0017 | `NCMP_CMD_CTX_FREE` | `ncmp_cmd.h:53` | CtxFree | 멀티파트 컨텍스트 해제(중단). | 불필요 |
-| 0x0030 | `NCMP_CMD_LOGIN` | `ncmp_cmd.h:52` | Login | PIN 검증/로그인. | 필요 |
-| 0x0031 | `NCMP_CMD_LOGOUT` | `ncmp_cmd.h:53` | Logout | 로그아웃. | 필요 |
-| 0x0032 | `NCMP_CMD_INIT_PIN` | `ncmp_cmd.h:54` | InitPIN | SO가 사용자 PIN 설정. | 필요(SO) |
-| 0x0033 | `NCMP_CMD_SET_PIN` | `ncmp_cmd.h:55` | SetPIN | 현재 사용자 PIN 변경. | 필요 |
-| 0x0034 | `NCMP_CMD_INIT_TOKEN` | `ncmp_cmd.h:56` | InitToken | 토큰 초기화(SO PIN·라벨). | 필요(SO) |
-| 0x0035 | `NCMP_CMD_GET_UTC_TIME` | `ncmp_cmd.h:57` | GetUtcTime | UTC 시각 조회. | 불필요 |
-| 0x0036 | `NCMP_CMD_GET_TOKEN_PARAMS` | `ncmp_cmd.h:58` | GetTokenParams | 라벨·시리얼·PIN 길이 조회. | 불필요 |
-| 0x0037 | `NCMP_CMD_SET_UTC_TIME` | `ncmp_cmd.h:59` | SetUtcTime | UTC 시각 설정(SO 전용). | 필요(SO) |
-| 0x0038 | `NCMP_CMD_OBJECT_ADD` | `ncmp_cmd.h:69` | ObjectAdd | 키 객체 등록/임포트. | 불필요 |
-| 0x0039 | `NCMP_CMD_OBJECT_SET_ATTR` | `ncmp_cmd.h:70` | ObjectSetAttr | 키 객체 속성 변경 검증. | 불필요 |
-| 0x0050 | `NCMP_CMD_MLDSA_KEYGEN` | `ncmp_cmd.h:78` | MlDsaKeygen | ML-DSA 키쌍 생성. | 불필요 |
-| 0x0051 | `NCMP_CMD_MLDSA_SIGN` | `ncmp_cmd.h:79` | MlDsaSign | ML-DSA 서명. | 불필요 |
-| 0x0052 | `NCMP_CMD_MLDSA_VERIFY` | `ncmp_cmd.h:80` | MlDsaVerify | ML-DSA 검증. | 불필요 |
-| 0x0053 | `NCMP_CMD_MLKEM_KEYGEN` | `ncmp_cmd.h:81` | MlKemKeygen | ML-KEM 키쌍 생성. | 불필요 |
-| 0x0054 | `NCMP_CMD_MLKEM_ENCAPS` | `ncmp_cmd.h:82` | MlKemEncaps | ML-KEM 캡슐화. | 불필요 |
-| 0x0055 | `NCMP_CMD_MLKEM_DECAPS` | `ncmp_cmd.h:83` | MlKemDecaps | ML-KEM 복호캡슐화. | 불필요 |
-| 0x0101 | `NCMP_CMD_VD_MEM_WRITE` | `ncmp_cmd.h:91` | VdMemWrite | 벤더 메모리 쓰기. | 불필요 |
-| 0x0102 | `NCMP_CMD_VD_MEM_READ` | `ncmp_cmd.h:92` | VdMemRead | 벤더 메모리 읽기. | 불필요 |
-| 0x0103 | `NCMP_CMD_VD_PING` | `ncmp_cmd.h:93` | VdPing | 토큰 에포크 조회. | 불필요 |
-| 0x0104 | `NCMP_CMD_VD_SELFTEST` | `ncmp_cmd.h:94` | VdSelftest | 자가시험. | 불필요 |
-| 0x0105 | `NCMP_CMD_VD_FW_INFO` | `ncmp_cmd.h:95` | VdFwInfo | 펌웨어 버전 조회. | 불필요 |
-| 0x0106 | `NCMP_CMD_VD_MEM_FILL` | `ncmp_cmd.h:96` | VdMemFill | 벤더 메모리 채우기. | 불필요 |
-| 0x0107 | `NCMP_CMD_VD_MEM_CRC` | `ncmp_cmd.h:97` | VdMemCrc | 벤더 메모리 CRC32. | 불필요 |
-| 0x0108 | `NCMP_CMD_VD_TOKEN_INFO` | `ncmp_cmd.h:98` | VdTokenInfo | 토큰 식별정보 블롭 조회. | 불필요 |
+| 0x0030 | `NCMP_CMD_LOGIN` | `ncmp_cmd.h:61` | Login | PIN 검증/로그인. | 필요 |
+| 0x0031 | `NCMP_CMD_LOGOUT` | `ncmp_cmd.h:62` | Logout | 로그아웃. | 필요 |
+| 0x0032 | `NCMP_CMD_INIT_PIN` | `ncmp_cmd.h:63` | InitPIN | SO가 사용자 PIN 설정. | 필요(SO) |
+| 0x0033 | `NCMP_CMD_SET_PIN` | `ncmp_cmd.h:64` | SetPIN | 현재 사용자 PIN 변경. | 필요 |
+| 0x0034 | `NCMP_CMD_INIT_TOKEN` | `ncmp_cmd.h:65` | InitToken | 토큰 초기화(SO PIN·라벨). | 필요(SO) |
+| 0x0035 | `NCMP_CMD_GET_UTC_TIME` | `ncmp_cmd.h:66` | GetUtcTime | UTC 시각 조회. | 불필요 |
+| 0x0036 | `NCMP_CMD_GET_TOKEN_PARAMS` | `ncmp_cmd.h:67` | GetTokenParams | 라벨·시리얼·PIN 길이 조회. | 불필요 |
+| 0x0037 | `NCMP_CMD_SET_UTC_TIME` | `ncmp_cmd.h:68` | SetUtcTime | UTC 시각 설정(SO 전용). | 필요(SO) |
+| 0x0038 | `NCMP_CMD_OBJECT_ADD` | `ncmp_cmd.h:78` | ObjectAdd | 키 객체 등록/임포트. | 불필요 |
+| 0x0039 | `NCMP_CMD_OBJECT_SET_ATTR` | `ncmp_cmd.h:79` | ObjectSetAttr | 키 객체 속성 변경 검증. | 불필요 |
+| 0x0050 | `NCMP_CMD_MLDSA_KEYGEN` | `ncmp_cmd.h:87` | MlDsaKeygen | ML-DSA 키쌍 생성. | 불필요 |
+| 0x0051 | `NCMP_CMD_MLDSA_SIGN` | `ncmp_cmd.h:88` | MlDsaSign | ML-DSA 서명. | 불필요 |
+| 0x0052 | `NCMP_CMD_MLDSA_VERIFY` | `ncmp_cmd.h:89` | MlDsaVerify | ML-DSA 검증. | 불필요 |
+| 0x0053 | `NCMP_CMD_MLKEM_KEYGEN` | `ncmp_cmd.h:90` | MlKemKeygen | ML-KEM 키쌍 생성. | 불필요 |
+| 0x0054 | `NCMP_CMD_MLKEM_ENCAPS` | `ncmp_cmd.h:91` | MlKemEncaps | ML-KEM 캡슐화. | 불필요 |
+| 0x0055 | `NCMP_CMD_MLKEM_DECAPS` | `ncmp_cmd.h:92` | MlKemDecaps | ML-KEM 복호캡슐화. | 불필요 |
+| 0x0101 | `NCMP_CMD_VD_MEM_WRITE` | `ncmp_cmd.h:100` | VdMemWrite | 벤더 메모리 쓰기. | 불필요 |
+| 0x0102 | `NCMP_CMD_VD_MEM_READ` | `ncmp_cmd.h:101` | VdMemRead | 벤더 메모리 읽기. | 불필요 |
+| 0x0103 | `NCMP_CMD_VD_PING` | `ncmp_cmd.h:102` | VdPing | 토큰 에포크 조회. | 불필요 |
+| 0x0104 | `NCMP_CMD_VD_SELFTEST` | `ncmp_cmd.h:103` | VdSelftest | 자가시험. | 불필요 |
+| 0x0105 | `NCMP_CMD_VD_FW_INFO` | `ncmp_cmd.h:104` | VdFwInfo | 펌웨어 버전 조회. | 불필요 |
+| 0x0106 | `NCMP_CMD_VD_MEM_FILL` | `ncmp_cmd.h:105` | VdMemFill | 벤더 메모리 채우기. | 불필요 |
+| 0x0107 | `NCMP_CMD_VD_MEM_CRC` | `ncmp_cmd.h:106` | VdMemCrc | 벤더 메모리 CRC32. | 불필요 |
+| 0x0108 | `NCMP_CMD_VD_TOKEN_INFO` | `ncmp_cmd.h:107` | VdTokenInfo | 토큰 식별정보 블롭 조회. | 불필요 |
 
-RSA·EC/ECDSA·DH/ECDH·HMAC·AES 블록 모드 및 별도 루프백 opcode는 정의에서 제거되었으며, 남긴 opcode 공백은 재사용하지 않는다(`ncmp_cmd.h:26-30`). 루프백(에코)은 `NCMP_CMD_NOP`이 담당한다(`ncmp_cmd.h:89`).
+RSA·EC/ECDSA·DH/ECDH·HMAC·AES 블록 모드 및 별도 루프백 opcode는 정의에서 제거되었으며, 남긴 opcode 공백은 재사용하지 않는다(`ncmp_cmd.h:26-30`). 루프백(에코)은 `NCMP_CMD_NOP`이 담당한다(`ncmp_cmd.h:98`).
 
 ### 6.3 공통 메시지 포맷
 
@@ -654,13 +654,13 @@ RSA·EC/ECDSA·DH/ECDH·HMAC·AES 블록 모드 및 별도 루프백 opcode는 �
 
 | 필드 | 오프셋(byte) | 길이(byte) | 타입 | 설명 | 대응 정의 |
 |---|---|---|---|---|---|
-| `frame_len` | 0 | 4 | u32 LE | 이 필드 이후 전체 길이. | `ncmp_wire.h:11`, `NCMP_FRAME_PREFIX_SIZE` `:41` |
+| `frame_len` | 0 | 4 | u32 LE | 이 필드 이후 전체 길이. | `ncmp_wire.h:11`, `NCMP_FRAME_PREFIX_SIZE` `:51` |
 | `session_id` | 4 | 4 | u32 LE | 소유 PKCS#11 세션 핸들. | `NCMP_Header.session_id` `ncmp_wire.h:33` |
 | `sequence_id` | 8 | 4 | u32 LE | 세션별 단조 증가 요청 id. | `ncmp_wire.h:34` |
 | `command_id` | 12 | 4 | u32 LE | 하위 opcode + 상위 플래그. | `ncmp_wire.h:35` |
 | `ack` | 16 | 4 | u32 LE | `CKR_*` 상태(요청·응답 공용). | `ncmp_wire.h:36` |
 | `payload_len` | 20 | 4 | u32 LE | 헤더 이후 바이트(배열+파라미터). | `ncmp_wire.h:37` |
-| `param_len[8]` | 24 | 32 | u32 LE ×8 | 파라미터별 길이 배열. | `ncmp_wire.h:59`, `NCMP_PARAM_LEN_ARRAY_SIZE` `:47` |
+| `param_len[8]` | 24 | 32 | u32 LE ×8 | 파라미터별 길이 배열. | `ncmp_wire.h:59`, `NCMP_PARAM_LEN_ARRAY_SIZE` `:57` |
 | 파라미터 1..8 | 56 | 가변 | bytes | 파라미터 바이트 연접(길이 0=생략). | `NCMP_Message.payload` `ncmp_wire.h:60` |
 
 헤더 고정 크기는 `NCMP_HEADER_WIRE_SIZE = 20`이다(`ncmp_wire.h:44`; 정합성은 `_Static_assert`로 강제, `ncmp_wire.c:13`). 프레임 불변식은 `frame_len == 20 + payload_len` 및 `payload_len == 32 + sum(param_len[i])`이다(`ncmp_wire.h:20-22`).
@@ -688,11 +688,11 @@ RSA·EC/ECDSA·DH/ECDH·HMAC·AES 블록 모드 및 별도 루프백 opcode는 �
 
 | 파라미터 | 내용 | 타입/길이 | 정의 위치 |
 |---|---|---|---|
-| param0 | 사용자 유형(`NCMP_CKU_SO`/`USER`/`CONTEXT_SPECIFIC`) | u32 LE / 4 | `ncmp_cmd.h:127-129`, 패킹 `ncmp_admin.c:150,152` |
-| param1 | 로그인 플래그(`NCMP_LOGIN_FLAG_*`) | u32 LE / 4 | `ncmp_cmd.h:138-140`, 패킹 `ncmp_admin.c:151,153` |
+| param0 | 사용자 유형(`NCMP_CKU_SO`/`USER`/`CONTEXT_SPECIFIC`) | u32 LE / 4 | `ncmp_cmd.h:136-138`, 패킹 `ncmp_admin.c:150,152` |
+| param1 | 로그인 플래그(`NCMP_LOGIN_FLAG_*`) | u32 LE / 4 | `ncmp_cmd.h:147-149`, 패킹 `ncmp_admin.c:151,153` |
 | param2 | PIN 바이트(보호 인증 경로 시 빈 값) | bytes | 패킹 `ncmp_admin.c:154` |
 
-응답: 출력 파라미터 없음. 상태는 `ack`에 실린다. 처리(모의): `mcu_scheduler.c:398-452`. 문맥 특정 재인증(`ut == NCMP_CKU_CONTEXT_SPECIFIC` 또는 `flags & NCMP_LOGIN_FLAG_CONTEXT`)은 로그인 상태를 유지한 채 현재 사용자 PIN을 재검증한다(`mcu_scheduler.c:420-431`). 보호 인증 경로 플래그가 설정되면 와이어 PIN 검증을 생략한다(`mcu_scheduler.c:441-447`).
+응답: 출력 파라미터 없음. 상태는 `ack`에 실린다. 처리(모의): `mcu_scheduler.c:727-781`. 문맥 특정 재인증(`ut == NCMP_CKU_CONTEXT_SPECIFIC` 또는 `flags & NCMP_LOGIN_FLAG_CONTEXT`)은 로그인 상태를 유지한 채 현재 사용자 PIN을 재검증한다(`mcu_scheduler.c:749-760`). 보호 인증 경로 플래그가 설정되면 와이어 PIN 검증을 생략한다(`mcu_scheduler.c:770-776`).
 
 발생 가능 결과 코드: `CKR_OK`, `CKR_PIN_INCORRECT`, `CKR_USER_TYPE_INVALID`, `CKR_USER_ALREADY_LOGGED_IN`, `CKR_USER_NOT_LOGGED_IN`(문맥 재인증 시 미로그인).
 
@@ -718,15 +718,15 @@ sequenceDiagram
 
 #### 6.4.2 NCMP_CMD_INIT_TOKEN (0x0034)
 
-기능: SO PIN을 검증하고 라벨을 설정한다. 요청 param0=SO PIN, param1=라벨(32바이트, 공백 우측 패딩; `ncmp_admin.c:198-208`). 응답 파라미터 없음. 처리(모의): SO PIN 검증(`PIN_INCORRECT`), 라벨 절단·설정, 강제 로그아웃(`mcu_scheduler.c:521-546`). STDLL은 이후 `NCMP_CMD_VD_TOKEN_INFO`로 재조회하여 라벨을 정밀 검증한다(5.1.4절 참조).
+기능: SO PIN을 검증하고 라벨을 설정한다. 요청 param0=SO PIN, param1=라벨(32바이트, 공백 우측 패딩; `ncmp_admin.c:198-208`). 응답 파라미터 없음. 처리(모의): SO PIN 검증(`PIN_INCORRECT`), 라벨 절단·설정, 강제 로그아웃(`mcu_scheduler.c:850-875`). STDLL은 이후 `NCMP_CMD_VD_TOKEN_INFO`로 재조회하여 라벨을 정밀 검증한다(5.1.4절 참조).
 
 #### 6.4.3 NCMP_CMD_GET_UTC_TIME (0x0035) / SET_UTC_TIME (0x0037)
 
-GET: 요청 파라미터 없음. 응답 param0 = `NCMP_TOKEN_UTC_LEN`(16)바이트 UTC 시각("YYYYMMDDhhmmssxx"). 어댑터 `ncmp_admin_get_utc_time`(`ncmp_admin.c:71`), 처리(모의) `mcu_scheduler.c:548-558`. 읽기에는 SO 게이팅이 없다.
+GET: 요청 파라미터 없음. 응답 param0 = `NCMP_TOKEN_UTC_LEN`(16)바이트 UTC 시각("YYYYMMDDhhmmssxx"). 어댑터 `ncmp_admin_get_utc_time`(`ncmp_admin.c:71`), 처리(모의) `mcu_scheduler.c:877-887`. 읽기에는 SO 게이팅이 없다.
 
-SET: 요청 param0 = 16바이트 UTC 시각. 응답 파라미터 없음. 어댑터 `ncmp_admin_set_utc_time`(`ncmp_admin.c:91`), 처리(모의) `mcu_scheduler.c:559-585`. SO 로그인 필수(`login_user == NCMP_CKU_SO`, 아니면 `CKR_USER_NOT_LOGGED_IN`), 길이가 정확히 16이 아니면 `CKR_ARGUMENTS_BAD`(`mcu_scheduler.c:574-581`).
+SET: 요청 param0 = 16바이트 UTC 시각. 응답 파라미터 없음. 어댑터 `ncmp_admin_set_utc_time`(`ncmp_admin.c:91`), 처리(모의) `mcu_scheduler.c:888-914`. SO 로그인 필수(`login_user == NCMP_CKU_SO`, 아니면 `CKR_USER_NOT_LOGGED_IN`), 길이가 정확히 16이 아니면 `CKR_ARGUMENTS_BAD`(`mcu_scheduler.c:903-910`).
 
-설정용 PKCS#11 `C_*` 함수가 없으므로 SET는 `ncmp_admin` 전용 경로이며 token_specific 훅이 없다. UTC 시각 필드 길이 `NCMP_TOKEN_UTC_LEN = 16`은 `ncmp_cmd.h:151`에 정의된다.
+설정용 PKCS#11 `C_*` 함수가 없으므로 SET는 `ncmp_admin` 전용 경로이며 token_specific 훅이 없다. UTC 시각 필드 길이 `NCMP_TOKEN_UTC_LEN = 16`은 `ncmp_cmd.h:160`에 정의된다.
 
 #### 6.4.4 NCMP_CMD_GET_TOKEN_PARAMS (0x0036)
 
@@ -736,12 +736,12 @@ SET: 요청 param0 = 16바이트 UTC 시각. 응답 파라미터 없음. 어댑�
 
 | 파라미터 | 내용 | 타입/길이 | 정의 위치 |
 |---|---|---|---|
-| param0 | 라벨 | bytes / `NCMP_TI_LABEL_LEN`(32) | `ncmp_cmd.h:144`, `ncmp_admin.c:120-121` |
-| param1 | 시리얼 | bytes / `NCMP_TI_SERIAL_LEN`(16) | `ncmp_cmd.h:145`, `ncmp_admin.c:122-123` |
-| param2 | ulMinPinLen | u32 LE / 4 | `ncmp_cmd.h:146`, `ncmp_admin.c:124` |
-| param3 | ulMaxPinLen | u32 LE / 4 | `ncmp_cmd.h:147`, `ncmp_admin.c:125` |
+| param0 | 라벨 | bytes / `NCMP_TI_LABEL_LEN`(32) | `ncmp_cmd.h:153`, `ncmp_admin.c:120-121` |
+| param1 | 시리얼 | bytes / `NCMP_TI_SERIAL_LEN`(16) | `ncmp_cmd.h:154`, `ncmp_admin.c:122-123` |
+| param2 | ulMinPinLen | u32 LE / 4 | `ncmp_cmd.h:155`, `ncmp_admin.c:124` |
+| param3 | ulMaxPinLen | u32 LE / 4 | `ncmp_cmd.h:156`, `ncmp_admin.c:125` |
 
-처리(모의): `mcu_scheduler.c:586-607`. `param2 = MOCK_MIN_PIN_LEN`(4), `param3 = MOCK_MAX_PIN_LEN`(= `NCMP_MOCK_PIN_MAX` = 32). 어댑터는 각 파라미터의 길이를 검증한 뒤 값을 추출한다(`ncmp_admin.c:120-135`).
+처리(모의): `mcu_scheduler.c:915-936`. `param2 = MOCK_MIN_PIN_LEN`(4), `param3 = MOCK_MAX_PIN_LEN`(= `NCMP_MOCK_PIN_MAX` = 32). 어댑터는 각 파라미터의 길이를 검증한 뒤 값을 추출한다(`ncmp_admin.c:120-135`).
 
 #### 6.4.5 대칭·해시·PQC CI
 
@@ -757,26 +757,26 @@ SET: 요청 param0 = 16바이트 UTC 시각. 응답 파라미터 없음. 어댑�
 | SHAKE_DERIVE | [mech\|outlen(u32)\|base] | param0 = 출력 | `ncmp_cmd.h:41` |
 | AES_GCM | [flags\|key\|iv\|aad\|taglen\|data] | param0 = 출력(암호문+태그/평문) | `ncmp_cmd.h:43` |
 | AES_CTR | [flags\|key\|ctr\|data] | param0 = 출력(스트림) | `ncmp_cmd.h:44` |
-| MLDSA_KEYGEN | [set\|pub_len\|priv_len] | [pub\|priv] | `ncmp_cmd.h:78` |
-| MLDSA_SIGN | [set\|pub_len\|sig_len\|priv\|data] | [sig] | `ncmp_cmd.h:79` |
-| MLDSA_VERIFY | [set\|pub\|data\|sig] | 없음(ack) | `ncmp_cmd.h:80` |
-| MLKEM_KEYGEN | [set\|pub_len\|priv_len] | [pub\|priv] | `ncmp_cmd.h:81` |
-| MLKEM_ENCAPS | [set\|ct_len\|ss_len\|pub] | [ct\|ss] | `ncmp_cmd.h:82` |
-| MLKEM_DECAPS | [set\|pub_len\|ss_len\|priv\|ct] | [ss] | `ncmp_cmd.h:83` |
+| MLDSA_KEYGEN | [set\|pub_len\|priv_len] | [pub\|priv] | `ncmp_cmd.h:87` |
+| MLDSA_SIGN | [set\|pub_len\|sig_len\|priv\|data] | [sig] | `ncmp_cmd.h:88` |
+| MLDSA_VERIFY | [set\|pub\|data\|sig] | 없음(ack) | `ncmp_cmd.h:89` |
+| MLKEM_KEYGEN | [set\|pub_len\|priv_len] | [pub\|priv] | `ncmp_cmd.h:90` |
+| MLKEM_ENCAPS | [set\|ct_len\|ss_len\|pub] | [ct\|ss] | `ncmp_cmd.h:91` |
+| MLKEM_DECAPS | [set\|pub_len\|ss_len\|priv\|ct] | [ss] | `ncmp_cmd.h:92` |
 
-AES 요청 플래그 `NCMP_AES_FLAG_ENCRYPT = 0x1`(`ncmp_cmd.h:163`), AES 블록/IV 크기 `NCMP_AES_BLOCK = 16`(`ncmp_cmd.h:160`). 다이제스트 메커니즘 식별자는 PKCS#11 `CKM_SHA*`와 수치가 동일하다(`ncmp_cmd.h:172-178`). 출력 크기는 `ncmp_digest_size()`(`ncmp_cmd.h:181`)로 결정한다.
+AES 요청 플래그 `NCMP_AES_FLAG_ENCRYPT = 0x1`(`ncmp_cmd.h:202`), AES 블록/IV 크기 `NCMP_AES_BLOCK = 16`(`ncmp_cmd.h:199`). 다이제스트 메커니즘 식별자는 PKCS#11 `CKM_SHA*`와 수치가 동일하다(`ncmp_cmd.h:211-217`). 출력 크기는 `ncmp_digest_size()`(`ncmp_cmd.h:220`)로 결정한다.
 
 #### 6.4.6 벤더 CI
 
-`NCMP_CMD_VD_TOKEN_INFO`(0x0108)는 고정 104바이트 식별 블롭을 param0으로 반환한다. 블롭 레이아웃은 오프셋 기반이다(`ncmp_cmd.h:108-124`): 라벨(0)·시리얼(32)·제조자(48)·모델(80)·hw major/minor(96/97)·fw major/minor(98/99)·flags(100). 총 크기 `NCMP_TOKEN_INFO_WIRE_SIZE = 104`(`ncmp_cmd.h:124`). 처리(모의) `mcu_scheduler.c:377-392`. 기타 벤더 CI(`VD_MEM_*`/`PING`/`SELFTEST`/`FW_INFO`)는 표 6-1을 따르며 토큰 데이터패스·장치 상태 질의에 사용한다.
+`NCMP_CMD_VD_TOKEN_INFO`(0x0108)는 고정 104바이트 식별 블롭을 param0으로 반환한다. 블롭 레이아웃은 오프셋 기반이다(`ncmp_cmd.h:117-133`): 라벨(0)·시리얼(32)·제조자(48)·모델(80)·hw major/minor(96/97)·fw major/minor(98/99)·flags(100). 총 크기 `NCMP_TOKEN_INFO_WIRE_SIZE = 104`(`ncmp_cmd.h:133`). 처리(모의) `mcu_scheduler.c:706-721`. 기타 벤더 CI(`VD_MEM_*`/`PING`/`SELFTEST`/`FW_INFO`)는 표 6-1을 따르며 토큰 데이터패스·장치 상태 질의에 사용한다.
 
 #### 6.4.7 객체 관리 CI
 
 보안키 토큰으로서 물리 토큰이 키 데이터를 보관하므로, 키 객체의 생성·속성 변경을 토큰에 전달한다. 객체 저장·핸들 매핑·열거(find)·크기·삭제는 opencryptoki 공통 객체 관리자가 처리하며 별도 `token_specific` 훅이 없다(7절·8.5절 참조). 비키 객체(데이터·인증서)는 전달하지 않고 로컬 처리한다.
 
-`NCMP_CMD_OBJECT_ADD`(0x0038)는 `C_CreateObject`로 임포트된 키를 토큰에 등록한다. 요청 param0=class(u32), param1=key_type(u32), param2=키 데이터(CKA_VALUE). 응답 파라미터 없음. 어댑터 `ncmp_object_add`(`ncmp_object.c:43`), 훅 `token_specific_object_add`(`ncmp_specific.c:1358`), 처리(모의) `mcu_scheduler.c:611`. 키 데이터가 비어 있으면 `CKR_TEMPLATE_INCOMPLETE`, 파라미터 형식 오류 시 `CKR_ARGUMENTS_BAD`.
+`NCMP_CMD_OBJECT_ADD`(0x0038)는 `C_CreateObject`로 임포트된 키를 토큰에 등록한다. 요청 param0=class(u32), param1=key_type(u32), param2=키 데이터(CKA_VALUE). 응답 파라미터 없음. 어댑터 `ncmp_object_add`(`ncmp_object.c:43`), 훅 `token_specific_object_add`(`ncmp_specific.c:1630`), 처리(모의) `mcu_scheduler.c:937`. 키 데이터가 비어 있으면 `CKR_TEMPLATE_INCOMPLETE`, 파라미터 형식 오류 시 `CKR_ARGUMENTS_BAD`.
 
-`NCMP_CMD_OBJECT_SET_ATTR`(0x0039)는 키 객체의 변경 속성을 토큰에 전달하여 검증한다(`C_SetAttributeValue`/`C_CopyObject`). 요청 param0=class(u32), param1=key_type(u32), param2=직렬화 속성 목록. 속성 목록은 자기 기술형이다: `count(u32)` 다음에 `count`개의 `{ type(u32) | len(u32) | value[len] }`. 응답 파라미터 없음. 어댑터 `ncmp_object_set_attrs`(`ncmp_object.c:51`), 훅 `token_specific_set_attribute_values`(`ncmp_specific.c:1394`, 직렬화 `ncmp_serialize_template` `:1304`), 처리(모의) `mcu_scheduler.c:638`. 목록이 형식에 맞지 않으면 `CKR_ATTRIBUTE_VALUE_INVALID`. STDLL은 전달 후 직렬화 버퍼를 `ncmp_secure_zero`로 소거한다(변경 속성이 키 바이트를 포함할 수 있음).
+`NCMP_CMD_OBJECT_SET_ATTR`(0x0039)는 키 객체의 변경 속성을 토큰에 전달하여 검증한다(`C_SetAttributeValue`/`C_CopyObject`). 요청 param0=class(u32), param1=key_type(u32), param2=직렬화 속성 목록. 속성 목록은 자기 기술형이다: `count(u32)` 다음에 `count`개의 `{ type(u32) | len(u32) | value[len] }`. 응답 파라미터 없음. 어댑터 `ncmp_object_set_attrs`(`ncmp_object.c:51`), 훅 `token_specific_set_attribute_values`(`ncmp_specific.c:1666`, 직렬화 `ncmp_serialize_template` `:1576`), 처리(모의) `mcu_scheduler.c:964`. 목록이 형식에 맞지 않으면 `CKR_ATTRIBUTE_VALUE_INVALID`. STDLL은 전달 후 직렬화 버퍼를 `ncmp_secure_zero`로 소거한다(변경 속성이 키 바이트를 포함할 수 있음).
 
 그림 6-2. OBJECT_ADD 호출 시퀀스
 
@@ -811,7 +811,7 @@ sequenceDiagram
 - 기본(매크로 미정의): 물리 토큰이 컨텍스트를 소유한다. INIT이 컨텍스트 id를 반환하고 UPDATE/FINAL이 그 id를 전달하며 토큰이 상태를 보관한다(모의: `mcu_scheduler.c`의 `digest_ctx[]`/`gcm_ctx[]` 테이블).
 - `NCMP_HOST_MANAGED_CTX`(매크로 정의): 토큰이 무상태가 된다(HSM 저장 공간 부족 대응). 토큰은 INIT과 매 UPDATE에서 컨텍스트 blob 전체를 반환하고 UPDATE/FINAL에서 blob을 다시 받는다. 데몬 `comm_thread`가 blob을 호스트측(슬롯별 `host_ctx` 테이블, 단일 소비자라 무락)에 보관하고 작은 id로 중계하므로 STDLL과 어댑터는 변경되지 않는다.
 
-규약: `param0`은 INIT 응답과 UPDATE/FINAL 요청에서 컨텍스트 슬롯(STDLL=id, 토큰=blob)이며, 연산 데이터는 `param1` 이후에 온다. 범용 브리지는 `comm_thread.c`의 `ctx_phase_of()`(`comm_thread.c:60`)로 대상 opcode를 INIT/UPDATE/FINAL로 분류하고, `ctx_xform_request()`(`:96`, 전송 전 id→blob 치환)와 `ctx_xform_response()`(`:159`, INIT: blob→id 할당·저장, UPDATE: blob 저장 후 param0 제거, FINAL: 해제)가 수행한다. 컨텍스트 blob 최대 크기는 `NCMP_HOST_CTX_BLOB_MAX`(256, `ncmp_cmd.h:187`)이며, STDLL은 UPDATE 청크에 이만큼 여유를 두어(`NCMP_DIGEST_UPDATE_MAX_DATA`) id→blob 치환 시 프레임이 넘치지 않게 한다.
+규약: `param0`은 INIT 응답과 UPDATE/FINAL 요청에서 컨텍스트 슬롯(STDLL=id, 토큰=blob)이며, 연산 데이터는 `param1` 이후에 온다. 범용 브리지는 `comm_thread.c`의 `ctx_phase_of()`(`comm_thread.c:60`)로 대상 opcode를 INIT/UPDATE/FINAL로 분류하고, `ctx_xform_request()`(`comm_thread.c:96`, 전송 전 id→blob 치환)와 `ctx_xform_response()`(`comm_thread.c:159`, INIT: blob→id 할당·저장, UPDATE: blob 저장 후 param0 제거, FINAL: 해제)가 수행한다. 컨텍스트 blob 최대 크기는 `NCMP_HOST_CTX_BLOB_MAX`(256, `ncmp_cmd.h:191`)이며, STDLL은 UPDATE 청크에 이만큼 여유를 두어(`NCMP_MP_UPDATE_MAX_DATA`) id→blob 치환 시 프레임이 넘치지 않게 한다.
 
 표 6-8은 대상 CI와 두 모델에서의 동작을 정리한다.
 
@@ -871,7 +871,7 @@ STDLL PKCS#11 바인딩 현황: 다이제스트 멀티파트(`t_sha_*`)와 AES-G
 | `NCMP_ERR_USB`/`TRUNCATED` | `CKR_DEVICE_ERROR` | `ncmp_ckr.c:37-39` |
 | `NCMP_ERR_VERSION`/`STATE`/`MUTEX`/기타 | `CKR_GENERAL_ERROR` | `ncmp_ckr.c:41-45` |
 
-`CKR_*` 부분집합은 `ncmp_ckr.h:16-30`에 정의된다. 모의 토큰은 `MOCK_CKR_*` 코드를 `ack`에 실으며 그 값은 `CKR_*`와 수치가 동일하다(`mcu_scheduler.c:21-32`).
+`CKR_*` 부분집합은 `ncmp_ckr.h:16-30`에 정의된다. 모의 토큰은 `MOCK_CKR_*` 코드를 `ack`에 실으며 그 값은 `CKR_*`와 수치가 동일하다(`mcu_scheduler.c:21-35`).
 
 #### 6.5.3 오류 처리 및 전파 정책
 
@@ -934,11 +934,11 @@ stateDiagram-v2
 
 ### 7.3 로그인 및 재인증
 
-일반 로그인은 6.4.1절 그림 6-1을 따른다. 문맥 특정 재인증은 `CKA_ALWAYS_AUTHENTICATE` 키 사용 시 로그인 상태를 유지한 채 사용자 PIN을 재검증하는 경로이며, 실패 시 `CKR_PIN_INCORRECT`, 미로그인 상태에서는 `CKR_USER_NOT_LOGGED_IN`을 반환한다(`mcu_scheduler.c:420-431`).
+일반 로그인은 6.4.1절 그림 6-1을 따른다. 문맥 특정 재인증은 `CKA_ALWAYS_AUTHENTICATE` 키 사용 시 로그인 상태를 유지한 채 사용자 PIN을 재검증하는 경로이며, 실패 시 `CKR_PIN_INCORRECT`, 미로그인 상태에서는 `CKR_USER_NOT_LOGGED_IN`을 반환한다(`mcu_scheduler.c:749-760`).
 
 ### 7.4 난수 생성 및 키 생성
 
-RNG는 `token_specific_rng`(`ncmp_specific.c:498`) → `ncmp_crypto_rng`(`:513`) → `NCMP_CMD_RNG`로 전달된다. `NCMP_MAX_PARAM_SIZE`(65512 byte) 초과 요청은 STDLL이 분할 처리한다(`ncmp_specific.c:511`). AES 키 생성(`token_specific_aes_key_gen`, `:849`)은 `ncmp_symkey_gen`→`ncmp_gen_random`→`ncmp_crypto_rng`(`:854/837/819`)로 평문 대칭 키를 생성한다.
+RNG는 `token_specific_rng`(`ncmp_specific.c:508`) → `ncmp_crypto_rng`(`:523`) → `NCMP_CMD_RNG`로 전달된다. `NCMP_MAX_PARAM_SIZE`(65512 byte) 초과 요청은 STDLL이 분할 처리한다(`ncmp_specific.c:521`). AES 키 생성(`token_specific_aes_key_gen`, `:1122`)은 `ncmp_symkey_gen`→`ncmp_gen_random`→`ncmp_crypto_rng`(`:854/837/819`)로 평문 대칭 키를 생성한다.
 
 ### 7.5 대칭 암복호 (GCM/CTR)
 
@@ -968,7 +968,7 @@ sequenceDiagram
 
 ### 7.6 다이제스트 (단발/다중 파트)
 
-단발은 `NCMP_CMD_DIGEST` 1회 왕복이다. 다중 파트는 `token_specific_sha_init`(`:533`)이 지역 컨텍스트만 할당하고, 첫 `sha_update`/`sha_final` 시점에 `ncmp_digest_ensure_ctx`(`:565`)가 `NCMP_CMD_DIGEST_INIT`으로 토큰 측 컨텍스트를 지연 생성한다(`:577`). 이후 `DIGEST_UPDATE`(`:606`), `DIGEST_FINAL`(`:638`) 순으로 진행하며, 종료 시 토큰이 컨텍스트를 해제한다.
+단발은 `NCMP_CMD_DIGEST` 1회 왕복이다. 다중 파트는 `token_specific_sha_init`(`:551`)이 지역 컨텍스트만 할당하고, 첫 `sha_update`/`sha_final` 시점에 `ncmp_digest_ensure_ctx`(`:583`)가 `NCMP_CMD_DIGEST_INIT`으로 토큰 측 컨텍스트를 지연 생성한다(`:595`). 이후 `DIGEST_UPDATE`(`:624`), `DIGEST_FINAL`(`:657`) 순으로 진행하며, 종료 시 토큰이 컨텍스트를 해제한다.
 
 ### 7.7 양자내성 암호 (ML-DSA / ML-KEM)
 
@@ -990,7 +990,7 @@ sequenceDiagram
     Note over A,B: 양측 ss 일치(공유 비밀)
 ```
 
-강도는 키별 `CKA_PARAMETER_SET`으로 선택한다. ML-DSA 서명 길이는 파라미터 세트별로 결정된다(`ncmp_mldsa_lens`, `ncmp_specific.c:871`: `CKP_ML_DSA_44`=2420, `_65`=3309, `_87`=4627, `ncmp_specific.c:882-884`). PQC 키는 불투명 블롭으로 `CKA_VALUE`에 저장되며, 개인 블롭은 공개 블롭을 접두사로 포함한다(`ncmp_crypto.h:82-87`).
+강도는 키별 `CKA_PARAMETER_SET`으로 선택한다. ML-DSA 서명 길이는 파라미터 세트별로 결정된다(`ncmp_mldsa_lens`, `ncmp_specific.c:1144`: `CKP_ML_DSA_44`=2420, `_65`=3309, `_87`=4627, `ncmp_specific.c:1155-1157`). PQC 키는 불투명 블롭으로 `CKA_VALUE`에 저장되며, 개인 블롭은 공개 블롭을 접두사로 포함한다(`ncmp_crypto.h:82-87`).
 
 ### 7.8 토큰 초기화 (C_InitToken)
 
@@ -1025,7 +1025,7 @@ sequenceDiagram
     end
 ```
 
-세부 절차와 정의 위치는 5.1.4절을 참조한다. 실패·성공 경로 모두 임시 비밀 버퍼를 소거한 뒤 반환한다(`ncmp_specific.c:440-448`).
+세부 절차와 정의 위치는 5.1.4절을 참조한다. 실패·성공 경로 모두 임시 비밀 버퍼를 소거한 뒤 반환한다(`ncmp_specific.c:450-458`).
 
 ### 7.9 세션/토큰 상태 전이 종합
 
@@ -1037,41 +1037,41 @@ sequenceDiagram
 
 ### 8.1 지원 알고리즘/메커니즘
 
-메커니즘 테이블은 `ncmp_mech_list[]`(`ncmp_specific.c:99`)에 정의된다. 표 8-1은 광고 메커니즘을 정리한다.
+메커니즘 테이블은 `ncmp_mech_list[]`(`ncmp_specific.c:109`)에 정의된다. 표 8-1은 광고 메커니즘을 정리한다.
 
 표 8-1. 지원 메커니즘
 
 | 알고리즘 | CKM 심볼 | 키 길이/모드 | 지원 연산(플래그) | 정의 위치 |
 |---|---|---|---|---|
-| AES-GCM | `CKM_AES_GCM` | 16~32 byte / AEAD | 암/복호(`CKF_ENCRYPT\|DECRYPT`) | `ncmp_specific.c:101` |
-| AES-CTR | `CKM_AES_CTR` | 16~32 byte / 스트림 | 암/복호 | `ncmp_specific.c:102` |
-| SHA-256 | `CKM_SHA256` | - | 다이제스트(`CKF_DIGEST`) | `ncmp_specific.c:104` |
-| SHA-512 | `CKM_SHA512` | - | 다이제스트 | `ncmp_specific.c:105` |
-| SHA3-224 | `CKM_SHA3_224` | - | 다이제스트 | `ncmp_specific.c:106` |
-| SHA3-256 | `CKM_SHA3_256` | - | 다이제스트 | `ncmp_specific.c:107` |
-| SHA3-384 | `CKM_SHA3_384` | - | 다이제스트 | `ncmp_specific.c:108` |
-| SHA3-512 | `CKM_SHA3_512` | - | 다이제스트 | `ncmp_specific.c:109` |
-| SHAKE-128 KDF | `CKM_SHAKE_128_KEY_DERIVATION` | 가변 출력 / XOF | 키 유도(`CKF_DERIVE`) | `ncmp_specific.c:111` |
-| SHAKE-256 KDF | `CKM_SHAKE_256_KEY_DERIVATION` | 가변 출력 / XOF | 키 유도 | `ncmp_specific.c:112` |
-| ML-KEM 키생성 | `CKM_ML_KEM_KEY_PAIR_GEN` | 강도 1/3/5 | 키쌍 생성(`CKF_GENERATE_KEY_PAIR`) | `ncmp_specific.c:114` |
-| ML-KEM | `CKM_ML_KEM` | 강도 1/3/5 | 캡슐화/복호캡슐화(`CKF_ENCAPSULATE\|DECAPSULATE`) | `ncmp_specific.c:115` |
-| ML-DSA 키생성 | `CKM_ML_DSA_KEY_PAIR_GEN` | 강도 1/3/5 | 키쌍 생성 | `ncmp_specific.c:117` |
-| ML-DSA | `CKM_ML_DSA` | 강도 1/3/5 | 서명/검증(`CKF_SIGN\|VERIFY`) | `ncmp_specific.c:118` |
+| AES-GCM | `CKM_AES_GCM` | 16~32 byte / AEAD | 암/복호(`CKF_ENCRYPT\|DECRYPT`) | `ncmp_specific.c:111` |
+| AES-CTR | `CKM_AES_CTR` | 16~32 byte / 스트림 | 암/복호 | `ncmp_specific.c:112` |
+| SHA-256 | `CKM_SHA256` | - | 다이제스트(`CKF_DIGEST`) | `ncmp_specific.c:114` |
+| SHA-512 | `CKM_SHA512` | - | 다이제스트 | `ncmp_specific.c:115` |
+| SHA3-224 | `CKM_SHA3_224` | - | 다이제스트 | `ncmp_specific.c:116` |
+| SHA3-256 | `CKM_SHA3_256` | - | 다이제스트 | `ncmp_specific.c:117` |
+| SHA3-384 | `CKM_SHA3_384` | - | 다이제스트 | `ncmp_specific.c:118` |
+| SHA3-512 | `CKM_SHA3_512` | - | 다이제스트 | `ncmp_specific.c:119` |
+| SHAKE-128 KDF | `CKM_SHAKE_128_KEY_DERIVATION` | 가변 출력 / XOF | 키 유도(`CKF_DERIVE`) | `ncmp_specific.c:121` |
+| SHAKE-256 KDF | `CKM_SHAKE_256_KEY_DERIVATION` | 가변 출력 / XOF | 키 유도 | `ncmp_specific.c:122` |
+| ML-KEM 키생성 | `CKM_ML_KEM_KEY_PAIR_GEN` | 강도 1/3/5 | 키쌍 생성(`CKF_GENERATE_KEY_PAIR`) | `ncmp_specific.c:124` |
+| ML-KEM | `CKM_ML_KEM` | 강도 1/3/5 | 캡슐화/복호캡슐화(`CKF_ENCAPSULATE\|DECAPSULATE`) | `ncmp_specific.c:125` |
+| ML-DSA 키생성 | `CKM_ML_DSA_KEY_PAIR_GEN` | 강도 1/3/5 | 키쌍 생성 | `ncmp_specific.c:127` |
+| ML-DSA | `CKM_ML_DSA` | 강도 1/3/5 | 서명/검증(`CKF_SIGN\|VERIFY`) | `ncmp_specific.c:128` |
 
-메커니즘 개수는 `ncmp_mech_list_len`(`ncmp_specific.c:120-121`)으로 산출한다. 다이제스트 메커니즘의 와이어 식별자는 `NCMP_MECH_SHA256`(0x250)·`SHA512`(0x270)·`SHA3_256`(0x2B0)·`SHA3_224`(0x2B5)·`SHA3_384`(0x2C0)·`SHA3_512`(0x2D0)이다(`ncmp_cmd.h:172-178`). ML-DSA 서명 길이는 7.7절을 참조한다. ML-KEM 공유 비밀 길이 `NCMP_MLKEM_SS_LEN = 32`(`ncmp_specific.c:868`).
+메커니즘 개수는 `ncmp_mech_list_len`(`ncmp_specific.c:130-131`)으로 산출한다. 다이제스트 메커니즘의 와이어 식별자는 `NCMP_MECH_SHA256`(0x250)·`SHA512`(0x270)·`SHA3_256`(0x2B0)·`SHA3_224`(0x2B5)·`SHA3_384`(0x2C0)·`SHA3_512`(0x2D0)이다(`ncmp_cmd.h:211-217`). ML-DSA 서명 길이는 7.7절을 참조한다. ML-KEM 공유 비밀 길이 `NCMP_MLKEM_SS_LEN = 32`(`ncmp_specific.c:1141`).
 
 부수 인프라 연산: 난수 생성(`NCMP_CMD_RNG`), AES 키 생성(`t_aes_key_gen`). 이들은 메커니즘 테이블에는 없으나 키 생성·엔트로피 공급에 필요하다.
 
 ### 8.2 지원 객체 타입 및 속성
 
-키쌍 객체는 openCryptoki 공통 계층의 PQC 지원(`pqc_supported.c`, `mech_pqc.c`)을 통해 처리된다. PQC 키는 `struct pqc_oid`가 정의하는 블롭 크기를 사용하며(강도별 크기 산출 `ncmp_mldsa_lens` `ncmp_specific.c:871`, `ncmp_mlkem_lens` `:890`), 개인 키 블롭은 공개 키 블롭을 접두사로 포함한 채 `CKA_VALUE`에 저장된다(`ncmp_crypto.h:82-87`). 강도 선택 속성은 `CKA_PARAMETER_SET`이다(`ncmp_specific.c:97`).
+키쌍 객체는 openCryptoki 공통 계층의 PQC 지원(`pqc_supported.c`, `mech_pqc.c`)을 통해 처리된다. PQC 키는 `struct pqc_oid`가 정의하는 블롭 크기를 사용하며(강도별 크기 산출 `ncmp_mldsa_lens` `ncmp_specific.c:1144`, `ncmp_mlkem_lens` `:1163`), 개인 키 블롭은 공개 키 블롭을 접두사로 포함한 채 `CKA_VALUE`에 저장된다(`ncmp_crypto.h:82-87`). 강도 선택 속성은 `CKA_PARAMETER_SET`이다(`ncmp_specific.c:107`).
 
 표 8-2. 주요 지원 객체/속성
 
 | 항목 | 심볼명 | 값/범위 | 정의 위치 | 비고 |
 |---|---|---|---|---|
-| PQC 강도 선택 | `CKA_PARAMETER_SET` | `CKP_ML_{DSA,KEM}_*` | `ncmp_specific.c:97` | 키별 강도 지정. |
-| 대칭 키 값 | `CKA_VALUE` | 16/24/32 byte | `ncmp_specific.c:849` | AES 평문 키. |
+| PQC 강도 선택 | `CKA_PARAMETER_SET` | `CKP_ML_{DSA,KEM}_*` | `ncmp_specific.c:107` | 키별 강도 지정. |
+| 대칭 키 값 | `CKA_VALUE` | 16/24/32 byte | `ncmp_specific.c:1122` | AES 평문 키. |
 | PQC 키 값 | `CKA_VALUE` | 강도별 블롭 | `ncmp_crypto.h:82-87` | 개인=공개 접두사 포함. |
 
 세부 CKA_ 속성 지원 범위는 openCryptoki 공통 계층에 위임되며, NCMP 고유 강제 속성은 위 항목에 한정된다. 그 외 상세 목록은 TBD(확인 필요: 공통 계층 속성 위임 범위 정밀 정리).
@@ -1102,8 +1102,8 @@ sequenceDiagram
 | USB 전송 타임아웃 | `NCMP_USB_TIMEOUT_MS` | `5000` | ms | `usb_transport.c:47` | libusb 왕복. |
 | 리슨 백로그 | (하드코딩) | `8` | 정수 | `ncmp_ipc.c:120` | 하드코딩 리터럴. |
 | 데몬 대기 주기 | (하드코딩) | `100` | ms | `main.c:198` | 하드코딩 리터럴. |
-| 최대 PIN 길이(모의) | `NCMP_MOCK_PIN_MAX` | `32` | byte | `mock_token_ncmp.h:43` | 모의 저장 상한. |
-| 최소 PIN 길이(모의) | `MOCK_MIN_PIN_LEN` | `4` | byte | `mcu_scheduler.c:35` | GET_TOKEN_PARAMS 응답. |
+| 최대 PIN 길이(모의) | `NCMP_MOCK_PIN_MAX` | `32` | byte | `mock_token_ncmp.h:60` | 모의 저장 상한. |
+| 최소 PIN 길이(모의) | `MOCK_MIN_PIN_LEN` | `4` | byte | `mcu_scheduler.c:38` | GET_TOKEN_PARAMS 응답. |
 
 ### 8.4 보안 가정
 
@@ -1114,11 +1114,11 @@ sequenceDiagram
 | 항목 | 심볼명/근거 | 내용 | 정의 위치 |
 |---|---|---|---|
 | 보안키 토큰 | `secure_key_token` | 물리 토큰이 키·PIN 비밀을 보관, STDLL은 프록시. | `tok_struct.h:35` |
-| 임시 비밀 소거 | `ncmp_secure_zero` | InitToken 후 PIN/라벨/식별 임시 버퍼 소거. | `ncmp_specific.c:254`, 호출 `:442-447` |
-| 보호 인증 경로 | `NCMP_LOGIN_FLAG_PROTECTED_AUTH` | 와이어 PIN 비움, 토큰 패드 입력. | `ncmp_cmd.h:139`, 판정 `ncmp_specific.c:292-295` |
-| 문맥 특정 재인증 | `NCMP_LOGIN_FLAG_CONTEXT` | 로그인 유지 재검증. | `ncmp_cmd.h:140`, 판정 `ncmp_specific.c:296-297` |
+| 임시 비밀 소거 | `ncmp_secure_zero` | InitToken 후 PIN/라벨/식별 임시 버퍼 소거. | `ncmp_specific.c:264`, 호출 `:452-457` |
+| 보호 인증 경로 | `NCMP_LOGIN_FLAG_PROTECTED_AUTH` | 와이어 PIN 비움, 토큰 패드 입력. | `ncmp_cmd.h:148`, 판정 `ncmp_specific.c:302-305` |
+| 문맥 특정 재인증 | `NCMP_LOGIN_FLAG_CONTEXT` | 로그인 유지 재검증. | `ncmp_cmd.h:149`, 판정 `ncmp_specific.c:306-307` |
 | 강건 뮤텍스 | `PTHREAD_MUTEX_ROBUST` | 소유자 사망 복구로 교착 방지. | `ncmp_mutex.c:32,53` |
-| SO 게이팅(SET_UTC) | `login_user == NCMP_CKU_SO` | UTC 설정은 SO 로그인 필수. | `mcu_scheduler.c:574-577` |
+| SO 게이팅(SET_UTC) | `login_user == NCMP_CKU_SO` | UTC 설정은 SO 로그인 필수. | `mcu_scheduler.c:903-906` |
 | SHM 접근 권한 | (하드코딩) | `shm_open` 모드 0600. | `ncmp_shm.c:46,123` |
 
 표 8-5. 보안 가정(운영)
@@ -1146,7 +1146,7 @@ sequenceDiagram
 | 명령 타임아웃 | 통신 스레드에 명령별 타임아웃 없음(생산자 스핀 예산 기반). | `ncmp_slot.c:67-77` |
 | GETMECHLIST CI | opcode 예약, 와이어 구현 예약 상태. | `ncmp_cmd.h:36` |
 | 객체 삭제/열거/크기 | `C_DestroyObject`/`C_FindObjects*`/`C_GetObjectSize`는 공통 계층 전용 훅이 없어 토큰에 전달되지 않음(로컬 처리). 삭제 알림용 훅 부재. | `tok_spec_struct.h`(객체 훅 4종만 존재) |
-| 비키 객체 | 데이터·인증서 객체는 키 데이터가 없어 토큰에 등록하지 않음. | `token_specific_object_add`(`ncmp_specific.c:1358`) |
+| 비키 객체 | 데이터·인증서 객체는 키 데이터가 없어 토큰에 등록하지 않음. | `token_specific_object_add`(`ncmp_specific.c:1630`) |
 
 ## 9. 부록
 
@@ -1212,14 +1212,14 @@ struct ncmp_private_data {
 | 심볼명 | 종류 | 정의 위치 | 참조 절 |
 |---|---|---|---|
 | `enum ncmp_opcode` | opcode 열거형 | `ncmp_cmd.h:32` | 6.2 |
-| `ncmp_cmd_opcode` | opcode 추출 함수 | `ncmp_cmd.h:195` | 6.1 |
+| `ncmp_cmd_opcode` | opcode 추출 함수 | `ncmp_cmd.h:234` | 6.1 |
 | `ncmp_err_to_ckr` | 오류 매핑 함수 | `ncmp_ckr.c:12` | 6.5.2 |
-| `ncmp_wire_encode`/`decode` | 프레임 직렬화/역직렬화 | `ncmp_wire.c:52`/`:177` | 6.3 |
+| `ncmp_wire_encode`/`decode` | 프레임 직렬화/역직렬화 | `ncmp_wire.c:52`/`:187` | 6.3 |
 | `ncmp_slot_bind` | 슬롯 바인딩 | `ncmp_slotmap.c:105` | 5.3 |
 | `ncmp_mutex_lock` | 강건 뮤텍스 잠금 | `ncmp_mutex.c:39` | 5.3 |
-| `ncmpd_comm_thread` | 통신 스레드 | `comm_thread.c:152` | 5.2.3 |
-| `token_specific_init_token` | InitToken 훅 | `ncmp_specific.c:382` | 5.1.4, 7.8 |
-| `token_specific_login` | Login 훅 | `ncmp_specific.c:272` | 5.1.4, 7.3 |
+| `ncmpd_comm_thread` | 통신 스레드 | `comm_thread.c:443` | 5.2.3 |
+| `token_specific_init_token` | InitToken 훅 | `ncmp_specific.c:392` | 5.1.4, 7.8 |
+| `token_specific_login` | Login 훅 | `ncmp_specific.c:282` | 5.1.4, 7.3 |
 | `ncmp_admin_login` | 로그인 어댑터 | `ncmp_admin.c:139` | 6.4.1 |
 | `ncmp_admin_get_token_params` | 토큰 파라미터 조회 | `ncmp_admin.c:100` | 6.4.4 |
 
@@ -1257,8 +1257,8 @@ struct ncmp_private_data {
 
 | 심볼명 | 값 | 정의 위치 | 참조 절 |
 |---|---|---|---|
-| `MOCK_MIN_PIN_LEN` | 4 | `mcu_scheduler.c:35` | 8.3 |
-| `NCMP_AES_BLOCK` | 16 | `ncmp_cmd.h:160` | 6.4.5 |
+| `MOCK_MIN_PIN_LEN` | 4 | `mcu_scheduler.c:38` | 8.3 |
+| `NCMP_AES_BLOCK` | 16 | `ncmp_cmd.h:199` | 6.4.5 |
 | `NCMP_DEFAULT_MAX_INFLIGHT` | 4 | `ncmp_limits.h:82` | 8.3 |
 | `NCMP_DEV_CONTAINER_COUNT` | 4 | `ncmp_limits.h:74` | 8.3 |
 | `NCMP_DEV_CONTAINER_SIZE` | 65536 | `ncmp_limits.h:75` | 8.3 |
@@ -1271,15 +1271,15 @@ struct ncmp_private_data {
 | `NCMP_MAX_PARAM_COUNT` | 8 | `ncmp_limits.h:31` | 6.3 |
 | `NCMP_MAX_PARAM_SIZE` | 65512 | `ncmp_limits.h:47` | 6.3 |
 | `NCMP_MAX_PAYLOAD_SIZE` | 65512 | `ncmp_limits.h:55` | 6.3 |
-| `NCMP_MLKEM_SS_LEN` | 32 | `ncmp_specific.c:868` | 8.1 |
-| `NCMP_MOCK_PIN_MAX` | 32 | `mock_token_ncmp.h:43` | 8.3 |
+| `NCMP_MLKEM_SS_LEN` | 32 | `ncmp_specific.c:1141` | 8.1 |
+| `NCMP_MOCK_PIN_MAX` | 32 | `mock_token_ncmp.h:60` | 8.3 |
 | `NCMP_QUEUE_DEPTH` | 32 | `ncmp_queue.h:38` | 8.3 |
 | `NCMP_SHM_MAGIC` | 0x4E434D50 | `ncmp_shm.h:19` | 4.5 |
 | `NCMP_SHM_VERSION` | 2 | `ncmp_shm.h:20` | 4.5 |
-| `NCMP_TOKEN_INFO_WIRE_SIZE` | 104 | `ncmp_cmd.h:124` | 6.4.6 |
-| `NCMP_TOKEN_UTC_LEN` | 16 | `ncmp_cmd.h:151` | 6.4.3 |
-| `NCMP_TI_LABEL_LEN` | 32 | `ncmp_cmd.h:108` | 6.4.4 |
-| `NCMP_TI_SERIAL_LEN` | 16 | `ncmp_cmd.h:109` | 6.4.4 |
+| `NCMP_TOKEN_INFO_WIRE_SIZE` | 104 | `ncmp_cmd.h:133` | 6.4.6 |
+| `NCMP_TOKEN_UTC_LEN` | 16 | `ncmp_cmd.h:160` | 6.4.3 |
+| `NCMP_TI_LABEL_LEN` | 32 | `ncmp_cmd.h:117` | 6.4.4 |
+| `NCMP_TI_SERIAL_LEN` | 16 | `ncmp_cmd.h:118` | 6.4.4 |
 | `NCMP_USB_TIMEOUT_MS` | 5000 | `usb_transport.c:47` | 8.3 |
 | `NCMP_WIRE_ALIGN` | 4 | `ncmp_limits.h:58` | 6.3 |
 | `NCMP_WIRE_FRAME_OVERHEAD` | 24 | `ncmp_limits.h:39` | 6.3 |

@@ -25,6 +25,17 @@ option(ENABLE_MOCK_TOKEN
        "Build the software mock token and route the daemon transport to it"
        OFF)
 
+# Multipart context placement (digest, AES-GCM): OFF keeps the context on the
+# physical token; ON makes the token stateless and has the daemon's comm_thread
+# manage the context blobs host-side (HSM storage is scarce). See
+# docs/command-interface.md and ncmp/daemon/comm_thread.c.
+option(NCMP_HOST_MANAGED_CTX
+       "Keep multipart operation contexts host-side (comm_thread) instead of on the token"
+       OFF)
+if(NCMP_HOST_MANAGED_CTX)
+    add_compile_definitions(NCMP_HOST_MANAGED_CTX)
+endif()
+
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 # Public headers shared by every target.

@@ -45,6 +45,15 @@ const char model[] = "NCMP";
 const char descr[] = "NCMP USB Token";
 const char label[] = "ncmptok";
 
+/*
+ * Max data bytes per multipart UPDATE (digest, AES-GCM). Small enough that the
+ * frame still fits one device container after a NCMP_HOST_MANAGED_CTX daemon
+ * swaps the 4-byte context id for the full context blob: reserve the 8-entry
+ * length array and NCMP_HOST_CTX_BLOB_MAX headroom. Safe in both context models.
+ */
+#define NCMP_MP_UPDATE_MAX_DATA                                                \
+    (NCMP_MAX_PAYLOAD_SIZE - NCMP_PARAM_LEN_ARRAY_SIZE - NCMP_HOST_CTX_BLOB_MAX)
+
 /** Per-token private state held in STDLL_TokData_t::private_data. */
 struct ncmp_private_data {
     ncmp_client_t      client;    /**< Connection to ncmpd (socket + SHM). */
@@ -525,9 +534,17 @@ CK_RV token_specific_rng(STDLL_TokData_t *tokdata, CK_BYTE *output,
 static void ncmp_sha_free(STDLL_TokData_t *tokdata, SESSION *sess,
                           CK_BYTE *context, CK_ULONG context_len)
 {
-    UNUSED(tokdata);
+    struct ncmp_private_data *priv = tokdata ? tokdata->private_data : NULL;
+
     UNUSED(sess);
     UNUSED(context_len);
+    /* On abort (no sha_final), release the still-live token/host context. A
+     * finalized context was marked NCMP_DIGEST_CTX_NONE, so this is skipped.
+     * Best-effort: teardown must not fail on a transport error. */
+    if (priv != NULL && context != NULL &&
+        *(uint32_t *)context != NCMP_DIGEST_CTX_NONE)
+        (void)ncmp_crypto_ctx_free(&priv->client, priv->ncmp_slot,
+                                   *(uint32_t *)context, NCMP_CTX_KIND_DIGEST);
     free(context);
 }
 
@@ -599,11 +616,12 @@ CK_RV token_specific_sha_update(STDLL_TokData_t *tokdata, DIGEST_CONTEXT *ctx,
     if (rc != CKR_OK)
         return rc;
 
-    /* Feed the token in <=32KB parameter-sized chunks: [ctx_id | data]. */
+    /* Feed the token in NCMP_MP_UPDATE_MAX_DATA chunks (headroom for the daemon
+     * id->blob swap; see the macro near the top of this file). */
     while (done < in_data_len) {
         CK_ULONG remaining = in_data_len - done;
-        uint32_t chunk = (remaining > NCMP_MAX_PARAM_SIZE)
-                             ? NCMP_MAX_PARAM_SIZE : (uint32_t)remaining;
+        uint32_t chunk = (remaining > NCMP_MP_UPDATE_MAX_DATA)
+                             ? NCMP_MP_UPDATE_MAX_DATA : (uint32_t)remaining;
         CK_RV rv = ncmp_crypto_digest_update(&priv->client, priv->ncmp_slot, id,
                                              in_data + done, chunk);
         if (rv != CKR_OK)
@@ -638,13 +656,13 @@ CK_RV token_specific_sha_final(STDLL_TokData_t *tokdata, DIGEST_CONTEXT *ctx,
 
     rc = ncmp_crypto_digest_final(&priv->client, priv->ncmp_slot, id, out_data,
                                   (uint32_t)*out_data_len, &out_len);
+    /* The token/daemon releases the context on FINAL regardless of status, so
+     * mark ours consumed now (prevents a redundant CTX_FREE at teardown). */
+    *(uint32_t *)ctx->context = NCMP_DIGEST_CTX_NONE;
     if (rc != CKR_OK)
         return rc;
     if (out_len != hsize)
         return CKR_FUNCTION_FAILED;
-
-    /* Token freed the context; mark ours consumed. */
-    *(uint32_t *)ctx->context = NCMP_DIGEST_CTX_NONE;
     *out_data_len = hsize;
     return CKR_OK;
 }
@@ -677,22 +695,54 @@ CK_RV token_specific_sha(STDLL_TokData_t *tokdata, DIGEST_CONTEXT *ctx,
     return CKR_OK;
 }
 
+/** Free the AES_GCM_CONTEXT allocated by token_specific_aes_gcm_init. */
+static void ncmp_gcm_free(STDLL_TokData_t *tokdata, SESSION *sess,
+                          CK_BYTE *context, CK_ULONG context_len)
+{
+    struct ncmp_private_data *priv = tokdata ? tokdata->private_data : NULL;
+    AES_GCM_CONTEXT *g = (AES_GCM_CONTEXT *)context;
+
+    UNUSED(sess);
+    UNUSED(context_len);
+    /* On abort (no *Final), release the still-live token/host context. *Final
+     * clears the "established" flag, so a completed op is skipped. Best-effort. */
+    if (priv != NULL && g != NULL && (g->ulClen & 1u))
+        (void)ncmp_crypto_ctx_free(&priv->client, priv->ncmp_slot,
+                                   (uint32_t)g->ulAlen, NCMP_CTX_KIND_GCM);
+    free(context);
+}
+
 CK_RV token_specific_aes_gcm_init(STDLL_TokData_t *tokdata, SESSION *sess,
                                   ENCR_DECR_CONTEXT *ctx, CK_MECHANISM *mech,
                                   CK_OBJECT_HANDLE key, CK_BYTE encrypt)
 {
-    UNUSED(tokdata);
+    AES_GCM_CONTEXT *context;
+
     UNUSED(sess);
-    UNUSED(ctx);
+    UNUSED(tokdata);
     UNUSED(key);
     UNUSED(encrypt);
 
-    /* The common layer duplicates the GCM params into ctx->mech and records
-     * the key handle in ctx->key, so a proxy token needs no per-init state -
-     * just validate the mechanism carries GCM parameters. */
+    /* The common layer duplicates the GCM params into ctx->mech and records the
+     * key handle in ctx->key; validate the mechanism carries GCM parameters. */
     if (mech->pParameter == NULL ||
         mech->ulParameterLen < sizeof(CK_GCM_PARAMS))
         return CKR_MECHANISM_PARAM_INVALID;
+
+    /* The multipart path (C_EncryptUpdate) needs a context: the common layer
+     * reads context->len for its length math (mech_aes.c). We allocate the
+     * standard AES_GCM_CONTEXT and (ab)use data[]/len for partial-block
+     * buffering; the token-side multipart context id + established flag ride in
+     * the otherwise-unused ulAlen/ulClen fields (see ncmp_gcm_ensure_ctx). The
+     * one-shot path (t_aes_gcm) ignores this context. */
+    context = (AES_GCM_CONTEXT *)calloc(1, sizeof(*context));
+    if (context == NULL)
+        return CKR_HOST_MEMORY;
+
+    ctx->context = (CK_BYTE *)context;
+    ctx->context_len = sizeof(*context);
+    ctx->context_free_func = &ncmp_gcm_free;
+    ctx->state_unsaveable = CK_TRUE;
     return CKR_OK;
 }
 
@@ -754,6 +804,228 @@ CK_RV token_specific_aes_gcm(STDLL_TokData_t *tokdata, SESSION *sess,
 
     *out_data_len = expected_out;
     return CKR_OK;
+}
+
+/**
+ * @brief Establish (lazily) the token-side multipart GCM context for @p ctx.
+ *
+ * On first output the key/IV/AAD/taglen are forwarded (NCMP_CMD_AES_GCM_INIT)
+ * and the returned context id + an "established" flag are stashed in the
+ * otherwise-unused AES_GCM_CONTEXT.ulAlen/ulClen fields (the common layer reads
+ * only context->data/len). Idempotent.
+ */
+static CK_RV ncmp_gcm_ensure_ctx(STDLL_TokData_t *tokdata, ENCR_DECR_CONTEXT *ctx,
+                                 AES_GCM_CONTEXT *g, CK_BYTE encrypt,
+                                 uint32_t *ctx_id)
+{
+    struct ncmp_private_data *priv = tokdata->private_data;
+    CK_GCM_PARAMS *gcm = (CK_GCM_PARAMS *)ctx->mech.pParameter;
+    OBJECT *key_obj = NULL;
+    CK_ATTRIBUTE *key_attr = NULL;
+    uint32_t taglen, id = 0;
+    unsigned long arc;
+    CK_RV rc;
+
+    if (g->ulClen & 1u) {                 /* already established */
+        *ctx_id = (uint32_t)g->ulAlen;
+        return CKR_OK;
+    }
+    if (priv == NULL || gcm == NULL)
+        return CKR_FUNCTION_FAILED;
+    taglen = (uint32_t)(gcm->ulTagBits / 8);
+    if (taglen == 0 || taglen > NCMP_AES_BLOCK)
+        return CKR_MECHANISM_PARAM_INVALID;
+
+    rc = object_mgr_find_in_map1(tokdata, ctx->key, &key_obj, READ_LOCK);
+    if (rc != CKR_OK)
+        return rc;
+    rc = template_attribute_get_non_empty(key_obj->template, CKA_VALUE,
+                                          &key_attr);
+    if (rc != CKR_OK) {
+        object_put(tokdata, key_obj, TRUE);
+        return rc;
+    }
+    arc = ncmp_crypto_aes_gcm_init(&priv->client, priv->ncmp_slot,
+                                   encrypt ? 1 : 0, key_attr->pValue,
+                                   (uint32_t)key_attr->ulValueLen, gcm->pIv,
+                                   (uint32_t)gcm->ulIvLen, gcm->pAAD,
+                                   (uint32_t)gcm->ulAADLen, taglen, &id);
+    object_put(tokdata, key_obj, TRUE);
+    if (arc != CKR_OK)
+        return arc;
+
+    g->ulAlen = id;
+    g->ulClen |= 1u;
+    *ctx_id = id;
+    return CKR_OK;
+}
+
+/** Stream @p data_len bytes through NCMP_CMD_AES_GCM_UPDATE, output to @p out. */
+static CK_RV ncmp_gcm_stream(struct ncmp_private_data *priv, uint32_t ctx_id,
+                             const CK_BYTE *data, CK_ULONG data_len, CK_BYTE *out)
+{
+    CK_ULONG done = 0;
+
+    while (done < data_len) {
+        CK_ULONG remaining = data_len - done;
+        uint32_t chunk = (remaining > NCMP_MP_UPDATE_MAX_DATA)
+                             ? NCMP_MP_UPDATE_MAX_DATA : (uint32_t)remaining;
+        uint32_t olen = 0;
+        unsigned long arc = ncmp_crypto_aes_gcm_update(&priv->client,
+                                                       priv->ncmp_slot, ctx_id,
+                                                       data + done, chunk,
+                                                       out + done, chunk, &olen);
+        if (arc != CKR_OK)
+            return arc;
+        if (olen != chunk)
+            return CKR_FUNCTION_FAILED;
+        done += chunk;
+    }
+    return CKR_OK;
+}
+
+/**
+ * @brief Shared multipart GCM update: output the block-aligned front of
+ *        (buffer || in), buffer the trailing bytes. @p tag_data_len is 0 for
+ *        encrypt and the tag size for decrypt (so the tag is always retained,
+ *        matching the common layer's length math in mech_aes.c).
+ */
+static CK_RV ncmp_gcm_update_common(STDLL_TokData_t *tokdata,
+                                    ENCR_DECR_CONTEXT *ctx, CK_BYTE *in,
+                                    CK_ULONG in_len, CK_BYTE *out,
+                                    CK_ULONG *out_len, CK_BYTE encrypt,
+                                    CK_ULONG tag_data_len)
+{
+    struct ncmp_private_data *priv = tokdata->private_data;
+    AES_GCM_CONTEXT *g = (AES_GCM_CONTEXT *)ctx->context;
+    CK_ULONG total, out_now, rlen, k, from_ctx, from_in;
+    CK_BYTE tmp[2 * AES_BLOCK_SIZE];
+    uint32_t ctx_id = 0;
+    CK_RV rc;
+
+    if (priv == NULL || g == NULL)
+        return CKR_FUNCTION_FAILED;
+
+    total = g->len + in_len;
+    if (total < (CK_ULONG)AES_BLOCK_SIZE + tag_data_len) {
+        out_now = 0;
+    } else {
+        CK_ULONG remain =
+            ((total - tag_data_len) % AES_BLOCK_SIZE) + tag_data_len;
+        out_now = total - remain;
+    }
+    k = (g->len < out_now) ? g->len : out_now; /* bytes taken from the buffer */
+
+    if (out_now > 0) {
+        rc = ncmp_gcm_ensure_ctx(tokdata, ctx, g, encrypt, &ctx_id);
+        if (rc != CKR_OK)
+            return rc;
+        if (k > 0) {
+            rc = ncmp_gcm_stream(priv, ctx_id, g->data, k, out);
+            if (rc != CKR_OK)
+                return rc;
+        }
+        if (out_now - k > 0) {
+            rc = ncmp_gcm_stream(priv, ctx_id, in, out_now - k, out + k);
+            if (rc != CKR_OK)
+                return rc;
+        }
+    }
+
+    /* Buffer the trailing rlen bytes of (buffer || in): leftover of the buffer
+     * then the unconsumed head of in. rlen <= AES_BLOCK_SIZE-1 + tag_data_len. */
+    rlen = total - out_now;
+    from_ctx = g->len - k;
+    from_in = out_now - k;
+    if (from_ctx > 0)
+        memcpy(tmp, g->data + k, from_ctx);
+    if (in_len - from_in > 0)
+        memcpy(tmp + from_ctx, in + from_in, in_len - from_in);
+    memcpy(g->data, tmp, rlen);
+    g->len = rlen;
+
+    *out_len = out_now;
+    return CKR_OK;
+}
+
+CK_RV token_specific_aes_gcm_update(STDLL_TokData_t *tokdata, SESSION *sess,
+                                    ENCR_DECR_CONTEXT *ctx, CK_BYTE *in_data,
+                                    CK_ULONG in_data_len, CK_BYTE *out_data,
+                                    CK_ULONG *out_data_len, CK_BYTE encrypt)
+{
+    CK_GCM_PARAMS *gcm = (CK_GCM_PARAMS *)ctx->mech.pParameter;
+
+    UNUSED(sess);
+    if (gcm == NULL)
+        return CKR_FUNCTION_FAILED;
+    /* Encrypt retains only a partial block; decrypt must also retain the tag. */
+    return ncmp_gcm_update_common(tokdata, ctx, in_data, in_data_len, out_data,
+                                  out_data_len, encrypt,
+                                  encrypt ? 0 : (gcm->ulTagBits / 8));
+}
+
+CK_RV token_specific_aes_gcm_final(STDLL_TokData_t *tokdata, SESSION *sess,
+                                   ENCR_DECR_CONTEXT *ctx, CK_BYTE *out_data,
+                                   CK_ULONG *out_data_len, CK_BYTE encrypt)
+{
+    struct ncmp_private_data *priv = tokdata->private_data;
+    AES_GCM_CONTEXT *g = (AES_GCM_CONTEXT *)ctx->context;
+    CK_GCM_PARAMS *gcm = (CK_GCM_PARAMS *)ctx->mech.pParameter;
+    uint32_t ctx_id = 0, taglen, tlen = 0;
+    unsigned long arc;
+    CK_RV rc;
+
+    UNUSED(sess);
+    if (priv == NULL || g == NULL || gcm == NULL)
+        return CKR_FUNCTION_FAILED;
+    taglen = (uint32_t)(gcm->ulTagBits / 8);
+
+    rc = ncmp_gcm_ensure_ctx(tokdata, ctx, g, encrypt, &ctx_id);
+    if (rc != CKR_OK)
+        return rc;
+
+    if (encrypt) {
+        /* Emit the buffered tail ciphertext, then append the tag. */
+        if (g->len > 0) {
+            rc = ncmp_gcm_stream(priv, ctx_id, g->data, g->len, out_data);
+            if (rc != CKR_OK)
+                return rc;
+        }
+        arc = ncmp_crypto_aes_gcm_final(&priv->client, priv->ncmp_slot, ctx_id, 1,
+                                        NULL, 0, out_data + g->len, taglen,
+                                        &tlen);
+        /* FINAL released the token/host context; don't re-free at teardown. */
+        g->ulClen &= ~1u;
+        if (arc != CKR_OK)
+            return arc;
+        if (tlen != taglen)
+            return CKR_FUNCTION_FAILED;
+        *out_data_len = g->len + taglen;
+        return CKR_OK;
+    }
+
+    /* Decrypt: the buffer holds [tail ciphertext | tag]. */
+    if (g->len < taglen)
+        return CKR_ENCRYPTED_DATA_LEN_RANGE;
+
+    {
+        CK_ULONG ct_tail = g->len - taglen;
+
+        if (ct_tail > 0) {
+            rc = ncmp_gcm_stream(priv, ctx_id, g->data, ct_tail, out_data);
+            if (rc != CKR_OK)
+                return rc;
+        }
+        /* Forward the retained tag for the token to verify. */
+        arc = ncmp_crypto_aes_gcm_final(&priv->client, priv->ncmp_slot, ctx_id, 0,
+                                        g->data + ct_tail, taglen, NULL, 0, NULL);
+        /* FINAL released the token/host context; don't re-free at teardown. */
+        g->ulClen &= ~1u;
+        if (arc != CKR_OK)
+            return arc; /* CKR_ENCRYPTED_DATA_INVALID on tag mismatch */
+        *out_data_len = ct_tail;
+        return CKR_OK;
+    }
 }
 
 /** Forward a stream-mode AES op: [flags|key|iv|data] -> out (same length). */

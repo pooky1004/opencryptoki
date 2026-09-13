@@ -186,6 +186,45 @@ sends `NCMP_CMD_OBJECT_ADD` `[class|key_type|value]`, and
 one returning CKR_OK). Adapter `ncmp/stdll/ncmp_object.c`; mock in
 `mcu_scheduler.c`; tests `ncmp/tests/test_object.c`.
 
+## Multipart operation context (host-managed option)
+Multipart ops (INIT/UPDATE/FINAL families: digest, AES-GCM) keep a per-operation
+context. Two placement models, selected at **daemon build time** by the
+`NCMP_HOST_MANAGED_CTX` macro (CMake option, default OFF):
+- **default (macro off)**: the physical token owns the context. INIT returns a
+  context id; UPDATE/FINAL carry the id; the token holds the state.
+- **`NCMP_HOST_MANAGED_CTX` (macro on)**: the token is **stateless** (HSM storage
+  is scarce). It returns the whole context blob on INIT and every UPDATE, and
+  expects it back on UPDATE/FINAL. The daemon's `comm_thread` keeps the blobs
+  host-side, keyed by a small id, and bridges the wire so the STDLL is unchanged.
+  Convention (see `ncmp_cmd.h`): parameter 0 is the context slot (id STDLL-side,
+  blob token-side) on the INIT response and every UPDATE/FINAL request; the
+  operation's own data is in parameters 1+. The generic bridge lives in
+  `comm_thread.c` (`ctx_xform_request`/`ctx_xform_response`, guarded by the
+  macro) and applies to every context-bearing opcode via `ctx_phase_of()`.
+
+Context-bearing opcodes: `NCMP_CMD_DIGEST_{INIT,UPDATE,FINAL}` and
+`NCMP_CMD_AES_GCM_{INIT,UPDATE,FINAL}`. Aborting a multipart op (context freed
+without a `*Final`) releases the context via `NCMP_CMD_CTX_FREE`
+`[ctx|kind]`: the STDLL context-free hooks send it when the context is still
+live; the daemon frees the host-side slot (`NCMP_HOST_MANAGED_CTX`) or the token
+frees its table entry (default). Idempotent; best-effort at teardown. The STDLL reserves
+`NCMP_HOST_CTX_BLOB_MAX` headroom in a multipart UPDATE so the id→blob swap never
+overflows a frame. Single-shot ops (AES-GCM one-shot, AES-CTR — the CTR counter
+rides in each command) hold no cross-call token state and are unaffected.
+Adapters: `ncmp_crypto_digest_*` / `ncmp_crypto_aes_gcm_{init,update,final}`;
+mock in `mcu_scheduler.c` (both models, `#ifdef`); tests
+`test_gcm_multipart.c` + the digest multipart tests, run in both models.
+
+> STDLL PKCS#11 binding: digest multipart (`t_sha_*`) and AES-GCM multipart
+> (`t_aes_gcm_update`/`t_aes_gcm_final`) are wired to `C_Encrypt/DecryptUpdate`.
+> The GCM hooks reuse the common `AES_GCM_CONTEXT` (`ctx->context`) for
+> partial-block buffering as `mech_aes.c` requires — `data[]`/`len` per the
+> contract, the token context id + established flag in the unused
+> `ulAlen`/`ulClen` — and hold back the tag on decrypt. Status: compiles clean
+> against the opencryptoki headers and the wire/adapter/mock path is tested in
+> both context models; end-to-end `C_EncryptUpdate` needs a full opencryptoki
+> build to exercise (the standalone suite can't load `ncmp_specific.c`).
+
 ## PKCS#11 support target
 Full PKCS#11 2.x, 3.0, and 3.2; multi-application concurrent access.
 

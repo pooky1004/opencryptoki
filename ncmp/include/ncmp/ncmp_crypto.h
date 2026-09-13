@@ -80,6 +80,50 @@ unsigned long ncmp_crypto_aes_gcm(ncmp_client_t *c, uint32_t slot, int encrypt,
                                   uint32_t out_cap, uint32_t *out_len);
 
 /* ------------------------------------------------------------------------- *
+ * AES-GCM multipart (context-bearing). The STDLL uses a small context id; under
+ * a NCMP_HOST_MANAGED_CTX daemon build the context blob is kept host-side and
+ * swapped in by comm_thread. INIT establishes the context (key/iv/aad/taglen);
+ * UPDATE streams data in/out; FINAL emits the tag (encrypt) or verifies it
+ * (decrypt).
+ * ------------------------------------------------------------------------- */
+
+/** @brief Begin a multipart AES-GCM op; returns the context id. */
+unsigned long ncmp_crypto_aes_gcm_init(ncmp_client_t *c, uint32_t slot,
+                                       int encrypt, const uint8_t *key,
+                                       uint32_t key_len, const uint8_t *iv,
+                                       uint32_t iv_len, const uint8_t *aad,
+                                       uint32_t aad_len, uint32_t tag_len,
+                                       uint32_t *ctx_id);
+
+/** @brief Feed one data chunk; @p out receives the ciphertext/plaintext. */
+unsigned long ncmp_crypto_aes_gcm_update(ncmp_client_t *c, uint32_t slot,
+                                         uint32_t ctx_id, const uint8_t *in,
+                                         uint32_t in_len, uint8_t *out,
+                                         uint32_t out_cap, uint32_t *out_len);
+
+/**
+ * @brief Finish a multipart AES-GCM op.
+ * @param encrypt   Non-zero: @p tag_out receives the computed tag.
+ *                  Zero: @p tag_in / @p tag_in_len carry the expected tag; the
+ *                  token verifies it (CKR_ENCRYPTED_DATA_INVALID on mismatch).
+ */
+unsigned long ncmp_crypto_aes_gcm_final(ncmp_client_t *c, uint32_t slot,
+                                        uint32_t ctx_id, int encrypt,
+                                        const uint8_t *tag_in,
+                                        uint32_t tag_in_len, uint8_t *tag_out,
+                                        uint32_t tag_out_cap,
+                                        uint32_t *tag_out_len);
+
+/**
+ * @brief Release a multipart context without finalizing (abort / teardown).
+ * @param kind NCMP_CTX_KIND_DIGEST or NCMP_CTX_KIND_GCM (selects the token-side
+ *             table in the default build; ignored under NCMP_HOST_MANAGED_CTX).
+ * Idempotent; best-effort (callers ignore the result during cleanup).
+ */
+unsigned long ncmp_crypto_ctx_free(ncmp_client_t *c, uint32_t slot,
+                                   uint32_t ctx_id, uint32_t kind);
+
+/* ------------------------------------------------------------------------- *
  * XOF (SHAKE) key derivation and post-quantum (ML-DSA / ML-KEM).
  * PQC keys are opaque blobs; the private blob carries the public blob as its
  * prefix so sign/verify and encaps/decaps agree in the mock. Callers size the

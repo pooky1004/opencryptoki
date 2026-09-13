@@ -84,8 +84,12 @@ typedef enum CI_Cmd {
     CI_CMD_DIGEST_FINAL    = NCMP_CMD_DIGEST_FINAL,    /* 0x0006 */
     CI_CMD_SHAKE_DERIVE    = NCMP_CMD_SHAKE_DERIVE,    /* 0x0009 */
     /* 대칭 (AEAD / 스트림) */
-    CI_CMD_AES_GCM         = NCMP_CMD_AES_GCM,         /* 0x0012 */
+    CI_CMD_AES_GCM         = NCMP_CMD_AES_GCM,         /* 0x0012 (one-shot) */
     CI_CMD_AES_CTR         = NCMP_CMD_AES_CTR,         /* 0x0013 */
+    CI_CMD_AES_GCM_INIT    = NCMP_CMD_AES_GCM_INIT,    /* 0x0014 (multipart) */
+    CI_CMD_AES_GCM_UPDATE  = NCMP_CMD_AES_GCM_UPDATE,  /* 0x0015 */
+    CI_CMD_AES_GCM_FINAL   = NCMP_CMD_AES_GCM_FINAL,   /* 0x0016 */
+    CI_CMD_CTX_FREE        = NCMP_CMD_CTX_FREE,         /* 0x0017 (abort) */
     /* 토큰 관리 / 로그인 / 조회 */
     CI_CMD_LOGIN           = NCMP_CMD_LOGIN,           /* 0x0030 */
     CI_CMD_LOGOUT          = NCMP_CMD_LOGOUT,          /* 0x0031 */
@@ -241,6 +245,25 @@ typedef struct CI_AesCtrReq {
 } CI_AesCtrReq;
 typedef struct CI_AesCtrRsp { uint8_t out[]; /* param0: 출력 (입력과 동일 길이) */ } CI_AesCtrRsp;
 ```
+
+### 4.3 CI_CMD_AES_GCM_INIT/UPDATE/FINAL (0x0014–0x0016) — 멀티파트 GCM
+상태형(컨텍스트) 연산이다. 컨텍스트 배치는 §11의 두 모델을 따른다.
+```c
+/* INIT: [flags|key|iv|aad|taglen] -> 응답 param0 = 컨텍스트(슬롯). */
+typedef struct CI_AesGcmInitReq {
+    uint32_t flags;   /* param0: bit0=암/복호 */
+    uint8_t  key[];   /* param1 */
+    uint8_t  iv[];    /* param2 */
+    uint8_t  aad[];   /* param3 (가능) */
+    uint32_t taglen;  /* param4: 태그 바이트 수 */
+} CI_AesGcmInitReq;
+
+/* UPDATE: [ctx|data] -> [ctx'|out]. STDLL 관점: [ctx_id|data] -> [out]. */
+/* FINAL(암호화): [ctx] -> [tag]. FINAL(복호화): [ctx|expected_tag] -> ack. */
+```
+> `param0`은 UPDATE/FINAL 요청과 INIT 응답에서 컨텍스트 슬롯(STDLL=id, 토큰=blob)이며,
+> 연산 데이터는 `param1+`에 온다. `NCMP_HOST_MANAGED_CTX` 빌드에서는 comm_thread가
+> id↔blob을 교환한다(§11 참조). 복호화 태그 불일치 시 `ack = CKR_ENCRYPTED_DATA_INVALID`.
 
 ---
 
@@ -593,3 +616,32 @@ typedef struct CI_VdTokenInfoRsp { CI_TokenIdentity identity; /* param0 */ } CI_
 
 > mock 토큰은 결정론적 스텁으로 위 레이아웃을 그대로 구현한다. 실제 FX3 펌웨어는
 > 동일한 CI 프레임/파라미터 규약을 따르되 진짜 암호 연산을 수행한다.
+
+---
+
+## 11. 멀티파트 컨텍스트 모델 (컴파일 옵션)
+
+멀티파트 연산(INIT/UPDATE/FINAL 계열: 다이제스트, AES-GCM)은 연산별 컨텍스트를
+유지한다. 컨텍스트 보관 위치는 **데몬 빌드 시** `NCMP_HOST_MANAGED_CTX` 매크로
+(CMake 옵션, 기본 OFF)로 선택한다.
+
+- **기본(매크로 OFF)**: 물리 토큰이 컨텍스트를 소유한다. INIT이 컨텍스트 id를
+  반환하고 UPDATE/FINAL이 그 id를 전달하며 토큰이 상태를 보관한다.
+- **`NCMP_HOST_MANAGED_CTX`(매크로 ON)**: 토큰이 무상태가 된다(HSM 저장 공간 부족
+  대응). 토큰은 INIT과 매 UPDATE에서 컨텍스트 blob 전체를 반환하고 UPDATE/FINAL에서
+  blob을 다시 받는다. 데몬 `comm_thread`가 blob을 호스트측에 보관하고 작은 id로
+  중계하므로 STDLL은 변경되지 않는다.
+
+규약: `param0`은 INIT 응답과 UPDATE/FINAL 요청에서 컨텍스트 슬롯(STDLL=id,
+토큰=blob)이며, 연산 데이터는 `param1+`에 온다. 브리지는
+`ncmp/daemon/comm_thread.c`의 `ctx_xform_request`/`ctx_xform_response`가 담당하고
+`ctx_phase_of()`로 대상 opcode를 분류한다. STDLL은 UPDATE 청크에
+`NCMP_HOST_CTX_BLOB_MAX`만큼 여유를 두어 id→blob 치환 시 프레임이 넘치지 않게 한다.
+
+단발 연산(AES-GCM one-shot, AES-CTR — 카운터를 매 명령에 실어 보냄)은 호출 간 토큰
+상태가 없어 영향을 받지 않는다.
+
+멀티파트 연산을 `*Final` 없이 중단하면 STDLL 컨텍스트 해제 훅이
+`NCMP_CMD_CTX_FREE`(0x0017, `[ctx|kind]`)를 보내 컨텍스트를 회수한다.
+`NCMP_HOST_MANAGED_CTX`에서는 comm_thread가 호스트 슬롯을, 기본 빌드에서는 토큰이
+자신의 테이블 항목을 해제한다. 멱등이며 teardown에서 best-effort로 동작한다.

@@ -40,8 +40,17 @@ enum ncmp_opcode {
     NCMP_CMD_DIGEST_FINAL  = 0x0006, /**< param0=ctx_id -> resp param0=digest. */
     NCMP_CMD_SHAKE_DERIVE  = 0x0009, /**< XOF: [mech|outlen(LE u32)|base] -> [out]. */
     /* Symmetric: the only advertised AES modes are AEAD (GCM) and stream (CTR). */
-    NCMP_CMD_AES_GCM = 0x0012, /**< AES-GCM: [flags|key|iv|aad|taglen|data]->[out]. */
+    NCMP_CMD_AES_GCM = 0x0012, /**< AES-GCM one-shot: [flags|key|iv|aad|taglen|data]->[out]. */
     NCMP_CMD_AES_CTR = 0x0013, /**< AES-CTR: [flags|key|ctr|data]->[out] (stream). */
+    /* AES-GCM multipart (context-bearing; see NCMP_HOST_MANAGED_CTX). param0 is
+     * the context slot on UPDATE/FINAL requests and the INIT response. */
+    NCMP_CMD_AES_GCM_INIT   = 0x0014, /**< [flags|key|iv|aad|taglen] -> resp [ctx]. */
+    NCMP_CMD_AES_GCM_UPDATE = 0x0015, /**< [ctx|data] -> [ctx'|out] (out=ciphertext/plaintext). */
+    NCMP_CMD_AES_GCM_FINAL  = 0x0016, /**< [ctx] -> [tag] (encrypt) / (ack) (decrypt). */
+    /* Release a multipart context without finalizing (abort / teardown). Frees
+     * the token-side context (default build) or the daemon host-side context
+     * (NCMP_HOST_MANAGED_CTX). Idempotent. */
+    NCMP_CMD_CTX_FREE       = 0x0017, /**< [ctx|kind(LE u32)] -> (ack). */
 
     /*
      * Token administration: PIN / login lifecycle and token queries. The
@@ -153,8 +162,38 @@ enum ncmp_opcode {
 /** Size (bytes) of the mock token's vendor scratch memory region. */
 #define NCMP_VD_MEM_SIZE (4u * 1024u)
 
-/** Sentinel for "no token-side digest context allocated yet". */
+/** Sentinel for "no multipart context allocated yet". */
 #define NCMP_DIGEST_CTX_NONE 0xFFFFFFFFu
+
+/*
+ * Multipart operation context (INIT/UPDATE/FINAL families: digest, AES-GCM).
+ *
+ * Two context-placement models, selected at daemon build time by the
+ * NCMP_HOST_MANAGED_CTX macro (see ncmp/daemon/comm_thread.c):
+ *
+ *  - default (macro undefined): the physical token owns the context. INIT
+ *    returns an opaque context id; UPDATE/FINAL carry that id; the token holds
+ *    the state across calls.
+ *  - NCMP_HOST_MANAGED_CTX (macro defined): the token is stateless. The token
+ *    returns the whole context blob on INIT and on every UPDATE, and expects the
+ *    blob back on UPDATE/FINAL; the daemon's comm_thread stores the blobs
+ *    host-side (HSM storage is scarce) and bridges so the STDLL keeps using a
+ *    small context id unchanged. Convention: parameter 0 is the context slot
+ *    (id on the STDLL side, blob on the token side) for the INIT response and
+ *    every UPDATE/FINAL request; the operation's own data lives in parameters
+ *    1+. FINAL frees the context.
+ *
+ * Maximum host-carried context blob size. The STDLL reserves this much headroom
+ * in a multipart UPDATE so comm_thread can swap the id for the blob without
+ * overflowing a frame. Sized for the largest op context (AES-GCM: key + IV +
+ * running state).
+ */
+#define NCMP_HOST_CTX_BLOB_MAX 256u
+
+/** Multipart context kind for NCMP_CMD_CTX_FREE (disambiguates the token-side
+ *  per-kind tables in the default build). */
+#define NCMP_CTX_KIND_DIGEST 0u
+#define NCMP_CTX_KIND_GCM    1u
 
 /** AES block / IV size (bytes). */
 #define NCMP_AES_BLOCK 16u

@@ -40,6 +40,9 @@ int test_crypto_digest(void);
 int test_crypto_digest_multipart(void);
 int test_crypto_aes_stream(void);
 int test_crypto_aes_gcm(void);
+int test_crypto_aes_gcm_multipart(void);
+int test_ctx_free_digest(void);
+int test_ctx_free_gcm(void);
 /* Token administration: identity, CK-slot binding, login/PIN lifecycle. */
 int test_admin_token_info(void);
 int test_admin_bind_by_serial(void);
@@ -96,6 +99,9 @@ int main(void)
     NCMP_RUN(test_crypto_digest_multipart);
     NCMP_RUN(test_crypto_aes_stream);
     NCMP_RUN(test_crypto_aes_gcm);
+    NCMP_RUN(test_crypto_aes_gcm_multipart);
+    NCMP_RUN(test_ctx_free_digest);
+    NCMP_RUN(test_ctx_free_gcm);
 
     NCMP_RUN(test_admin_token_info);
     NCMP_RUN(test_admin_bind_by_serial);

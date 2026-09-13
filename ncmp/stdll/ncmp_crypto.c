@@ -213,6 +213,119 @@ unsigned long ncmp_crypto_aes_gcm(ncmp_client_t *c, uint32_t slot, int encrypt,
 }
 
 /* ------------------------------------------------------------------------- *
+ * AES-GCM multipart (context-bearing). The STDLL always uses a small context
+ * id; under NCMP_HOST_MANAGED_CTX the daemon swaps it for the stored blob (see
+ * comm_thread.c). Parameter 0 is the context slot on the INIT response and on
+ * every UPDATE/FINAL request; the operation data is in parameters 1+.
+ * ------------------------------------------------------------------------- */
+
+unsigned long ncmp_crypto_aes_gcm_init(ncmp_client_t *c, uint32_t slot,
+                                       int encrypt, const uint8_t *key,
+                                       uint32_t key_len, const uint8_t *iv,
+                                       uint32_t iv_len, const uint8_t *aad,
+                                       uint32_t aad_len, uint32_t tag_len,
+                                       uint32_t *ctx_id)
+{
+    const uint8_t *parts[5];
+    uint32_t lens[5];
+    uint8_t flags[4], tl[4];
+    uint8_t idbuf[4];
+    NCMP_Message rsp;
+    unsigned long rv;
+
+    if (ctx_id == NULL)
+        return NCMP_CKR_ARGUMENTS_BAD;
+
+    ncmp_wr_u32le(flags, encrypt ? NCMP_AES_FLAG_ENCRYPT : 0u);
+    ncmp_wr_u32le(tl, tag_len);
+    parts[0] = flags; lens[0] = sizeof(flags);
+    parts[1] = key;   lens[1] = key_len;
+    parts[2] = iv;    lens[2] = iv_len;
+    parts[3] = aad;   lens[3] = aad_len;
+    parts[4] = tl;    lens[4] = sizeof(tl);
+
+    rv = crypto_cmd_mp(c, slot, NCMP_CMD_AES_GCM_INIT, parts, lens, 5, idbuf,
+                       sizeof(idbuf), &rsp);
+    if (rv != NCMP_CKR_OK)
+        return rv;
+    if (rsp.param_len[0] != sizeof(idbuf))
+        return NCMP_CKR_FUNCTION_FAILED;
+    *ctx_id = ncmp_rd_u32le(idbuf);
+    return NCMP_CKR_OK;
+}
+
+unsigned long ncmp_crypto_aes_gcm_update(ncmp_client_t *c, uint32_t slot,
+                                         uint32_t ctx_id, const uint8_t *in,
+                                         uint32_t in_len, uint8_t *out,
+                                         uint32_t out_cap, uint32_t *out_len)
+{
+    const uint8_t *parts[2];
+    uint32_t lens[2];
+    uint8_t idbuf[4];
+    NCMP_Message rsp;
+    unsigned long rv;
+
+    ncmp_wr_u32le(idbuf, ctx_id);
+    parts[0] = idbuf; lens[0] = sizeof(idbuf);
+    parts[1] = in;    lens[1] = in_len;
+
+    rv = crypto_cmd_mp(c, slot, NCMP_CMD_AES_GCM_UPDATE, parts, lens, 2, out,
+                       out_cap, &rsp);
+    if (rv != NCMP_CKR_OK)
+        return rv;
+    if (out_len)
+        *out_len = rsp.param_len[0];
+    return NCMP_CKR_OK;
+}
+
+unsigned long ncmp_crypto_aes_gcm_final(ncmp_client_t *c, uint32_t slot,
+                                        uint32_t ctx_id, int encrypt,
+                                        const uint8_t *tag_in, uint32_t tag_in_len,
+                                        uint8_t *tag_out, uint32_t tag_out_cap,
+                                        uint32_t *tag_out_len)
+{
+    const uint8_t *parts[2];
+    uint32_t lens[2];
+    uint8_t idbuf[4];
+    NCMP_Message rsp;
+    unsigned long rv;
+
+    ncmp_wr_u32le(idbuf, ctx_id);
+    parts[0] = idbuf; lens[0] = sizeof(idbuf);
+
+    if (encrypt) {
+        rv = crypto_cmd_mp(c, slot, NCMP_CMD_AES_GCM_FINAL, parts, lens, 1,
+                           tag_out, tag_out_cap, &rsp);
+        if (rv != NCMP_CKR_OK)
+            return rv;
+        if (tag_out_len)
+            *tag_out_len = rsp.param_len[0];
+        return NCMP_CKR_OK;
+    }
+
+    /* Decrypt: forward the expected tag; the token verifies and acks. */
+    parts[1] = tag_in; lens[1] = tag_in_len;
+    return crypto_cmd_mp(c, slot, NCMP_CMD_AES_GCM_FINAL, parts, lens, 2, NULL,
+                         0, &rsp);
+}
+
+unsigned long ncmp_crypto_ctx_free(ncmp_client_t *c, uint32_t slot,
+                                   uint32_t ctx_id, uint32_t kind)
+{
+    const uint8_t *parts[2];
+    uint32_t lens[2];
+    uint8_t idbuf[4], kbuf[4];
+    NCMP_Message rsp;
+
+    ncmp_wr_u32le(idbuf, ctx_id);
+    ncmp_wr_u32le(kbuf, kind);
+    parts[0] = idbuf; lens[0] = sizeof(idbuf);
+    parts[1] = kbuf;  lens[1] = sizeof(kbuf);
+    return crypto_cmd_mp(c, slot, NCMP_CMD_CTX_FREE, parts, lens, 2, NULL, 0,
+                         &rsp);
+}
+
+/* ------------------------------------------------------------------------- *
  * XOF (SHAKE) + post-quantum (ML-DSA / ML-KEM).
  * ------------------------------------------------------------------------- */
 

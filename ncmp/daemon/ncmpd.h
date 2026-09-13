@@ -52,6 +52,10 @@ typedef struct ncmpd_slot_ctx {
     ncmp_transport_t *transport; /**< Token transport (real USB or mock). */
     pthread_t         thread;    /**< comm_thread handle. */
     volatile sig_atomic_t stop;  /**< Set non-zero to stop the comm loop. */
+    /* Host-managed multipart context store (NCMP_HOST_MANAGED_CTX builds only).
+     * Owned solely by this slot's comm_thread, so it needs no lock. Allocated
+     * lazily in ncmpd_comm_thread and freed on exit; NULL otherwise. */
+    void             *host_ctx;
 } ncmpd_slot_ctx_t;
 
 /**

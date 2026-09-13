@@ -68,9 +68,13 @@ token_spec_t token_specific = {
     .t_sha_update = &token_specific_sha_update,
     .t_sha_final = &token_specific_sha_final,
 
-    /* Symmetric AES: AEAD (GCM) and stream (CTR) - the advertised modes. */
+    /* Symmetric AES: AEAD (GCM) and stream (CTR) - the advertised modes.
+     * GCM one-shot (t_aes_gcm) plus multipart (t_aes_gcm_update/final, which
+     * forward the running context per the NCMP_HOST_MANAGED_CTX model). */
     .t_aes_gcm_init = &token_specific_aes_gcm_init,
     .t_aes_gcm = &token_specific_aes_gcm,
+    .t_aes_gcm_update = &token_specific_aes_gcm_update,
+    .t_aes_gcm_final = &token_specific_aes_gcm_final,
     .t_aes_ctr = &token_specific_aes_ctr,
 
     /* Key generation: AES keys for the GCM/CTR mechanisms. */

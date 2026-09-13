@@ -11,6 +11,10 @@ add_executable(ncmp_tests
     test_client.c
     # Crypto marshalling adapter (ncmp_crypto) exercised end-to-end vs the mock.
     test_crypto.c
+    # Multipart AES-GCM (context-bearing) via the daemon comm_thread.
+    test_gcm_multipart.c
+    # Multipart context abort/free (NCMP_CMD_CTX_FREE), both context models.
+    test_ctx_free.c
     # Token admin: identity query, CK-slot binding, login/PIN lifecycle.
     test_admin.c
     # Object management: key registration + attribute forwarding to the token.

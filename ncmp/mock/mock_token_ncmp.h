@@ -39,6 +39,23 @@ typedef struct mock_digest_ctx {
     uint32_t acc;    /**< Running accumulator. */
 } mock_digest_ctx_t;
 
+/**
+ * One in-progress multipart AES-GCM op (token-side state across commands). Used
+ * as the token's context store in the default build; under NCMP_HOST_MANAGED_CTX
+ * the same fields are (de)serialized to a host-carried blob instead.
+ */
+typedef struct mock_gcm_ctx {
+    int      in_use;   /**< Non-zero when allocated (default build). */
+    uint8_t  enc;      /**< Non-zero for encrypt. */
+    uint8_t  taglen;   /**< Tag length in bytes. */
+    uint8_t  keylen;   /**< Key length in bytes. */
+    uint8_t  ivlen;    /**< IV length in bytes. */
+    uint32_t acc;      /**< Running tag accumulator (folds plaintext). */
+    uint32_t offset;   /**< Bytes processed (keystream position). */
+    uint8_t  key[32];  /**< Cached key. */
+    uint8_t  iv[16];   /**< Cached IV. */
+} mock_gcm_ctx_t;
+
 /** Maximum PIN length the mock token stores. */
 #define NCMP_MOCK_PIN_MAX 32
 
@@ -62,6 +79,8 @@ typedef struct mock_token_admin {
 
     uint32_t obj_count;                   /**< Key objects registered (OBJECT_ADD). */
     uint32_t obj_setattr_count;           /**< Key attribute changes (OBJECT_SET_ATTR). */
+
+    mock_gcm_ctx_t gcm_ctx[NCMP_MOCK_DIGEST_CTX_MAX]; /**< Multipart GCM ctx (default build). */
 } mock_token_admin_t;
 
 /** Emulated device state. */

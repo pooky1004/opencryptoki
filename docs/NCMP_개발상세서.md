@@ -264,6 +264,7 @@ ctest --test-dir build --output-on-failure
 | `-DNOMD2 -DNODSA -DNORIPE` | (정의) | 원본 공통 계층 기능 축약. | `ncmp_stdll.mk:7` |
 | `-D_GNU_SOURCE` | (정의, 독립 빌드) | 강건 뮤텍스 기능 집합 활성화. | `ncmp/CMakeLists.txt:18` |
 | `-DENABLE_MOCK_TOKEN` | (옵션) | 모의 토큰 경로 선택. | `ncmp/CMakeLists.txt:24` |
+| `-DNCMP_HOST_MANAGED_CTX` | (옵션, 기본 OFF) | 멀티파트 컨텍스트를 데몬(comm_thread)에서 관리(토큰 무상태). 6.4.8절 참조. | `ncmp/CMakeLists.txt:32-36` |
 
 ## 4. 전체 아키텍처
 
@@ -612,6 +613,10 @@ CI는 PKCS#11 비의존 전송 프로토콜이다. 전송 계층(`ncmp/` 서브�
 | 0x0009 | `NCMP_CMD_SHAKE_DERIVE` | `ncmp_cmd.h:41` | ShakeDerive | SHAKE XOF 키 유도. | 불필요 |
 | 0x0012 | `NCMP_CMD_AES_GCM` | `ncmp_cmd.h:43` | AesGcm | AES-GCM 암복호. | 불필요 |
 | 0x0013 | `NCMP_CMD_AES_CTR` | `ncmp_cmd.h:44` | AesCtr | AES-CTR 스트림 암복호. | 불필요 |
+| 0x0014 | `NCMP_CMD_AES_GCM_INIT` | `ncmp_cmd.h:47` | AesGcmInit | AES-GCM 멀티파트 시작(컨텍스트). | 불필요 |
+| 0x0015 | `NCMP_CMD_AES_GCM_UPDATE` | `ncmp_cmd.h:48` | AesGcmUpdate | AES-GCM 멀티파트 데이터. | 불필요 |
+| 0x0016 | `NCMP_CMD_AES_GCM_FINAL` | `ncmp_cmd.h:49` | AesGcmFinal | AES-GCM 멀티파트 종료(태그). | 불필요 |
+| 0x0017 | `NCMP_CMD_CTX_FREE` | `ncmp_cmd.h:53` | CtxFree | 멀티파트 컨텍스트 해제(중단). | 불필요 |
 | 0x0030 | `NCMP_CMD_LOGIN` | `ncmp_cmd.h:52` | Login | PIN 검증/로그인. | 필요 |
 | 0x0031 | `NCMP_CMD_LOGOUT` | `ncmp_cmd.h:53` | Logout | 로그아웃. | 필요 |
 | 0x0032 | `NCMP_CMD_INIT_PIN` | `ncmp_cmd.h:54` | InitPIN | SO가 사용자 PIN 설정. | 필요(SO) |
@@ -798,6 +803,32 @@ sequenceDiagram
     CM->>CM: object_mgr_create_final (로컬 저장/핸들 할당)
     CM-->>APP: 객체 핸들
 ```
+
+#### 6.4.8 멀티파트 컨텍스트 모델 (컴파일 옵션)
+
+멀티파트 연산(INIT/UPDATE/FINAL 계열: 다이제스트, AES-GCM)은 연산별 컨텍스트를 유지한다. 컨텍스트 보관 위치는 데몬 빌드 시 `NCMP_HOST_MANAGED_CTX` 매크로(`ncmp/CMakeLists.txt:32-36`)로 선택한다.
+
+- 기본(매크로 미정의): 물리 토큰이 컨텍스트를 소유한다. INIT이 컨텍스트 id를 반환하고 UPDATE/FINAL이 그 id를 전달하며 토큰이 상태를 보관한다(모의: `mcu_scheduler.c`의 `digest_ctx[]`/`gcm_ctx[]` 테이블).
+- `NCMP_HOST_MANAGED_CTX`(매크로 정의): 토큰이 무상태가 된다(HSM 저장 공간 부족 대응). 토큰은 INIT과 매 UPDATE에서 컨텍스트 blob 전체를 반환하고 UPDATE/FINAL에서 blob을 다시 받는다. 데몬 `comm_thread`가 blob을 호스트측(슬롯별 `host_ctx` 테이블, 단일 소비자라 무락)에 보관하고 작은 id로 중계하므로 STDLL과 어댑터는 변경되지 않는다.
+
+규약: `param0`은 INIT 응답과 UPDATE/FINAL 요청에서 컨텍스트 슬롯(STDLL=id, 토큰=blob)이며, 연산 데이터는 `param1` 이후에 온다. 범용 브리지는 `comm_thread.c`의 `ctx_phase_of()`(`comm_thread.c:60`)로 대상 opcode를 INIT/UPDATE/FINAL로 분류하고, `ctx_xform_request()`(`:96`, 전송 전 id→blob 치환)와 `ctx_xform_response()`(`:159`, INIT: blob→id 할당·저장, UPDATE: blob 저장 후 param0 제거, FINAL: 해제)가 수행한다. 컨텍스트 blob 최대 크기는 `NCMP_HOST_CTX_BLOB_MAX`(256, `ncmp_cmd.h:187`)이며, STDLL은 UPDATE 청크에 이만큼 여유를 두어(`NCMP_DIGEST_UPDATE_MAX_DATA`) id→blob 치환 시 프레임이 넘치지 않게 한다.
+
+표 6-8은 대상 CI와 두 모델에서의 동작을 정리한다.
+
+표 6-8. 멀티파트 컨텍스트 대상 CI
+
+| CI 계열 | INIT | UPDATE | FINAL |
+|---|---|---|---|
+| 다이제스트(`NCMP_CMD_DIGEST_*`) | mech→컨텍스트 | 데이터 fold(출력 없음) | 다이제스트 반환 |
+| AES-GCM(`NCMP_CMD_AES_GCM_*`) | flags/key/iv/aad/taglen→컨텍스트 | 데이터→암/평문 | 태그 반환(암호화)/태그 검증(복호화) |
+
+단발 연산(AES-GCM one-shot `0x0012`, AES-CTR `0x0013`)은 호출 간 토큰 상태가 없어(카운터·키·IV를 매 명령에 실어 보냄) 이 모델의 대상이 아니다.
+
+멀티파트 연산을 `*Final` 없이 중단(세션 종료·오류·포기)하면 STDLL의 컨텍스트 해제 훅(`ncmp_sha_free`/`ncmp_gcm_free`)이 아직 살아 있는 컨텍스트에 대해 `NCMP_CMD_CTX_FREE`(0x0017, `[ctx|kind]`)를 전송하여 회수한다. `NCMP_HOST_MANAGED_CTX`에서는 comm_thread가 호스트 슬롯을, 기본 빌드에서는 토큰이 자신의 테이블 항목을 해제한다. 멱등하며 teardown에서 best-effort로 동작한다(전송 오류 무시). `*Final`이 실행된 컨텍스트는 이미 해제 표시되어 이중 해제가 발생하지 않는다. 시험 `test_ctx_free.c`는 슬롯 수를 초과하는 100회 open+free 루프로 회수를 두 모델에서 검증한다.
+
+어댑터: `ncmp_crypto_digest_init/update/final`, `ncmp_crypto_aes_gcm_init/update/final`(`ncmp/stdll/ncmp_crypto.c`). 모의 구현은 두 모델을 `#ifdef`로 모두 제공한다(`mcu_scheduler.c`). 시험은 `test_gcm_multipart.c`와 다이제스트 멀티파트 시험이 두 빌드에서 모두 통과한다.
+
+STDLL PKCS#11 바인딩 현황: 다이제스트 멀티파트(`t_sha_*`)와 AES-GCM 멀티파트(`t_aes_gcm_update`/`t_aes_gcm_final`)가 `C_Encrypt/DecryptUpdate`에 연결되어 있다. GCM 훅은 공통 계층 규약(`mech_aes.c`)에 맞춰 `ctx->context`의 `AES_GCM_CONTEXT`를 부분 블록 버퍼링에 사용하고(`data[]`/`len`은 규약대로, 토큰 컨텍스트 id·확립 플래그는 미사용 `ulAlen`/`ulClen`에 보관), 복호화 시 태그를 보류한다. 검증 수준: opencryptoki 헤더 대상 무경고 컴파일 및 와이어·어댑터·모의 경로의 양 모드 시험까지 완료했으며, `C_EncryptUpdate` 종단간 확인은 전체 opencryptoki 빌드가 필요하다(독립 스위트는 `ncmp_specific.c`를 적재하지 않음).
 
 ### 6.5 처리 결과 코드
 

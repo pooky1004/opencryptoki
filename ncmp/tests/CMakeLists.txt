@@ -15,6 +15,8 @@ add_executable(ncmp_tests
     test_gcm_multipart.c
     # Multipart context abort/free (NCMP_CMD_CTX_FREE), both context models.
     test_ctx_free.c
+    # Typed per-mechanism contexts + key-id (no key material in a context).
+    test_ctx_typed.c
     # Token admin: identity query, CK-slot binding, login/PIN lifecycle.
     test_admin.c
     # Object management: key registration + attribute forwarding to the token.

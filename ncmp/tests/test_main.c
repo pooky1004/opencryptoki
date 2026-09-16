@@ -43,6 +43,9 @@ int test_crypto_aes_gcm(void);
 int test_crypto_aes_gcm_multipart(void);
 int test_ctx_free_digest(void);
 int test_ctx_free_gcm(void);
+int test_ctx_digest_roundtrip(void);
+int test_ctx_gcm_roundtrip(void);
+int test_ctx_gcm_has_no_key(void);
 /* Token administration: identity, CK-slot binding, login/PIN lifecycle. */
 int test_admin_token_info(void);
 int test_admin_bind_by_serial(void);
@@ -102,6 +105,9 @@ int main(void)
     NCMP_RUN(test_crypto_aes_gcm_multipart);
     NCMP_RUN(test_ctx_free_digest);
     NCMP_RUN(test_ctx_free_gcm);
+    NCMP_RUN(test_ctx_digest_roundtrip);
+    NCMP_RUN(test_ctx_gcm_roundtrip);
+    NCMP_RUN(test_ctx_gcm_has_no_key);
 
     NCMP_RUN(test_admin_token_info);
     NCMP_RUN(test_admin_bind_by_serial);

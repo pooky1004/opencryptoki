@@ -202,6 +202,14 @@ context. Two placement models, selected at **daemon build time** by the
   `comm_thread.c` (`ctx_xform_request`/`ctx_xform_response`, guarded by the
   macro) and applies to every context-bearing opcode via `ctx_phase_of()`.
 
+Each context-bearing mechanism has its own **typed** context struct
+(`ncmp/include/ncmp/ncmp_ctx.h`): `ncmp_ctx_digest_t` (mech, acc) and
+`ncmp_ctx_gcm_t`; a common header (type, len) prefixes the serialized blob so the
+token and daemon dispatch on it. **Keys are never in a context**: they live in a
+token key table (HSM-resident) and the GCM context carries only `key_id`, so the
+middleware's stored/relayed context holds no key material (key bytes appear only
+in the one-shot INIT request in transit). The daemon inspects only the header.
+
 Context-bearing opcodes: `NCMP_CMD_DIGEST_{INIT,UPDATE,FINAL}` and
 `NCMP_CMD_AES_GCM_{INIT,UPDATE,FINAL}`. Aborting a multipart op (context freed
 without a `*Final`) releases the context via `NCMP_CMD_CTX_FREE`

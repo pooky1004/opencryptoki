@@ -12,6 +12,7 @@
 #include "mock_token_ncmp.h"
 #include "ncmp/ncmp_wire.h"
 #include "ncmp/ncmp_cmd.h"
+#include "ncmp/ncmp_ctx.h"
 #include "ncmp/ncmp_errno.h"
 
 #include <stddef.h>
@@ -153,40 +154,41 @@ static void mock_gcm_tag(uint32_t acc, uint8_t *tag, uint32_t taglen)
         tag[i] = (uint8_t)((acc >> ((i & 3) * 8)) ^ (i * 0x2Fu + 0x5Au));
 }
 
-#ifdef NCMP_HOST_MANAGED_CTX
-/** Serialize a GCM context into a host-carried blob; sets @p *len. */
-static void mock_gcm_blob_put(uint8_t *b, const mock_gcm_ctx_t *g, uint32_t *len)
+/* ---- Token-resident key table (keys referenced by key id) ---- */
+
+/** Store @p len key bytes; returns the key id, or -1 if the table is full. */
+static int mock_key_alloc(mock_device_t *dev, const uint8_t *v, uint32_t len)
 {
-    b[0] = g->enc;
-    b[1] = g->taglen;
-    b[2] = g->keylen;
-    b[3] = g->ivlen;
-    ncmp_wr_u32le(b + 4, g->acc);
-    ncmp_wr_u32le(b + 8, g->offset);
-    memcpy(b + 12, g->key, g->keylen);
-    memcpy(b + 12 + g->keylen, g->iv, g->ivlen);
-    *len = 12u + g->keylen + g->ivlen;
+    if (len == 0 || len > sizeof(dev->key_tbl[0].val))
+        return -1;
+    for (int i = 0; i < NCMP_MOCK_KEY_MAX; ++i) {
+        if (!dev->key_tbl[i].in_use) {
+            dev->key_tbl[i].in_use = 1;
+            dev->key_tbl[i].len = (uint8_t)len;
+            memcpy(dev->key_tbl[i].val, v, len);
+            return i;
+        }
+    }
+    return -1;
 }
 
-/** Parse a host-carried blob back into a GCM context. Returns 0 on success. */
-static int mock_gcm_blob_get(const uint8_t *b, uint32_t len, mock_gcm_ctx_t *g)
+/** Resolve a key id to its entry, or NULL if unallocated / out of range. */
+static mock_key_t *mock_key_get(mock_device_t *dev, uint32_t id)
 {
-    if (len < 12)
-        return -1;
-    g->enc = b[0];
-    g->taglen = b[1];
-    g->keylen = b[2];
-    g->ivlen = b[3];
-    if (g->keylen > 32 || g->ivlen > 16 || len < 12u + g->keylen + g->ivlen)
-        return -1;
-    g->acc = ncmp_rd_u32le(b + 4);
-    g->offset = ncmp_rd_u32le(b + 8);
-    memcpy(g->key, b + 12, g->keylen);
-    memcpy(g->iv, b + 12 + g->keylen, g->ivlen);
-    g->in_use = 1;
-    return 0;
+    if (id >= NCMP_MOCK_KEY_MAX || !dev->key_tbl[id].in_use)
+        return NULL;
+    return &dev->key_tbl[id];
 }
-#endif /* NCMP_HOST_MANAGED_CTX */
+
+/** Release a key id, scrubbing the key bytes. Idempotent. */
+static void mock_key_free(mock_device_t *dev, uint32_t id)
+{
+    if (id < NCMP_MOCK_KEY_MAX) {
+        memset(dev->key_tbl[id].val, 0, sizeof(dev->key_tbl[id].val));
+        dev->key_tbl[id].len = 0;
+        dev->key_tbl[id].in_use = 0;
+    }
+}
 
 /**
  * @brief Emulated AES stream modes (CTR/OFB/CFB), rewriting @p msg in place.
@@ -278,19 +280,21 @@ static void mock_exec_command(mock_device_t *dev, NCMP_Message *msg)
     }
     case NCMP_CMD_DIGEST_INIT: {
 #ifdef NCMP_HOST_MANAGED_CTX
-        /* Stateless token: param0=mech -> return the context blob [mech|acc] in
-         * param0. The daemon (comm_thread) stores it and hands the STDLL an id. */
+        /* Stateless token: param0=mech -> return the typed digest context blob
+         * in param0. The daemon (comm_thread) stores it and hands the STDLL an
+         * id. */
         uint32_t mech = (msg->param_len[0] >= 4) ? ncmp_rd_u32le(msg->payload)
                                                  : 0;
+        ncmp_ctx_digest_t dctx;
 
         if (ncmp_digest_size(mech) == 0) {
             msg->param_len[0] = 0;
             msg->header.ack = MOCK_CKR_MECHANISM_INVALID;
             break;
         }
-        ncmp_wr_u32le(msg->payload, mech);
-        ncmp_wr_u32le(msg->payload + 4, mech ^ MOCK_DIGEST_SEED);
-        msg->param_len[0] = 8;
+        dctx.mech = mech;
+        dctx.acc = mech ^ MOCK_DIGEST_SEED;
+        msg->param_len[0] = ncmp_ctx_digest_put(msg->payload, &dctx);
         for (int i = 1; i < NCMP_MAX_PARAM_COUNT; ++i)
             msg->param_len[i] = 0;
         msg->header.ack = MOCK_CKR_OK;
@@ -327,22 +331,22 @@ static void mock_exec_command(mock_device_t *dev, NCMP_Message *msg)
     }
     case NCMP_CMD_DIGEST_UPDATE: {
 #ifdef NCMP_HOST_MANAGED_CTX
-        /* Stateless token: params [blob(param0) | data]; fold data and return
-         * the updated blob in param0 (no data output for a digest). */
+        /* Stateless token: params [ctx-blob(param0) | data]; fold data and
+         * return the updated typed context blob in param0 (digest has no data
+         * output). */
         const uint8_t *pb, *pd;
-        uint32_t lb, ld, mech, acc;
+        uint32_t lb, ld;
+        ncmp_ctx_digest_t dctx;
 
-        if (ncmp_msg_param(msg, 0, &pb, &lb) != NCMP_OK || lb < 8 ||
+        if (ncmp_msg_param(msg, 0, &pb, &lb) != NCMP_OK ||
+            ncmp_ctx_digest_get(pb, lb, &dctx) != 0 ||
             ncmp_msg_param(msg, 1, &pd, &ld) != NCMP_OK) {
             msg->param_len[0] = 0;
             msg->header.ack = MOCK_CKR_FUNCTION_FAILED;
             break;
         }
-        mech = ncmp_rd_u32le(pb);
-        acc = mock_digest_fold(ncmp_rd_u32le(pb + 4), pd, ld);
-        ncmp_wr_u32le(msg->payload, mech);
-        ncmp_wr_u32le(msg->payload + 4, acc);
-        msg->param_len[0] = 8;
+        dctx.acc = mock_digest_fold(dctx.acc, pd, ld);
+        msg->param_len[0] = ncmp_ctx_digest_put(msg->payload, &dctx);
         for (int i = 1; i < NCMP_MAX_PARAM_COUNT; ++i)
             msg->param_len[i] = 0;
         msg->header.ack = MOCK_CKR_OK;
@@ -374,24 +378,24 @@ static void mock_exec_command(mock_device_t *dev, NCMP_Message *msg)
     }
     case NCMP_CMD_DIGEST_FINAL: {
 #ifdef NCMP_HOST_MANAGED_CTX
-        /* Stateless token: param0=blob -> finalize to the digest. */
+        /* Stateless token: param0=ctx-blob -> finalize to the digest. */
         const uint8_t *pb;
-        uint32_t lb, mech, hsize, acc;
+        uint32_t lb, hsize;
+        ncmp_ctx_digest_t dctx;
 
-        if (ncmp_msg_param(msg, 0, &pb, &lb) != NCMP_OK || lb < 8) {
+        if (ncmp_msg_param(msg, 0, &pb, &lb) != NCMP_OK ||
+            ncmp_ctx_digest_get(pb, lb, &dctx) != 0) {
             msg->param_len[0] = 0;
             msg->header.ack = MOCK_CKR_FUNCTION_FAILED;
             break;
         }
-        mech = ncmp_rd_u32le(pb);
-        hsize = ncmp_digest_size(mech);
-        acc = ncmp_rd_u32le(pb + 4);
+        hsize = ncmp_digest_size(dctx.mech);
         if (hsize == 0) {
             msg->param_len[0] = 0;
             msg->header.ack = MOCK_CKR_MECHANISM_INVALID;
             break;
         }
-        mock_digest_finalize(acc, mech, msg->payload, hsize);
+        mock_digest_finalize(dctx.acc, dctx.mech, msg->payload, hsize);
         msg->param_len[0] = hsize;
         for (int i = 1; i < NCMP_MAX_PARAM_COUNT; ++i)
             msg->param_len[i] = 0;
@@ -494,10 +498,13 @@ static void mock_exec_command(mock_device_t *dev, NCMP_Message *msg)
         break;
     }
     case NCMP_CMD_AES_GCM_INIT: {
-        /* Multipart GCM begin: [flags|key|iv|aad|taglen] -> context (param0). */
+        /* Multipart GCM begin: [flags|key|iv|aad|taglen] -> context (param0).
+         * The key is registered in the token key table and referenced by
+         * key_id; the context carries key_id, never the key bytes. */
         const uint8_t *pf, *pk, *piv, *paad, *ptl;
         uint32_t lf, lk, liv, laad, ltl, acc;
-        mock_gcm_ctx_t g;
+        ncmp_ctx_gcm_t g;
+        int kid;
 
         if (ncmp_msg_param(msg, 0, &pf, &lf) != NCMP_OK || lf < 4 ||
             ncmp_msg_param(msg, 1, &pk, &lk) != NCMP_OK || lk == 0 || lk > 32 ||
@@ -517,8 +524,14 @@ static void mock_exec_command(mock_device_t *dev, NCMP_Message *msg)
             msg->header.ack = MOCK_CKR_MECHANISM_INVALID;
             break;
         }
-        g.keylen = (uint8_t)lk;
-        memcpy(g.key, pk, lk);
+        /* Register the key HSM-side; the context only ever references its id. */
+        kid = mock_key_alloc(dev, pk, lk);
+        if (kid < 0) {
+            msg->param_len[0] = 0;
+            msg->header.ack = MOCK_CKR_DEVICE_MEMORY;
+            break;
+        }
+        g.key_id = (uint32_t)kid;
         g.ivlen = (uint8_t)liv;
         memcpy(g.iv, piv, liv);
         /* Tag seed must not depend on the direction, so an encrypt tag and the
@@ -529,11 +542,7 @@ static void mock_exec_command(mock_device_t *dev, NCMP_Message *msg)
         g.acc = acc;
         g.offset = 0;
 #ifdef NCMP_HOST_MANAGED_CTX
-        {
-            uint32_t bl = 0;
-            mock_gcm_blob_put(msg->payload, &g, &bl);
-            msg->param_len[0] = bl;
-        }
+        msg->param_len[0] = ncmp_ctx_gcm_put(msg->payload, &g);
 #else
         {
             int slot = -1;
@@ -541,12 +550,13 @@ static void mock_exec_command(mock_device_t *dev, NCMP_Message *msg)
                 if (!dev->admin.gcm_ctx[i].in_use) { slot = i; break; }
             }
             if (slot < 0) {
+                mock_key_free(dev, g.key_id);
                 msg->param_len[0] = 0;
                 msg->header.ack = MOCK_CKR_DEVICE_MEMORY;
                 break;
             }
-            g.in_use = 1;
-            dev->admin.gcm_ctx[slot] = g;
+            dev->admin.gcm_ctx[slot].in_use = 1;
+            dev->admin.gcm_ctx[slot].ctx = g;
             ncmp_wr_u32le(msg->payload, (uint32_t)slot);
             msg->param_len[0] = 4;
         }
@@ -557,11 +567,14 @@ static void mock_exec_command(mock_device_t *dev, NCMP_Message *msg)
         break;
     }
     case NCMP_CMD_AES_GCM_UPDATE: {
-        /* Multipart GCM data: [ctx|data] -> [ctx'|out] (out=cipher/plaintext). */
+        /* Multipart GCM data: [ctx|data] -> [ctx'|out] (out=cipher/plaintext).
+         * The key is resolved from the context's key_id via the token key
+         * table; key bytes never travel in the context. */
         static _Thread_local uint8_t gcm_out[NCMP_MAX_PARAM_SIZE];
         const uint8_t *pc, *pd;
         uint32_t lc, ld;
-        mock_gcm_ctx_t g;
+        ncmp_ctx_gcm_t g;
+        mock_key_t *k;
 #ifndef NCMP_HOST_MANAGED_CTX
         uint32_t id;
 #endif
@@ -574,7 +587,7 @@ static void mock_exec_command(mock_device_t *dev, NCMP_Message *msg)
             break;
         }
 #ifdef NCMP_HOST_MANAGED_CTX
-        if (mock_gcm_blob_get(pc, lc, &g) != 0) {
+        if (ncmp_ctx_gcm_get(pc, lc, &g) != 0) {
             msg->param_len[0] = 0;
             msg->header.ack = MOCK_CKR_FUNCTION_FAILED;
             break;
@@ -591,24 +604,29 @@ static void mock_exec_command(mock_device_t *dev, NCMP_Message *msg)
             msg->header.ack = MOCK_CKR_FUNCTION_FAILED;
             break;
         }
-        g = dev->admin.gcm_ctx[id];
+        g = dev->admin.gcm_ctx[id].ctx;
 #endif
+        k = mock_key_get(dev, g.key_id);
+        if (k == NULL) {
+            msg->param_len[0] = 0;
+            msg->header.ack = MOCK_CKR_FUNCTION_FAILED;
+            break;
+        }
         for (uint32_t i = 0; i < ld; ++i)
-            gcm_out[i] = (uint8_t)(pd[i] ^ mock_gcm_ks(g.key, g.keylen, g.iv,
+            gcm_out[i] = (uint8_t)(pd[i] ^ mock_gcm_ks(k->val, k->len, g.iv,
                                                        g.ivlen, g.offset + i));
         /* Tag folds the plaintext (encrypt: input; decrypt: output). */
         g.acc = mock_digest_fold(g.acc, g.enc ? pd : gcm_out, ld);
         g.offset += ld;
 #ifdef NCMP_HOST_MANAGED_CTX
         {
-            uint32_t bl = 0;
-            mock_gcm_blob_put(msg->payload, &g, &bl);
+            uint32_t bl = ncmp_ctx_gcm_put(msg->payload, &g);
             memcpy(msg->payload + bl, gcm_out, ld);
             msg->param_len[0] = bl;
             msg->param_len[1] = ld;
         }
 #else
-        dev->admin.gcm_ctx[id] = g;
+        dev->admin.gcm_ctx[id].ctx = g;
         memcpy(msg->payload, gcm_out, ld);
         msg->param_len[0] = ld;
         msg->param_len[1] = 0;
@@ -619,10 +637,11 @@ static void mock_exec_command(mock_device_t *dev, NCMP_Message *msg)
         break;
     }
     case NCMP_CMD_AES_GCM_FINAL: {
-        /* Multipart GCM end: [ctx] -> [tag] (encrypt) / [ctx|tag] -> ack (dec). */
+        /* Multipart GCM end: [ctx] -> [tag] (encrypt) / [ctx|tag] -> ack (dec).
+         * Releases the context's token key on completion. */
         const uint8_t *pc;
         uint32_t lc;
-        mock_gcm_ctx_t g;
+        ncmp_ctx_gcm_t g;
         uint8_t tag[NCMP_AES_BLOCK];
 #ifndef NCMP_HOST_MANAGED_CTX
         uint32_t id;
@@ -634,7 +653,7 @@ static void mock_exec_command(mock_device_t *dev, NCMP_Message *msg)
             break;
         }
 #ifdef NCMP_HOST_MANAGED_CTX
-        if (mock_gcm_blob_get(pc, lc, &g) != 0) {
+        if (ncmp_ctx_gcm_get(pc, lc, &g) != 0) {
             msg->param_len[0] = 0;
             msg->header.ack = MOCK_CKR_FUNCTION_FAILED;
             break;
@@ -651,9 +670,10 @@ static void mock_exec_command(mock_device_t *dev, NCMP_Message *msg)
             msg->header.ack = MOCK_CKR_FUNCTION_FAILED;
             break;
         }
-        g = dev->admin.gcm_ctx[id];
+        g = dev->admin.gcm_ctx[id].ctx;
         dev->admin.gcm_ctx[id].in_use = 0;
 #endif
+        mock_key_free(dev, g.key_id);
         mock_gcm_tag(g.acc, tag, g.taglen);
         if (g.enc) {
             memcpy(msg->payload, tag, g.taglen);
@@ -675,8 +695,22 @@ static void mock_exec_command(mock_device_t *dev, NCMP_Message *msg)
         break;
     }
     case NCMP_CMD_CTX_FREE: {
-        /* Release a multipart context (abort). [ctx|kind] -> ack. Idempotent. */
-#ifndef NCMP_HOST_MANAGED_CTX
+        /* Release a multipart context (abort). Idempotent. Also releases the
+         * context's token key so no key material lingers on the token. */
+#ifdef NCMP_HOST_MANAGED_CTX
+        /* The daemon swapped param0 to the stored context blob (so the token can
+         * reach the key_id). Free the key if this is a GCM context; the daemon
+         * frees the host-side context slot itself. */
+        const uint8_t *pb;
+        uint32_t lb;
+
+        if (ncmp_msg_param(msg, 0, &pb, &lb) == NCMP_OK &&
+            ncmp_ctx_type_of(pb, lb) == NCMP_CTX_TYPE_GCM) {
+            ncmp_ctx_gcm_t g;
+            if (ncmp_ctx_gcm_get(pb, lb, &g) == 0)
+                mock_key_free(dev, g.key_id);
+        }
+#else
         const uint8_t *pid, *pk;
         uint32_t lid, lk;
 
@@ -685,14 +719,16 @@ static void mock_exec_command(mock_device_t *dev, NCMP_Message *msg)
             uint32_t id = ncmp_rd_u32le(pid);
             uint32_t kind = ncmp_rd_u32le(pk);
 
-            if (kind == NCMP_CTX_KIND_DIGEST && id < NCMP_MOCK_DIGEST_CTX_MAX)
+            if (kind == NCMP_CTX_KIND_DIGEST && id < NCMP_MOCK_DIGEST_CTX_MAX) {
                 dev->digest_ctx[id].in_use = 0;
-            else if (kind == NCMP_CTX_KIND_GCM && id < NCMP_MOCK_DIGEST_CTX_MAX)
+            } else if (kind == NCMP_CTX_KIND_GCM &&
+                       id < NCMP_MOCK_DIGEST_CTX_MAX) {
+                if (dev->admin.gcm_ctx[id].in_use)
+                    mock_key_free(dev, dev->admin.gcm_ctx[id].ctx.key_id);
                 dev->admin.gcm_ctx[id].in_use = 0;
+            }
         }
 #endif
-        /* NCMP_HOST_MANAGED_CTX: the token is stateless; the daemon frees the
-         * host-side context. Just acknowledge. */
         for (int i = 0; i < NCMP_MAX_PARAM_COUNT; ++i)
             msg->param_len[i] = 0;
         msg->header.ack = MOCK_CKR_OK;

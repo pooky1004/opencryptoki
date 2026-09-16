@@ -119,7 +119,9 @@ static int ctx_xform_request(ncmpd_slot_ctx_t *sctx, const uint8_t *req,
         return 0;
 
     ph = ctx_phase_of(ncmp_cmd_opcode(m.header.command_id));
-    if (ph != CTX_UPDATE && ph != CTX_FINAL)
+    /* UPDATE/FINAL need the stored blob; CTX_FREE also carries it so the token
+     * can release the context's key (the key_id lives in the blob). */
+    if (ph != CTX_UPDATE && ph != CTX_FINAL && ph != CTX_FREE)
         return 0; /* INIT / non-context: send original */
 
     if (ncmp_msg_param(&m, 0, &p0, &l0) != NCMP_OK || l0 < 4)

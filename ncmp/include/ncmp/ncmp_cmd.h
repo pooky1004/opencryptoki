@@ -183,10 +183,12 @@ enum ncmp_opcode {
  *    every UPDATE/FINAL request; the operation's own data lives in parameters
  *    1+. FINAL frees the context.
  *
- * Maximum host-carried context blob size. The STDLL reserves this much headroom
- * in a multipart UPDATE so comm_thread can swap the id for the blob without
- * overflowing a frame. Sized for the largest op context (AES-GCM: key + IV +
- * running state).
+ * Context blobs are typed (see ncmp_ctx.h): a common header selects the
+ * per-mechanism structure, and no blob ever carries key material - keys stay
+ * token-resident and are referenced by a key id. Maximum host-carried context
+ * blob size; the STDLL reserves this much headroom in a multipart UPDATE so
+ * comm_thread can swap the id for the blob without overflowing a frame (ample
+ * for the largest typed context, AES-GCM at NCMP_CTX_GCM_WIRE bytes).
  */
 #define NCMP_HOST_CTX_BLOB_MAX 256u
 

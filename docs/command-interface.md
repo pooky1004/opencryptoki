@@ -638,6 +638,24 @@ typedef struct CI_VdTokenInfoRsp { CI_TokenIdentity identity; /* param0 */ } CI_
 `ctx_phase_of()`로 대상 opcode를 분류한다. STDLL은 UPDATE 청크에
 `NCMP_HOST_CTX_BLOB_MAX`만큼 여유를 두어 id→blob 치환 시 프레임이 넘치지 않게 한다.
 
+### 11.1 타입 있는 메커니즘별 컨텍스트와 key-id
+
+컨텍스트 blob은 메커니즘별로 타입이 구분된다(`ncmp/include/ncmp/ncmp_ctx.h`).
+공통 8바이트 헤더 `{type(u32)|len(u32)}` 뒤에 메커니즘별 구조가 온다.
+
+| type | 구조체 | 필드 | 직렬화 크기 |
+|---|---|---|---|
+| `NCMP_CTX_TYPE_DIGEST`(1) | `ncmp_ctx_digest_t` | mech, acc | 16 B |
+| `NCMP_CTX_TYPE_GCM`(2) | `ncmp_ctx_gcm_t` | key_id, acc, offset, enc, taglen, ivlen, iv[16] | 39 B |
+
+**민감정보 보호**: 키는 컨텍스트에 절대 담기지 않는다. 키는 토큰 키 테이블에
+상주(HSM-resident)하고 GCM 컨텍스트는 `key_id`만 참조한다. 따라서 미들웨어
+(comm_thread)가 저장·중계하는 컨텍스트에는 키 바이트가 없다. 키 바이트는 임포트
+키 특성상 `AES_GCM_INIT` 요청에서 토큰으로 전달되는 순간에만 통과하며(전송 중),
+토큰은 이를 키 테이블에 등록하고 `key_id`가 담긴 컨텍스트를 돌려준다. FINAL/
+CTX_FREE는 컨텍스트와 함께 해당 키도 해제한다. 토큰과 데몬은 헤더의 `type`으로
+명령/메커니즘별 컨텍스트 구조체를 선택한다.
+
 단발 연산(AES-GCM one-shot, AES-CTR — 카운터를 매 명령에 실어 보냄)은 호출 간 토큰
 상태가 없어 영향을 받지 않는다.
 

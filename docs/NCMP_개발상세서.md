@@ -824,6 +824,17 @@ sequenceDiagram
 
 단발 연산(AES-GCM one-shot `0x0012`, AES-CTR `0x0013`)은 호출 간 토큰 상태가 없어(카운터·키·IV를 매 명령에 실어 보냄) 이 모델의 대상이 아니다.
 
+컨텍스트는 메커니즘별로 타입이 구분된 구조체이다(`ncmp/include/ncmp/ncmp_ctx.h`). 공통 8바이트 헤더 `{type(u32)|len(u32)}`가 직렬화 blob을 선두에서 식별하며, 토큰과 데몬은 이 헤더의 `type`으로 명령·메커니즘별 구조체를 선택한다. 표 6-9는 지원 컨텍스트를 정리한다.
+
+표 6-9. 메커니즘별 컨텍스트 구조체
+
+| type | 구조체 | 필드 | 직렬화 크기 | 정의 위치 |
+|---|---|---|---|---|
+| `NCMP_CTX_TYPE_DIGEST` | `ncmp_ctx_digest_t` | mech, acc | 16 byte | `ncmp_ctx.h` |
+| `NCMP_CTX_TYPE_GCM` | `ncmp_ctx_gcm_t` | key_id, acc, offset, enc, taglen, ivlen, iv[16] | 39 byte | `ncmp_ctx.h` |
+
+민감정보 보호(key-id 대체): 키는 컨텍스트에 담기지 않는다. 키는 토큰 키 테이블에 상주(HSM-resident)하고 GCM 컨텍스트는 `key_id`만 참조한다. 따라서 미들웨어(comm_thread)가 저장·중계하는 컨텍스트에는 키 바이트가 존재하지 않는다. 키 바이트는 임포트 키 특성상 `NCMP_CMD_AES_GCM_INIT` 요청이 토큰으로 전달되는 순간에만 통과(전송 중)하며, 토큰은 이를 키 테이블에 등록(`mock_key_alloc`)하고 `key_id`가 담긴 컨텍스트를 반환한다. FINAL과 CTX_FREE는 컨텍스트와 함께 해당 키를 해제(`mock_key_free`, 바이트 소거)한다. 이 불변식은 시험 `test_ctx_typed.c`(직렬화 GCM 컨텍스트가 39바이트 고정이며 키 패턴이 존재하지 않음)로 검증한다.
+
 멀티파트 연산을 `*Final` 없이 중단(세션 종료·오류·포기)하면 STDLL의 컨텍스트 해제 훅(`ncmp_sha_free`/`ncmp_gcm_free`)이 아직 살아 있는 컨텍스트에 대해 `NCMP_CMD_CTX_FREE`(0x0017, `[ctx|kind]`)를 전송하여 회수한다. `NCMP_HOST_MANAGED_CTX`에서는 comm_thread가 호스트 슬롯을, 기본 빌드에서는 토큰이 자신의 테이블 항목을 해제한다. 멱등하며 teardown에서 best-effort로 동작한다(전송 오류 무시). `*Final`이 실행된 컨텍스트는 이미 해제 표시되어 이중 해제가 발생하지 않는다. 시험 `test_ctx_free.c`는 슬롯 수를 초과하는 100회 open+free 루프로 회수를 두 모델에서 검증한다.
 
 어댑터: `ncmp_crypto_digest_init/update/final`, `ncmp_crypto_aes_gcm_init/update/final`(`ncmp/stdll/ncmp_crypto.c`). 모의 구현은 두 모델을 `#ifdef`로 모두 제공한다(`mcu_scheduler.c`). 시험은 `test_gcm_multipart.c`와 다이제스트 멀티파트 시험이 두 빌드에서 모두 통과한다.

@@ -14,6 +14,7 @@
 
 #include "ncmp/ncmp_limits.h"
 #include "ncmp/ncmp_cmd.h"
+#include "ncmp/ncmp_ctx.h"
 
 /**
  * Test hook: if this bit is set in a request's command_id, the emulator
@@ -40,21 +41,26 @@ typedef struct mock_digest_ctx {
 } mock_digest_ctx_t;
 
 /**
- * One in-progress multipart AES-GCM op (token-side state across commands). Used
- * as the token's context store in the default build; under NCMP_HOST_MANAGED_CTX
- * the same fields are (de)serialized to a host-carried blob instead.
+ * One in-progress multipart AES-GCM op (token-side context store, default
+ * build). Holds the typed ncmp_ctx_gcm_t, which references its key by key_id
+ * (the key bytes live in the device key table, NOT here). Under
+ * NCMP_HOST_MANAGED_CTX the same ncmp_ctx_gcm_t is (de)serialized to a
+ * host-carried blob instead, and this table is unused.
  */
 typedef struct mock_gcm_ctx {
-    int      in_use;   /**< Non-zero when allocated (default build). */
-    uint8_t  enc;      /**< Non-zero for encrypt. */
-    uint8_t  taglen;   /**< Tag length in bytes. */
-    uint8_t  keylen;   /**< Key length in bytes. */
-    uint8_t  ivlen;    /**< IV length in bytes. */
-    uint32_t acc;      /**< Running tag accumulator (folds plaintext). */
-    uint32_t offset;   /**< Bytes processed (keystream position). */
-    uint8_t  key[32];  /**< Cached key. */
-    uint8_t  iv[16];   /**< Cached IV. */
+    int            in_use; /**< Non-zero when allocated (default build). */
+    ncmp_ctx_gcm_t ctx;    /**< Typed running context (key_id-based). */
 } mock_gcm_ctx_t;
+
+/** Max token-resident keys (referenced by key id; keys never leave the token). */
+#define NCMP_MOCK_KEY_MAX 16
+
+/** One token-resident key. The key id is this entry's index. */
+typedef struct mock_key {
+    int     in_use;   /**< Non-zero when allocated. */
+    uint8_t len;      /**< Key length in bytes. */
+    uint8_t val[32];  /**< Key bytes (HSM-resident; never serialized to a ctx). */
+} mock_key_t;
 
 /** Maximum PIN length the mock token stores. */
 #define NCMP_MOCK_PIN_MAX 32
@@ -88,6 +94,7 @@ typedef struct mock_device {
     mock_container_t  container[NCMP_DEV_CONTAINER_COUNT];
     uint32_t          rr_cursor; /**< Round-robin scheduler position. */
     mock_digest_ctx_t digest_ctx[NCMP_MOCK_DIGEST_CTX_MAX];
+    mock_key_t        key_tbl[NCMP_MOCK_KEY_MAX]; /**< Token-resident keys (key-id). */
     uint8_t           vd_mem[NCMP_VD_MEM_SIZE]; /**< Vendor scratch RAM. */
     uint32_t          epoch;     /**< Bumped on selftest; vendor PING readback. */
     mock_token_admin_t admin;    /**< Identity + PIN/login state. */

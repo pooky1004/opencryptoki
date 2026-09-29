@@ -10,6 +10,7 @@
 | [`architecture.md`](architecture.md) | 설계 세부가 필요할 때. 시스템 개요, 와이어 프로토콜, SHM, 동시성, in-flight 통계, 데이터 흐름, opencryptoki 통합. |
 | [`stdll-call-flow.md`](stdll-call-flow.md) | 표준 opencryptoki 경로 추적. `C_Initialize`→`C_OpenSession`→`C_EncryptInit`→`C_Encrypt`가 API층→new_host(SC_*)→token_specific→ncmpd로 내려가는 호출 흐름을 파일:라인 단위로. |
 | [`session-state-management.md`](session-state-management.md) | NCMP 토큰의 세션 기반 동작 모델과 관리 항목. 다중 앱·스레드 동시 접근, 세션별 연산 중간 상태(load→process→save), **비휘발성(NVM) vs 휘발성(RAM)** 저장 항목 구분과 항목별 상세 설명. |
+| [`cryptoki_app_api.md`](cryptoki_app_api.md) | **애플리케이션 API 레퍼런스**. opencryptoki 앱이 `libpkcs11_ncmp.so`로 호출하는 공개 API(`opencryptoki_tok.map` export 73개 = `SC_*`/`ST_Initialize`)별 기능·원형/인자·반환값. 각 함수의 애플리케이션 `C_*` 대응과 NCMP 지원/미지원(메커니즘 범위) 명시 + 심볼↔`C_*` 대응표. |
 | [`middleware_api.md`](middleware_api.md) | **미들웨어 API 레퍼런스**. `ncmp/stdll/*.c`의 모든 함수(전송 계층 + 마샬링 어댑터 43개)별 기능·원형/인자·반환값. 어댑터 공통 반환값 규약(자체 검증/토큰 ack/전송오류 매핑) 포함. |
 | [`ncmpd-vs-pkcsslotd.md`](ncmpd-vs-pkcsslotd.md) | "USB 명령 pipeline을 pkcsslotd로 할 수 있나?"에 대한 근거 기반 분석. slotd=컨트롤 플레인(슬롯 관리·프로세스 등록·이벤트/GC, 명령 경로에 없음) vs ncmpd comm_thread=데이터 플레인(단일 USB 소유·in-flight pipeline). 왜 slotd로는 안 되는지와 pipeline 튜닝 지점. |
 | [`command-interface.md`](command-interface.md) | **Command Interface(CI)** 규격. 토큰으로 가는 모든 명령별 request/response 구조체(`CI_*Req`/`CI_*Rsp`)와 필드 설명, 공통 프레임(`CI_Header`/`CI_Message`), ack(CKR_*) 표. `CI_Cmd`는 `enum ncmp_opcode`의 **별칭(alias)** 으로 정의(lockstep). advertised mechanism만 남긴 정리된 opcode 집합 + 신규 조회 CI(`GET_UTC_TIME`/`GET_TOKEN_PARAMS`) + 로그인 flags 포함. |

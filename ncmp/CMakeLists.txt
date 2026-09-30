@@ -50,5 +50,7 @@ add_subdirectory(mock)
 add_subdirectory(daemon)
 add_subdirectory(stdll)
 add_subdirectory(tests)
+# Developer GUIs: the mock HSM socket server (C) that the PySide6 apps drive.
+add_subdirectory(gui/server)
 
 message(STATUS "Token NCMP: ENABLE_MOCK_TOKEN=${ENABLE_MOCK_TOKEN}")

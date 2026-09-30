@@ -17,6 +17,7 @@
 | [`command-interface.md`](command-interface.md) | **Command Interface(CI)** 규격. 토큰으로 가는 모든 명령별 request/response 구조체(`CI_*Req`/`CI_*Rsp`)와 필드 설명, 공통 프레임(`CI_Header`/`CI_Message`), ack(CKR_*) 표. `CI_Cmd`는 `enum ncmp_opcode`의 **별칭(alias)** 으로 정의(lockstep). advertised mechanism만 남긴 정리된 opcode 집합 + 신규 조회 CI(`GET_UTC_TIME`/`GET_TOKEN_PARAMS`) + 로그인 flags 포함. |
 | [`gui-tools-status.md`](gui-tools-status.md) | **GUI 도구 진행상황**. 모의 HSM GUI + 테스트 App GUI(+ 실 HSM 브리지)의 설계 결정·한 일·검증 결과·요구사항 대응·남은 과제 요약. 아키텍처(frame_server 공통 골격 + mock/USB 백엔드)와 파일 목록 포함. |
 | [`../ncmp/gui/README.md`](../ncmp/gui/README.md) | **GUI 도구 사용법**. `mock_server`/`hsm_bridge`(C 소켓 서버) + PySide6 두 GUI의 빌드·실행 방법, 데이터/컨트롤 프로토콜, 요구사항 대응표, 헤드리스 검증(`smoke_test.py`), 한계/후속. |
+| [`gui-testing-guide.md`](gui-testing-guide.md) | **GUI 시험 가이드(상세)**. 무엇을 실행·설정하고 각 메뉴/탭이 어떤 용도인지, 어떤 시험을 할 때 무엇을 실행/설정하는지 단계별 설명. Mock GUI(Server 바·Identity·Statistics·Debug·Link)·App GUI(Link·HSM State·Crypto·PQC·File Compare·Scenarios·Statistics) 메뉴 레퍼런스 + 시험별 요리책 + 트러블슈팅. |
 
 ## 핵심 소스 진입점
 

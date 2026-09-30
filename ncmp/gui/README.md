@@ -3,6 +3,9 @@
 opencryptoki(pkcsslotd)나 SHM 없이, **C mock을 소켓 서버로 확장**하고 그 위에
 두 개의 **PySide6 데스크톱 GUI**를 올린 개발/시험 도구다.
 
+> **메뉴별 용도·시험 절차(무엇을 언제 실행/설정하는지) 상세 가이드**:
+> [`../../docs/gui-testing-guide.md`](../../docs/gui-testing-guide.md).
+
 ```
 ┌─────────────┐   control(JSON)   ┌──────────────────────────┐
 │  Mock GUI   │◀─────────────────▶│  mock_server (C)         │

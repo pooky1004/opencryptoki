@@ -18,6 +18,12 @@ opencryptoki(pkcsslotd)나 SHM 없이, **C mock을 소켓 서버로 확장**하�
   /`container.c`)를 **그대로 재사용**하여 wire 프레임을 TCP 소켓으로 주고받는다.
   슬롯 하나 = 에뮬레이트 토큰 하나(최대 4). 각 슬롯은 `data port = base+slot`에서
   호스트 링크를 받고, 공용 `control port`(JSON)로 GUI가 상태를 조회/설정한다.
+- **hsm_bridge** (`server/hsm_bridge.c`): **동일한 링크/컨트롤 프로토콜**을 쓰되 백엔드가
+  실 USB 토큰(`ncmp_transport_*` = `daemon/usb_transport.c`, libusb)이다. App GUI가
+  mock과 **똑같이** `host:port`로 붙어 실 하드웨어를 구동한다. 토큰이 정체성을 소유하므로
+  identity 조회/설정은 미지원(정체성은 `VD_TOKEN_INFO` 데이터 명령으로 조회).
+- **frame_server** (`server/frame_server.{c,h}`): 위 두 서버가 공유하는 소켓/스레드/통계/
+  디버그/컨트롤 골격. 백엔드(vtable)만 mock ↔ USB로 바뀐다.
 - **Mock GUI** (`py/mock_gui.py`): 서버를 실행/부착하고, 슬롯별 **identity 입력·조회·
   수정**, **통계**, **디버그(최근 메시지)**, **링크 up/down·reset**을 제공. 한 창에서
   여러 mock을 동시에 관리.
@@ -37,11 +43,20 @@ cd ncmp && cmake -S . -B build && cmake --build build -j
 ```
 CMake 없이 직접:
 ```bash
-gcc -std=gnu11 -O2 -I ncmp/include -I ncmp/mock \
-    ncmp/gui/server/mock_server.c \
+# mock_server
+gcc -std=gnu11 -O2 -I ncmp/include -I ncmp/mock -I ncmp/gui/server \
+    ncmp/gui/server/mock_server.c ncmp/gui/server/frame_server.c \
     ncmp/mock/container.c ncmp/mock/fx3_dma.c ncmp/mock/mcu_scheduler.c \
     ncmp/common/ncmp_wire.c -lpthread -o mock_server
+
+# hsm_bridge (usb_transport.c는 libusb 헤더가 있으면 자동 링크, 없으면 스텁)
+gcc -std=gnu11 -O2 -I ncmp/include -I ncmp/gui/server \
+    ncmp/gui/server/hsm_bridge.c ncmp/gui/server/frame_server.c \
+    ncmp/daemon/usb_transport.c ncmp/common/ncmp_wire.c \
+    -lpthread $(pkg-config --libs libusb-1.0 2>/dev/null) -o hsm_bridge
 ```
+> CMake로는 `build/gui/mock_server`, `build/gui/hsm_bridge`가 생성된다(libusb가 있으면
+> 브리지가 자동 링크, 없으면 "no device" 스텁으로 빌드).
 
 ### GUI 의존성 (Python)
 ```bash
@@ -60,6 +75,10 @@ cd ncmp/gui/py && python3 mock_gui.py
 
 # 3) 테스트 App GUI (host 127.0.0.1, base port 7010, slot 0/1 …)
 cd ncmp/gui/py && python3 app_gui.py
+
+# 실 하드웨어를 붙일 때: mock_server 대신 브리지를 띄우고 App GUI target=real
+./build/gui/hsm_bridge --data-port 7010 --ctrl-port 7000
+#   → App GUI에서 host=127.0.0.1, base port=7010, slot 선택 후 Connect
 ```
 > Mock GUI의 **Start** 버튼으로 서버를 직접 띄울 수 있다(바이너리 경로 지정). App GUI는
 > `데이터 포트 = base + slot`으로 접속한다.
@@ -84,7 +103,7 @@ cd ncmp/gui/py && python3 smoke_test.py     # 15개 체크: RNG/digest/AES-CTR/�
 | 현재/처리 중 메시지 디버그 서브화면 | Mock GUI **Debug** 탭(최근 메시지 링, opcode/session/seq/ack/크기) |
 | 호스트 링크 연결/해제 | Mock GUI **Link Up/Down/Reset**, App GUI **Connect/Disconnect** |
 | 슬롯 선택 | App GUI slot 스핀박스 → `base+slot` 포트 |
-| mock/real 타깃 연결 | App GUI target=mock / real(bridge). 실 HSM은 프레임 브리지 필요(아래 참고) |
+| mock/real 타깃 연결 | ✅ mock=`mock_server`, real=`hsm_bridge`(동일 링크 프로토콜). App GUI target 선택 |
 | HSM 상태 조회/설정 | App GUI **HSM State**(ping/selftest/fw/token-info/params/utc, login/PIN/init-token) |
 | 다양한 암복호/해시 시험 | App GUI **Crypto/Hash**(RNG, digest, AES-CTR, AES-GCM) |
 | PQC 시험 | App GUI **PQC**(ML-DSA keygen→sign→verify(+위조), ML-KEM keygen→encaps→decaps 공유비밀 일치) |
@@ -98,9 +117,10 @@ cd ncmp/gui/py && python3 smoke_test.py     # 15개 체크: RNG/digest/AES-CTR/�
   암호 정합성이 아니라 **데이터패스(프레이밍/청킹/마샬링)**의 종단 간 정합성을 검증한다.
   **실 HSM** 타깃일 때는 digest가 `hashlib` 실측과 비교되어 암호 정합성까지 검증된다
   (연속 CTR은 64KB 프레임·one-shot 제약상 청크 비교가 제한적).
-- **실 타깃(real HSM) 링크**: App GUI는 "host:port에서 NCMP 프레임을 주고받는 링크"로
-  추상화되어 있다. 실 USB HSM은 `ncmp_transport`(libusb)를 소켓 프론트로 노출하는
-  **브리지**가 있으면 그대로 붙는다(후속 작업).
+- **실 타깃(real HSM) 링크**: `hsm_bridge`가 `ncmp_transport`(libusb)를 소켓 프론트로
+  노출하므로 App GUI가 mock과 동일하게 붙는다. 실제 응답은 **libusb + FX3 토큰**이 있어야
+  나오며, 없으면 브리지는 기동은 하되 데이터 명령에 device 오류를 돌려준다(정상). VID/PID/EP는
+  `daemon/usb_transport.c`의 값이 실 펌웨어와 일치해야 한다.
 - **PQC 파라미터셋 크기**: ML-DSA/ML-KEM의 pub/priv/sig/ct/ss 크기는 실제 규격에
   근접한 값을 사용하되(`ci.MLDSA_SETS`/`ci.MLKEM_SETS`), mock은 크기만 일치하면
   결정적으로 왕복하므로 실 토큰과 blob 내용은 다르다(암호 정합성 아님).

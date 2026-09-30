@@ -14,20 +14,26 @@
 ```
 Mock GUI ─ control(JSON) ─▶ mock_server(C) ◀─ data(wire frame) ─ App GUI
                               slot0..3 = mock_device_t (mcu_scheduler 재사용)
+                            hsm_bridge(C)  ◀─ data(wire frame) ─ App GUI(target=real)
+                              slot0..3 = ncmp_transport_* (libusb, 실 FX3)
+  * 두 서버는 frame_server(소켓/통계/디버그/컨트롤)를 공유, 백엔드만 mock↔USB
 ```
 
 ## 2. 지금까지 한 일 (Done)
 
-### 2.1 C mock 소켓 서버 — `ncmp/gui/server/mock_server.c`
-- 슬롯별 **data 포트**(base+slot)로 호스트 링크(wire 프레임) 수신 →
-  `mock_mover_ingest` + `mock_mcu_step`(정통 에뮬레이션 경로) 실행 → 응답 프레임 반환.
-- 공용 **control 포트**(newline JSON): `list`/`get`/`set`(identity)/`stats`/`debug`/
-  `link`(up·down)/`reset`.
-- 슬롯당 통계(requests/responses/bytes/errors/connects/in_flight/max_in_flight/
-  last_opcode)와 **디버그 링**(최근 128건: opcode/session/seq/ack/크기/타임스탬프).
-- 링크 강제 down 시 현재 데이터 연결을 끊음. 의존성 없음(POSIX 소켓 + pthreads).
-- CMake 연결: `ncmp/gui/server/CMakeLists.txt`(`ENABLE_GUI_SERVER`, 기본 ON),
-  상위 `ncmp/CMakeLists.txt`에 `add_subdirectory(gui/server)`.
+### 2.1 소켓 서버 — 공통 골격 + 두 백엔드 (`ncmp/gui/server/`)
+- `frame_server.{c,h}`: 소켓/스레드/슬롯별 **통계**(requests/responses/bytes/errors/
+  connects/in_flight/max_in_flight/last_opcode) + **디버그 링**(최근 128건) + **control
+  프로토콜**(`list`/`get`/`set`/`stats`/`debug`/`link`/`reset`)을 담당. 백엔드는 vtable
+  (`exec`/`get_identity`/`set_identity`/`reset`/`label`)로 주입. 의존성 없음.
+- `mock_server.c`: **mock 백엔드** — `mock_mover_ingest`+`mock_mcu_step`(정통 에뮬레이션),
+  identity 조회/설정/reset 가능(에뮬 편의).
+- `hsm_bridge.c`: **USB 백엔드** — `ncmp_transport_send`+`ncmp_transport_recv`로 실 FX3에
+  프레임 포워딩. identity 조회/설정은 미지원(토큰이 소유). `usb_transport.c`가 libusb 유무를
+  `__has_include`로 감지 → **libusb 없이도 빌드**(데이터 명령은 device 오류 반환).
+- CMake: `ncmp/gui/server/CMakeLists.txt`(`ENABLE_GUI_SERVER`) — `ncmp_frame_server`
+  라이브러리 + `mock_server` + `hsm_bridge`(libusb 있으면 자동 링크). 상위
+  `ncmp/CMakeLists.txt`에 `add_subdirectory(gui/server)`.
 
 ### 2.2 Python 공용 코어 — `ncmp/gui/py/ncmp_gui/`
 - `wire.py`: wire 프레임 LE 인코드/디코드(프레임 프리픽스+헤더+param_len[8]+params).
@@ -60,8 +66,9 @@ Mock GUI ─ control(JSON) ─▶ mock_server(C) ◀─ data(wire frame) ─ App
 
 | 항목 | 결과 |
 |------|------|
-| C 서버 gcc 빌드 | **성공** |
-| 헤드리스 스모크(`smoke_test.py`) | **15/15 PASS** (RNG·digest one-shot/multipart·AES-CTR 왕복이 SW 복제본과 바이트 일치, fail-bit·통계·디버그·링크 down) |
+| C 서버 gcc 빌드(mock_server + hsm_bridge) | **성공**(경고 0) |
+| 헤드리스 스모크(`smoke_test.py`, frame_server 리팩터 후) | **15/15 PASS** (RNG·digest one-shot/multipart·AES-CTR 왕복이 SW 복제본과 바이트 일치, fail-bit·통계·디버그·링크 down) |
+| hsm_bridge(HW 없음) | 기동·control(list/stats) OK, identity=미지원, 데이터=device 오류로 링크 드롭(정상) |
 | App GUI CI 경로 개별 확인 | AES-GCM 왕복(ct‖tag)·token-info(104B)·token-params·login good/bad/logout **정상** |
 | 전체 `py_compile` | **OK**(코어 4 + smoke + GUI 2) |
 
@@ -77,7 +84,7 @@ Mock GUI ─ control(JSON) ─▶ mock_server(C) ◀─ data(wire frame) ─ App
 | 현재/처리 중 메시지 디버그 서브화면 | ✅ Debug 탭(메시지 링) |
 | 호스트 링크 연결/해제 | ✅ Link Up/Down/Reset, Connect/Disconnect |
 | 슬롯 선택 | ✅ slot→(base+slot) 포트 |
-| mock/real 타깃 연결 | ⚠️ mock 완비, real은 프레임 브리지 필요(후속) |
+| mock/real 타깃 연결 | ✅ mock=`mock_server`, real=`hsm_bridge`(동일 프로토콜) |
 | HSM 상태 조회/설정 | ✅ HSM State 탭 |
 | 암복호/해시 시험 | ✅ Crypto/Hash 탭 |
 | PQC(ML-DSA/ML-KEM) 시험 | ✅ PQC 탭 (강도 3종씩 왕복, 위조 거부 확인) |
@@ -89,8 +96,8 @@ Mock GUI ─ control(JSON) ─▶ mock_server(C) ◀─ data(wire frame) ─ App
 - [ ] **사용자 환경 GUI 실행 검증**: 이 개발 환경엔 `pip`가 없어 PySide6 설치 불가 →
   GUI는 `py_compile` + 서버 상대 로직 확인까지만. 사용자 측 `pip install -r
   requirements.txt` 후 실제 창 구동 확인 필요.
-- [ ] **실 HSM(real target) 브리지**: `ncmp_transport`(libusb)를 소켓 프론트로 노출하는
-  브리지를 추가하면 App GUI가 그대로 실 타깃에 연결.
+- [x] **실 HSM(real target) 브리지**: `hsm_bridge`(`ncmp_transport` libusb 백엔드) 추가
+  완료. 실제 응답은 libusb + FX3 하드웨어 연결 시 검증 필요(VID/PID/EP 확정 포함).
 - [x] **PQC 시험 탭**: ML-DSA(keygen/sign/verify)·ML-KEM(keygen/encaps/decaps) 왕복 UI
   완료(서버 대조 6종 왕복 + 위조 거부 검증).
 - [ ] **파일 비교 확장**: 실 타깃용 연속 CTR/GCM(멀티파트) 비교, 대용량 처리량 벤치.
@@ -101,7 +108,9 @@ Mock GUI ─ control(JSON) ─▶ mock_server(C) ◀─ data(wire frame) ─ App
 
 ```
 ncmp/gui/
-  server/mock_server.c          C 소켓 서버 (~600줄)
+  server/frame_server.{c,h}     공통 소켓/통계/디버그/컨트롤 골격 + 백엔드 vtable
+  server/mock_server.c          mock 백엔드(에뮬레이터)
+  server/hsm_bridge.c           USB 백엔드(실 FX3, libusb)
   server/CMakeLists.txt
   py/ncmp_gui/{wire,ci,link,swcrypto,__init__}.py   공용 코어
   py/mock_gui.py                모의 HSM GUI

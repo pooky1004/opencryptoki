@@ -15,6 +15,8 @@
 | [`middleware_api.md`](middleware_api.md) | **미들웨어 API 레퍼런스**. `ncmp/stdll/*.c`의 모든 함수(전송 계층 + 마샬링 어댑터 43개)별 기능·원형/인자·반환값. 어댑터 공통 반환값 규약(자체 검증/토큰 ack/전송오류 매핑) 포함. |
 | [`ncmpd-vs-pkcsslotd.md`](ncmpd-vs-pkcsslotd.md) | "USB 명령 pipeline을 pkcsslotd로 할 수 있나?"에 대한 근거 기반 분석. slotd=컨트롤 플레인(슬롯 관리·프로세스 등록·이벤트/GC, 명령 경로에 없음) vs ncmpd comm_thread=데이터 플레인(단일 USB 소유·in-flight pipeline). 왜 slotd로는 안 되는지와 pipeline 튜닝 지점. |
 | [`command-interface.md`](command-interface.md) | **Command Interface(CI)** 규격. 토큰으로 가는 모든 명령별 request/response 구조체(`CI_*Req`/`CI_*Rsp`)와 필드 설명, 공통 프레임(`CI_Header`/`CI_Message`), ack(CKR_*) 표. `CI_Cmd`는 `enum ncmp_opcode`의 **별칭(alias)** 으로 정의(lockstep). advertised mechanism만 남긴 정리된 opcode 집합 + 신규 조회 CI(`GET_UTC_TIME`/`GET_TOKEN_PARAMS`) + 로그인 flags 포함. |
+| [`gui-tools-status.md`](gui-tools-status.md) | **GUI 도구 진행상황**. 모의 HSM GUI + 테스트 App GUI(+ 실 HSM 브리지)의 설계 결정·한 일·검증 결과·요구사항 대응·남은 과제 요약. 아키텍처(frame_server 공통 골격 + mock/USB 백엔드)와 파일 목록 포함. |
+| [`../ncmp/gui/README.md`](../ncmp/gui/README.md) | **GUI 도구 사용법**. `mock_server`/`hsm_bridge`(C 소켓 서버) + PySide6 두 GUI의 빌드·실행 방법, 데이터/컨트롤 프로토콜, 요구사항 대응표, 헤드리스 검증(`smoke_test.py`), 한계/후속. |
 
 ## 핵심 소스 진입점
 

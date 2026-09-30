@@ -87,7 +87,8 @@ cd ncmp/gui/py && python3 smoke_test.py     # 15개 체크: RNG/digest/AES-CTR/�
 | mock/real 타깃 연결 | App GUI target=mock / real(bridge). 실 HSM은 프레임 브리지 필요(아래 참고) |
 | HSM 상태 조회/설정 | App GUI **HSM State**(ping/selftest/fw/token-info/params/utc, login/PIN/init-token) |
 | 다양한 암복호/해시 시험 | App GUI **Crypto/Hash**(RNG, digest, AES-CTR, AES-GCM) |
-| 테스트 시나리오 | App GUI **Scenarios**(내장 3종, step별 pass/fail) |
+| PQC 시험 | App GUI **PQC**(ML-DSA keygen→sign→verify(+위조), ML-KEM keygen→encaps→decaps 공유비밀 일치) |
+| 테스트 시나리오 | App GUI **Scenarios**(내장 4종: smoke/admin/crypto/PQC, step별 pass/fail) |
 | 1MB+ 파일 SW 비교 | App GUI **File Compare**(스트리밍 digest / chunked AES-CTR, token vs SW, MB/s) |
 
 ## 한계 / 후속 과제
@@ -100,6 +101,6 @@ cd ncmp/gui/py && python3 smoke_test.py     # 15개 체크: RNG/digest/AES-CTR/�
 - **실 타깃(real HSM) 링크**: App GUI는 "host:port에서 NCMP 프레임을 주고받는 링크"로
   추상화되어 있다. 실 USB HSM은 `ncmp_transport`(libusb)를 소켓 프론트로 노출하는
   **브리지**가 있으면 그대로 붙는다(후속 작업).
-- **PQC(ML-DSA/ML-KEM) 시험 탭**: 현재 Crypto 탭은 RNG/digest/AES 중심. PQC 왕복
-  (keygen→sign/verify, encaps/decaps) UI는 후속으로 추가 예정(와이어 파라미터 레이아웃은
-  `docs/command-interface.md` 참고).
+- **PQC 파라미터셋 크기**: ML-DSA/ML-KEM의 pub/priv/sig/ct/ss 크기는 실제 규격에
+  근접한 값을 사용하되(`ci.MLDSA_SETS`/`ci.MLKEM_SETS`), mock은 크기만 일치하면
+  결정적으로 왕복하므로 실 토큰과 blob 내용은 다르다(암호 정합성 아님).

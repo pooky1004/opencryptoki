@@ -46,8 +46,9 @@ Mock GUI ─ control(JSON) ─▶ mock_server(C) ◀─ data(wire frame) ─ App
 - 연결 바: host/base port/slot/target(mock·real) + Connect/Disconnect(`포트=base+slot`).
 - 탭: **HSM State**(ping/selftest/fw/token-info/params/utc, login/PIN/init-token),
   **Crypto/Hash**(RNG·digest·AES-CTR·AES-GCM + SW 비교),
+  **PQC**(ML-DSA keygen→sign→verify(+위조 거부), ML-KEM keygen→encaps→decaps 공유비밀 일치),
   **File Compare**(스트리밍 digest / chunked AES-CTR, token↔SW, MB/s, 진행바; 워커 스레드),
-  **Scenarios**(내장 3종, step별 pass/fail 표),
+  **Scenarios**(내장 4종: smoke/admin/crypto/PQC, step별 pass/fail 표),
   **Statistics**(opcode별 count/ok/fail/bytes/avg_ms).
 - opcode별 세션 통계 자동 집계.
 
@@ -79,7 +80,8 @@ Mock GUI ─ control(JSON) ─▶ mock_server(C) ◀─ data(wire frame) ─ App
 | mock/real 타깃 연결 | ⚠️ mock 완비, real은 프레임 브리지 필요(후속) |
 | HSM 상태 조회/설정 | ✅ HSM State 탭 |
 | 암복호/해시 시험 | ✅ Crypto/Hash 탭 |
-| 테스트 시나리오 | ✅ 내장 3종 |
+| PQC(ML-DSA/ML-KEM) 시험 | ✅ PQC 탭 (강도 3종씩 왕복, 위조 거부 확인) |
+| 테스트 시나리오 | ✅ 내장 4종(smoke/admin/crypto/PQC) |
 | 1MB+ 파일 SW 비교 | ✅ File Compare 탭 |
 
 ## 5. 남은 과제 (TODO)
@@ -89,8 +91,8 @@ Mock GUI ─ control(JSON) ─▶ mock_server(C) ◀─ data(wire frame) ─ App
   requirements.txt` 후 실제 창 구동 확인 필요.
 - [ ] **실 HSM(real target) 브리지**: `ncmp_transport`(libusb)를 소켓 프론트로 노출하는
   브리지를 추가하면 App GUI가 그대로 실 타깃에 연결.
-- [ ] **PQC 시험 탭**: ML-DSA(keygen/sign/verify)·ML-KEM(keygen/encaps/decaps) 왕복 UI
-  (와이어 파라미터 레이아웃은 `command-interface.md`).
+- [x] **PQC 시험 탭**: ML-DSA(keygen/sign/verify)·ML-KEM(keygen/encaps/decaps) 왕복 UI
+  완료(서버 대조 6종 왕복 + 위조 거부 검증).
 - [ ] **파일 비교 확장**: 실 타깃용 연속 CTR/GCM(멀티파트) 비교, 대용량 처리량 벤치.
 - [ ] **시나리오 외부 파일(JSON) 로딩**, 결과 저장/리포트.
 - [ ] CMake 실제 빌드 확인(이 환경엔 cmake 미설치, gcc로만 검증).

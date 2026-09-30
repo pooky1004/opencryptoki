@@ -117,6 +117,7 @@ CKR_NAMES = {
     0x31: "CKR_DEVICE_MEMORY",
     0x40: "CKR_ENCRYPTED_DATA_INVALID",
     0x70: "CKR_MECHANISM_INVALID",
+    0xC0: "CKR_SIGNATURE_INVALID",
     0xA0: "CKR_PIN_INCORRECT",
     0xA2: "CKR_PIN_LEN_RANGE",
     0x100: "CKR_USER_ALREADY_LOGGED_IN",
@@ -238,3 +239,56 @@ def vd_mem_read(addr: int, length: int) -> Req:
 
 def vd_mem_crc(addr: int, length: int) -> Req:
     return (VD_MEM_CRC, [wire.u32(addr), wire.u32(length)])
+
+
+# --- PQC (ML-DSA / ML-KEM) --------------------------------------------------
+# All keys are opaque blobs; the mock expands deterministic, size-correct output
+# so round-trips succeed. ``set`` is the parameter-set selector (strength 1/3/5,
+# LE u32); its numeric value only needs to be consistent across the related
+# calls. Sizes below track the real ML-DSA/ML-KEM blob sizes for realism.
+# name -> (set, pub_len, priv_len, sig_len)
+MLDSA_SETS = {
+    "ML-DSA-44": (1, 1312, 2560, 2420),
+    "ML-DSA-65": (3, 1952, 4032, 3309),
+    "ML-DSA-87": (5, 2592, 4896, 4595),
+}
+# name -> (set, pub_len, priv_len, ct_len, ss_len)
+MLKEM_SETS = {
+    "ML-KEM-512": (1, 800, 1632, 768, 32),
+    "ML-KEM-768": (3, 1184, 2400, 1088, 32),
+    "ML-KEM-1024": (5, 1568, 3168, 1568, 32),
+}
+
+
+def mldsa_keygen(set_: int, pub_len: int, priv_len: int) -> Req:
+    """[set | pub_len | priv_len] -> resp [pub | priv] (priv is pub-prefixed)."""
+    return (MLDSA_KEYGEN, [wire.u32(set_), wire.u32(pub_len), wire.u32(priv_len)])
+
+
+def mldsa_sign(set_: int, pub_len: int, sig_len: int, priv: bytes,
+               data: bytes) -> Req:
+    """[set | pub_len | sig_len | priv | data] -> resp [sig]."""
+    return (MLDSA_SIGN,
+            [wire.u32(set_), wire.u32(pub_len), wire.u32(sig_len), priv, data])
+
+
+def mldsa_verify(set_: int, pub: bytes, data: bytes, sig: bytes) -> Req:
+    """[set | pub | data | sig] -> ack (OK / SIGNATURE_INVALID)."""
+    return (MLDSA_VERIFY, [wire.u32(set_), pub, data, sig])
+
+
+def mlkem_keygen(set_: int, pub_len: int, priv_len: int) -> Req:
+    """[set | pub_len | priv_len] -> resp [pub | priv] (priv is pub-prefixed)."""
+    return (MLKEM_KEYGEN, [wire.u32(set_), wire.u32(pub_len), wire.u32(priv_len)])
+
+
+def mlkem_encaps(set_: int, ct_len: int, ss_len: int, pub: bytes) -> Req:
+    """[set | ct_len | ss_len | pub] -> resp [ct | ss]."""
+    return (MLKEM_ENCAPS, [wire.u32(set_), wire.u32(ct_len), wire.u32(ss_len), pub])
+
+
+def mlkem_decaps(set_: int, pub_len: int, ss_len: int, priv: bytes,
+                 ct: bytes) -> Req:
+    """[set | pub_len | ss_len | priv | ct] -> resp [ss]."""
+    return (MLKEM_DECAPS,
+            [wire.u32(set_), wire.u32(pub_len), wire.u32(ss_len), priv, ct])

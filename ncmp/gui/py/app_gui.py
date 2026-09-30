@@ -190,6 +190,7 @@ class AppGui(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_state_tab(), "HSM State")
         self.tabs.addTab(self._build_crypto_tab(), "Crypto / Hash")
+        self.tabs.addTab(self._build_pqc_tab(), "PQC")
         self.tabs.addTab(self._build_file_tab(), "File Compare")
         self.tabs.addTab(self._build_scenario_tab(), "Scenarios")
         self.tabs.addTab(self._build_stats_tab(), "Statistics")
@@ -489,6 +490,127 @@ class AppGui(QMainWindow):
                   f"AES-GCM ct={ct.hex()} tag={tag.hex()}  ack={ci.ckr_name(enc.ack)}\n"
                   f"    round-trip decrypt: {'OK (tag verified)' if rt else 'FAIL'}")
 
+    # -- PQC tab ----------------------------------------------------------
+    def _build_pqc_tab(self) -> QWidget:
+        w = QWidget(); v = QVBoxLayout(w)
+
+        # ML-DSA (sign / verify)
+        g_dsa = QGroupBox("ML-DSA  (keygen → sign → verify)")
+        df = QFormLayout(g_dsa)
+        self.dsa_set = QComboBox()
+        for name in ci.MLDSA_SETS:
+            self.dsa_set.addItem(name)
+        self.dsa_data = QLineEdit("post-quantum message")
+        b_dsa = QPushButton("Run ML-DSA round-trip")
+        b_dsa.clicked.connect(self._run_mldsa)
+        df.addRow("Parameter set", self.dsa_set)
+        df.addRow("Message", self.dsa_data)
+        df.addRow(b_dsa)
+        v.addWidget(g_dsa)
+
+        # ML-KEM (encapsulate / decapsulate)
+        g_kem = QGroupBox("ML-KEM  (keygen → encapsulate → decapsulate)")
+        kf = QFormLayout(g_kem)
+        self.kem_set = QComboBox()
+        for name in ci.MLKEM_SETS:
+            self.kem_set.addItem(name)
+        b_kem = QPushButton("Run ML-KEM round-trip")
+        b_kem.clicked.connect(self._run_mlkem)
+        kf.addRow("Parameter set", self.kem_set)
+        kf.addRow(b_kem)
+        v.addWidget(g_kem)
+
+        note = QLabel(
+            "<i>PQC keys are opaque blobs; the mock produces deterministic, "
+            "size-correct output so round-trips succeed (not real ML-DSA/ML-KEM). "
+            "A real token returns true keys/signatures.</i>")
+        note.setWordWrap(True)
+        v.addWidget(note)
+
+        self.pqc_out = QPlainTextEdit(); self.pqc_out.setReadOnly(True)
+        self.pqc_out.setFont(MONO)
+        v.addWidget(self.pqc_out, 1)
+        return w
+
+    def _run_mldsa(self) -> None:
+        if not self.link:
+            self._log(self.pqc_out, "not connected"); return
+        name = self.dsa_set.currentText()
+        set_, pub_len, priv_len, sig_len = ci.MLDSA_SETS[name]
+        data = self.dsa_data.text().encode()
+        self._log(self.pqc_out, f"── {name} (set={set_}) ──")
+
+        kg = self.exec_ci(ci.mldsa_keygen(set_, pub_len, priv_len))
+        if kg is None:
+            return
+        pub, priv = kg.param(0), kg.param(1)
+        kg_ok = (kg.ack == ci.CKR_OK and len(pub) == pub_len
+                 and len(priv) == priv_len and priv[:pub_len] == pub)
+        self._log(self.pqc_out,
+                  f"  keygen: {'OK' if kg_ok else 'FAIL'}  "
+                  f"pub={len(pub)}B priv={len(priv)}B (priv is pub-prefixed)")
+
+        sg = self.exec_ci(ci.mldsa_sign(set_, pub_len, sig_len, priv, data))
+        if sg is None:
+            return
+        sig = sg.param(0)
+        sg_ok = sg.ack == ci.CKR_OK and len(sig) == sig_len
+        self._log(self.pqc_out,
+                  f"  sign:   {'OK' if sg_ok else 'FAIL'}  sig={len(sig)}B  "
+                  f"{sig[:16].hex()}…")
+
+        vf = self.exec_ci(ci.mldsa_verify(set_, pub, data, sig))
+        neg = self.exec_ci(ci.mldsa_verify(set_, pub, data + b"!", sig))
+        vf_ok = bool(vf) and vf.ack == ci.CKR_OK
+        neg_ok = bool(neg) and neg.ack != ci.CKR_OK
+        self._log(self.pqc_out,
+                  f"  verify: {ci.ckr_name(vf.ack) if vf else '-'}  "
+                  f"| tampered → {ci.ckr_name(neg.ack) if neg else '-'} "
+                  f"(expect SIGNATURE_INVALID)")
+        overall = kg_ok and sg_ok and vf_ok and neg_ok
+        self._log(self.pqc_out,
+                  f"  RESULT: {'PASS ✓' if overall else 'FAIL ✗'}\n")
+
+    def _run_mlkem(self) -> None:
+        if not self.link:
+            self._log(self.pqc_out, "not connected"); return
+        name = self.kem_set.currentText()
+        set_, pub_len, priv_len, ct_len, ss_len = ci.MLKEM_SETS[name]
+        self._log(self.pqc_out, f"── {name} (set={set_}) ──")
+
+        kg = self.exec_ci(ci.mlkem_keygen(set_, pub_len, priv_len))
+        if kg is None:
+            return
+        pub, priv = kg.param(0), kg.param(1)
+        kg_ok = (kg.ack == ci.CKR_OK and len(pub) == pub_len
+                 and len(priv) == priv_len and priv[:pub_len] == pub)
+        self._log(self.pqc_out,
+                  f"  keygen:   {'OK' if kg_ok else 'FAIL'}  "
+                  f"pub={len(pub)}B priv={len(priv)}B")
+
+        en = self.exec_ci(ci.mlkem_encaps(set_, ct_len, ss_len, pub))
+        if en is None:
+            return
+        ct, ss = en.param(0), en.param(1)
+        en_ok = en.ack == ci.CKR_OK and len(ct) == ct_len and len(ss) == ss_len
+        self._log(self.pqc_out,
+                  f"  encaps:   {'OK' if en_ok else 'FAIL'}  "
+                  f"ct={len(ct)}B ss={ss.hex()}")
+
+        de = self.exec_ci(ci.mlkem_decaps(set_, pub_len, ss_len, priv, ct))
+        if de is None:
+            return
+        ss2 = de.param(0)
+        match = de.ack == ci.CKR_OK and ss2 == ss
+        self._log(self.pqc_out,
+                  f"  decaps:   {'OK' if de.ack == ci.CKR_OK else 'FAIL'}  "
+                  f"ss={ss2.hex()}")
+        self._log(self.pqc_out,
+                  f"  shared secret match: {'YES' if match else 'NO'}")
+        overall = kg_ok and en_ok and match
+        self._log(self.pqc_out,
+                  f"  RESULT: {'PASS ✓' if overall else 'FAIL ✗'}\n")
+
     # -- File Compare tab -------------------------------------------------
     def _build_file_tab(self) -> QWidget:
         w = QWidget(); v = QVBoxLayout(w)
@@ -586,7 +708,8 @@ class AppGui(QMainWindow):
         self.scenario = QComboBox()
         self.scenario.addItems(["Smoke (queries + RNG + digest)",
                                 "Admin lifecycle (login/PIN)",
-                                "Crypto round-trips"])
+                                "Crypto round-trips",
+                                "PQC round-trips (ML-DSA + ML-KEM)"])
         b = QPushButton("Run scenario"); b.clicked.connect(self._run_scenario)
         h.addWidget(self.scenario, 1); h.addWidget(b)
         v.addLayout(h)
@@ -600,7 +723,8 @@ class AppGui(QMainWindow):
         if not self.link:
             self.statusBar().showMessage("not connected"); return
         idx = self.scenario.currentIndex()
-        steps = [self._scen_smoke, self._scen_admin, self._scen_crypto][idx]()
+        steps = [self._scen_smoke, self._scen_admin, self._scen_crypto,
+                 self._scen_pqc][idx]()
         self.scen_tbl.setRowCount(len(steps))
         for row, (name, ok, detail) in enumerate(steps):
             self.scen_tbl.setItem(row, 0, QTableWidgetItem(name))
@@ -658,6 +782,41 @@ class AppGui(QMainWindow):
         out.append(self._step("multipart digest",
                               ci.digest_init(ci.MECH_SHA512),
                               lambda m: (m.ack == 0, "ctx allocated")))
+        return out
+
+    def _scen_pqc(self):
+        out = []
+        # ML-DSA-65 keygen -> sign -> verify (+ tamper)
+        s, pl, prl, sl = ci.MLDSA_SETS["ML-DSA-65"]
+        kg = self.exec_ci(ci.mldsa_keygen(s, pl, prl))
+        pub = kg.param(0) if kg else b""
+        priv = kg.param(1) if kg else b""
+        out.append(("ML-DSA keygen", bool(kg) and kg.ack == 0
+                    and priv[:pl] == pub, f"pub={len(pub)} priv={len(priv)}"))
+        sg = self.exec_ci(ci.mldsa_sign(s, pl, sl, priv, b"scenario"))
+        sig = sg.param(0) if sg else b""
+        out.append(("ML-DSA sign", bool(sg) and sg.ack == 0 and len(sig) == sl,
+                    f"sig={len(sig)}"))
+        vf = self.exec_ci(ci.mldsa_verify(s, pub, b"scenario", sig))
+        out.append(("ML-DSA verify", bool(vf) and vf.ack == 0,
+                    ci.ckr_name(vf.ack) if vf else "-"))
+        neg = self.exec_ci(ci.mldsa_verify(s, pub, b"scenarioX", sig))
+        out.append(("ML-DSA reject tampered", bool(neg) and neg.ack != 0,
+                    ci.ckr_name(neg.ack) if neg else "-"))
+        # ML-KEM-768 keygen -> encaps -> decaps
+        s, pl, prl, cl, ssl = ci.MLKEM_SETS["ML-KEM-768"]
+        kg = self.exec_ci(ci.mlkem_keygen(s, pl, prl))
+        pub = kg.param(0) if kg else b""
+        priv = kg.param(1) if kg else b""
+        out.append(("ML-KEM keygen", bool(kg) and kg.ack == 0, f"pub={len(pub)}"))
+        en = self.exec_ci(ci.mlkem_encaps(s, cl, ssl, pub))
+        ct = en.param(0) if en else b""
+        ss = en.param(1) if en else b""
+        out.append(("ML-KEM encaps", bool(en) and en.ack == 0, f"ct={len(ct)}"))
+        de = self.exec_ci(ci.mlkem_decaps(s, pl, ssl, priv, ct))
+        ss2 = de.param(0) if de else b""
+        out.append(("ML-KEM shared-secret match", bool(de) and ss2 == ss,
+                    "ss identical" if ss2 == ss else "ss differ"))
         return out
 
     # -- Statistics tab ---------------------------------------------------

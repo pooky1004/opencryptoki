@@ -71,6 +71,7 @@ Mock GUI ─ control(JSON) ─▶ mock_server(C) ◀─ data(wire frame) ─ App
 | hsm_bridge(HW 없음) | 기동·control(list/stats) OK, identity=미지원, 데이터=device 오류로 링크 드롭(정상) |
 | App GUI CI 경로 개별 확인 | AES-GCM 왕복(ct‖tag)·token-info(104B)·token-params·login good/bad/logout **정상** |
 | 전체 `py_compile` | **OK**(코어 4 + smoke + GUI 2) |
+| **GUI 실행(PySide6 6.11.2)** | Mock/App GUI **헤드리스(offscreen) 구동 검증**: attach·identity 수정·통계·디버그·링크, 연결·HSM상태·암호/해시·PQC·시나리오(4종)·1MB+ 파일비교·통계 핸들러 실동작 확인. 실제 렌더 스크린샷 캡처. |
 
 ## 4. 요구사항 대응
 
@@ -93,9 +94,12 @@ Mock GUI ─ control(JSON) ─▶ mock_server(C) ◀─ data(wire frame) ─ App
 
 ## 5. 남은 과제 (TODO)
 
-- [ ] **사용자 환경 GUI 실행 검증**: 이 개발 환경엔 `pip`가 없어 PySide6 설치 불가 →
-  GUI는 `py_compile` + 서버 상대 로직 확인까지만. 사용자 측 `pip install -r
-  requirements.txt` 후 실제 창 구동 확인 필요.
+- [x] **GUI 실행 검증**: PySide6 6.11.2 설치 후 두 GUI를 offscreen으로 구동, 실제 핸들러
+  (attach/identity/통계/디버그/링크, 연결/HSM상태/암호/PQC/시나리오/파일비교/통계)가 실행
+  중인 `mock_server`에 대해 정상 동작함을 확인하고 스크린샷 캡처.
+- [ ] **온스크린(xcb) 실행**: 실제 창 표시는 시스템 패키지 `libxcb-cursor0`(apt) 필요.
+  offscreen/eglfs/vnc/wayland 플랫폼은 그대로 동작. 설치 후 `python3 mock_gui.py` /
+  `app_gui.py`로 창 확인.
 - [x] **실 HSM(real target) 브리지**: `hsm_bridge`(`ncmp_transport` libusb 백엔드) 추가
   완료. 실제 응답은 libusb + FX3 하드웨어 연결 시 검증 필요(VID/PID/EP 확정 포함).
 - [x] **PQC 시험 탭**: ML-DSA(keygen/sign/verify)·ML-KEM(keygen/encaps/decaps) 왕복 UI

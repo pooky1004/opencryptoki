@@ -167,8 +167,10 @@ opencryptoki(`pkcsslotd`)·SHM 없이 토큰을 구동·시험하는 GUI 도구.
   init-token), 암복호/해시, **PQC**(ML-DSA sign/verify·ML-KEM encaps/decaps 왕복),
   **1MB+ 파일 SW 비교**(스트리밍 digest / chunked AES-CTR, MB/s), 시나리오(4종), 통계.
 - **검증**: C 서버 gcc 빌드(경고 0), 헤드리스 E2E 스모크(`smoke_test.py`) **15/15**,
-  PQC 왕복 6종·위조 서명 거부 확인, GUI `py_compile` OK. (GUI 실행엔 PySide6 필요 —
-  현재 개발 환경엔 `pip` 부재로 창 구동은 사용자 환경에서 확인 필요.)
+  PQC 왕복 6종·위조 서명 거부 확인, GUI `py_compile` OK. **PySide6 6.11.2로 두 GUI를
+  offscreen 구동해 실제 핸들러 동작 검증**(attach/identity/통계/디버그/링크, 연결/HSM상태/
+  암호/PQC/시나리오/1MB+ 파일비교/통계) + 스크린샷 캡처. 온스크린(xcb) 창 표시는 시스템
+  패키지 `libxcb-cursor0`만 추가 설치하면 됨.
 
 ---
 
@@ -191,8 +193,8 @@ opencryptoki(`pkcsslotd`)·SHM 없이 토큰을 구동·시험하는 GUI 도구.
 ### 3.3 도구/환경
 - [ ] `libusb-1.0-0-dev` 정식 설치(현재는 헤더만 임시 확보해 실분기 컴파일 검증).
 - [ ] CMake 설치(현재 gcc 수동 빌드로 검증) + CI에서 mock 빌드/ctest 자동화.
-- [ ] GUI 도구 실행 검증: 사용자 환경에서 `pip install -r ncmp/gui/py/requirements.txt`
-      후 두 GUI 창 구동 확인(현재 개발 환경은 `pip` 부재로 `py_compile`까지만).
+- [x] GUI 도구 실행 검증: PySide6 6.11.2 설치 후 두 GUI offscreen 구동 + 실제 핸들러
+      동작 확인(스크린샷 캡처). 온스크린 창 표시는 `libxcb-cursor0`(apt)만 추가하면 됨.
 - [ ] `hsm_bridge` 실 하드웨어(libusb+FX3) 연결 시 end-to-end 응답 검증.
 
 ---

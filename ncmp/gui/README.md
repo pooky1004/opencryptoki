@@ -83,6 +83,28 @@ cd ncmp/gui/py && python3 app_gui.py
 > Mock GUI의 **Start** 버튼으로 서버를 직접 띄울 수 있다(바이너리 경로 지정). App GUI는
 > `데이터 포트 = base + slot`으로 접속한다.
 
+### 창 표시 요구사항 (Qt xcb 플랫폼)
+
+PySide6 6.5+의 xcb 플랫폼은 시스템 라이브러리 **`libxcb-cursor0`** 를 요구한다. 없으면
+`Could not load the Qt platform plugin "xcb"` 로 실패한다. 정식 설치:
+```bash
+sudo apt install libxcb-cursor0
+```
+
+**root 권한이 없을 때(비-root 우회)** — `.deb`를 사용자 영역에 풀어
+`LD_LIBRARY_PATH`로 로드한다:
+```bash
+mkdir -p ~/.local/xcbcursor && cd ~/.local/xcbcursor
+apt-get download libxcb-cursor0                 # root 불필요
+dpkg-deb -x libxcb-cursor0_*.deb .
+export LD_LIBRARY_PATH="$HOME/.local/xcbcursor/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
+# 이제 창 실행:
+cd -; cd ncmp/gui/py && python3 app_gui.py       # (또는 mock_gui.py)
+```
+> SSH 사용 시 X 포워딩(`ssh -X`/`-Y`)으로 `DISPLAY`가 설정돼 있어야 한다. 디스플레이가
+> 전혀 없으면 `QT_QPA_PLATFORM=offscreen` 으로 창 없이 구동/스크린샷만 가능하다
+> (예: `QT_QPA_PLATFORM=offscreen python3 app_gui.py`).
+
 ## 헤드리스 검증 (GUI 없이)
 
 서버 + 파이썬 코어의 종단 간 동작은 `py/smoke_test.py`로 검증한다(디스플레이 불필요):

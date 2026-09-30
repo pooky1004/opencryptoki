@@ -91,15 +91,34 @@ PySide6 6.5+의 xcb 플랫폼은 시스템 라이브러리 **`libxcb-cursor0`** 
 sudo apt install libxcb-cursor0
 ```
 
-**root 권한이 없을 때(비-root 우회)** — `.deb`를 사용자 영역에 풀어
-`LD_LIBRARY_PATH`로 로드한다:
+**root 권한이 없을 때(비-root 우회)** — `.deb`를 받아 사용자 영역에 푼다:
 ```bash
 mkdir -p ~/.local/xcbcursor && cd ~/.local/xcbcursor
 apt-get download libxcb-cursor0                 # root 불필요
 dpkg-deb -x libxcb-cursor0_*.deb .
-export LD_LIBRARY_PATH="$HOME/.local/xcbcursor/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
-# 이제 창 실행:
-cd -; cd ncmp/gui/py && python3 app_gui.py       # (또는 mock_gui.py)
+```
+그 다음 둘 중 하나로 라이브러리를 로드시킨다.
+
+- **(a) PySide6 Qt/lib에 복사 — 권장(환경변수 불필요, 영구)**: xcb 플러그인의
+  RUNPATH가 PySide6 번들 `Qt/lib`를 가리키므로, 거기에 `.so`를 넣으면 이후 아무 설정
+  없이 `python3 mock_gui.py`가 창을 띄운다.
+  ```bash
+  QTLIB=$(python3 -c "import PySide6,os;print(os.path.join(os.path.dirname(PySide6.__file__),'Qt','lib'))")
+  cp ~/.local/xcbcursor/usr/lib/x86_64-linux-gnu/libxcb-cursor.so.0.0.0 "$QTLIB/"
+  ln -sf libxcb-cursor.so.0.0.0 "$QTLIB/libxcb-cursor.so.0"
+  ```
+  > 주의: 이 복사본은 그 `--user` PySide6 안에 있으므로 **PySide6 재설치/업그레이드 시
+  > 사라진다**(그때 다시 복사하거나 apt로 설치).
+
+- **(b) `LD_LIBRARY_PATH`로 로드 — 셸마다 설정**:
+  ```bash
+  export LD_LIBRARY_PATH="$HOME/.local/xcbcursor/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
+  # (영구 적용은 ~/.bashrc 에 위 줄 추가)
+  ```
+
+이후 창 실행:
+```bash
+cd ncmp/gui/py && python3 mock_gui.py            # (또는 app_gui.py)
 ```
 > SSH 사용 시 X 포워딩(`ssh -X`/`-Y`)으로 `DISPLAY`가 설정돼 있어야 한다. 디스플레이가
 > 전혀 없으면 `QT_QPA_PLATFORM=offscreen` 으로 창 없이 구동/스크린샷만 가능하다

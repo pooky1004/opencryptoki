@@ -21,7 +21,8 @@
 | `token_specific` 훅 | **29종** 배선 (라이프사이클/데이터스토어 5 + login/PIN 5 + RNG 1 + SHA 4 + AES-GCM/CTR/keygen 4 + XOF 1 + PQC 6 + 리포팅 3) |
 | 와이어 opcode | 23종 + 벤더 8종 (mem·crc/ping/selftest/fw/token-info; loopback은 NOP로 통합) |
 | **advertised mechanism** | AES-GCM/CTR · SHA-256/512 · SHA3-224/256/384/512 · SHAKE-128/256 KDF · ML-KEM(+keygen) · ML-DSA(+keygen) |
-| 소스 규모 | `ncmp/` 서브트리 + opencryptoki 통합(`usr/lib/ncmp_stdll/`) |
+| 소스 규모 | `ncmp/` 서브트리 + opencryptoki 통합(`usr/lib/ncmp_stdll/`) + GUI 도구(`ncmp/gui/`) |
+| **GUI 도구** | 모의 HSM GUI + 테스트 App GUI(PySide6) + C 소켓 서버 `mock_server`/`hsm_bridge`(공통 `frame_server`); 헤드리스 스모크 **15/15**, PQC 왕복 6종 검증 |
 | **미완(하드웨어 필요)** | 실 FX3 브링업 (VID/PID/EP 확정, `pkcsconf` 런타임 검증, 실 암호 정합성) |
 
 ---
@@ -150,6 +151,25 @@ opencryptoki 표준 STDLL(new_host 기반) 경로로 **일원화**하면서 해�
 - 테스트: 삭제된 mechanism 테스트 제거, 신규 `test_admin_token_params`·
   `test_admin_login_flags`·`test_admin_set_utc_time` 추가 → **43/43 통과**.
 
+### 2.8 개발/시험 GUI 도구 (`ncmp/gui/`, 2026-09-30)
+opencryptoki(`pkcsslotd`)·SHM 없이 토큰을 구동·시험하는 GUI 도구. 상세는
+[`gui-tools-status.md`](gui-tools-status.md), 사용법은 [`../ncmp/gui/README.md`](../ncmp/gui/README.md).
+- **C 소켓 서버**(`ncmp/gui/server/`): 공통 골격 `frame_server`(소켓·슬롯별 통계·디버그
+  링·JSON 컨트롤) + 백엔드 2종 — `mock_server`(에뮬레이터 `mcu_scheduler.c` 재사용) /
+  `hsm_bridge`(실 FX3, `ncmp_transport_*`/libusb). 슬롯 = 토큰, `data port = base+slot`
+  에서 wire 프레임 링크, 공용 control 포트로 상태 조회/설정. libusb 없이도 브리지 빌드
+  (데이터 명령은 device 오류 반환).
+- **Python 코어**(`ncmp/gui/py/ncmp_gui/`): wire 코덱·소켓 링크·CI 빌더·SW 기준 암호
+  (에뮬레이터 알고리즘 정확 복제 + 실 암호 `hashlib`/`cryptography`).
+- **모의 HSM GUI**(`mock_gui.py`): 여러 mock을 한 창에서 — identity 조회/수정, 통계,
+  디버그(최근 메시지), 링크 up/down·reset.
+- **테스트 App GUI**(`app_gui.py`): 슬롯 선택·mock/real 연결, HSM 상태(조회/login/PIN/
+  init-token), 암복호/해시, **PQC**(ML-DSA sign/verify·ML-KEM encaps/decaps 왕복),
+  **1MB+ 파일 SW 비교**(스트리밍 digest / chunked AES-CTR, MB/s), 시나리오(4종), 통계.
+- **검증**: C 서버 gcc 빌드(경고 0), 헤드리스 E2E 스모크(`smoke_test.py`) **15/15**,
+  PQC 왕복 6종·위조 서명 거부 확인, GUI `py_compile` OK. (GUI 실행엔 PySide6 필요 —
+  현재 개발 환경엔 `pip` 부재로 창 구동은 사용자 환경에서 확인 필요.)
+
 ---
 
 ## 3. 남은 과제 (TODO)
@@ -171,6 +191,9 @@ opencryptoki 표준 STDLL(new_host 기반) 경로로 **일원화**하면서 해�
 ### 3.3 도구/환경
 - [ ] `libusb-1.0-0-dev` 정식 설치(현재는 헤더만 임시 확보해 실분기 컴파일 검증).
 - [ ] CMake 설치(현재 gcc 수동 빌드로 검증) + CI에서 mock 빌드/ctest 자동화.
+- [ ] GUI 도구 실행 검증: 사용자 환경에서 `pip install -r ncmp/gui/py/requirements.txt`
+      후 두 GUI 창 구동 확인(현재 개발 환경은 `pip` 부재로 `py_compile`까지만).
+- [ ] `hsm_bridge` 실 하드웨어(libusb+FX3) 연결 시 end-to-end 응답 검증.
 
 ---
 
@@ -199,6 +222,14 @@ gcc -std=c11 -O2 -Wall -Wextra -D_GNU_SOURCE \
 #   위 명령에 -fsanitize=thread 추가 후:  setarch $(uname -m) -R /tmp/ncmp_tests
 
 # CMake 설치 시: cd ncmp && cmake -S . -B build -DENABLE_MOCK_TOKEN=ON && ctest --test-dir build
+
+# (C) 개발/시험 GUI 도구 (mock 서버 + PySide6 GUI; 하드웨어 불필요)
+#   서버(빌드): CMake로 build/gui/mock_server, build/gui/hsm_bridge (또는 gcc — README 참고)
+./build/gui/mock_server --slots 2 --data-port 7010 --ctrl-port 7000
+python3 -m pip install -r ncmp/gui/py/requirements.txt   # PySide6 (+cryptography)
+python3 ncmp/gui/py/mock_gui.py    # 모의 HSM GUI
+python3 ncmp/gui/py/app_gui.py     # 테스트 App GUI
+python3 ncmp/gui/py/smoke_test.py  # 헤드리스 E2E (15/15, GUI 불필요)
 ```
 
 ---

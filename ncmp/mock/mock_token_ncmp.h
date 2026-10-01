@@ -62,6 +62,21 @@ typedef struct mock_key {
     uint8_t val[32];  /**< Key bytes (HSM-resident; never serialized to a ctx). */
 } mock_key_t;
 
+/** Max token-side sessions tracked per slot. HSM SID = index + 1 (1..255). */
+#define NCMP_MOCK_SESSION_MAX 255
+
+/**
+ * One token-side session mapping. The 8-bit HSM SID is this entry's index + 1
+ * (so 1..255), unique within the slot and never reused while in_use. Keyed by
+ * the requesting (pid, sid) pair; a repeat open of the same pair is idempotent.
+ */
+typedef struct mock_session {
+    int      in_use;  /**< Non-zero when allocated. */
+    uint32_t pid;     /**< Requesting process id (OPEN_SESSION param0). */
+    uint32_t sid;     /**< Caller-supplied session id (OPEN_SESSION param1). */
+    uint32_t flags;   /**< Session flags (OPEN_SESSION param2). */
+} mock_session_t;
+
 /** Maximum PIN length the mock token stores. */
 #define NCMP_MOCK_PIN_MAX 32
 
@@ -98,6 +113,7 @@ typedef struct mock_device {
     uint8_t           vd_mem[NCMP_VD_MEM_SIZE]; /**< Vendor scratch RAM. */
     uint32_t          epoch;     /**< Bumped on selftest; vendor PING readback. */
     mock_token_admin_t admin;    /**< Identity + PIN/login state. */
+    mock_session_t    sessions[NCMP_MOCK_SESSION_MAX]; /**< Per-slot session table. */
 } mock_device_t;
 
 /**

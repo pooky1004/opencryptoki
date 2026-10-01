@@ -35,6 +35,8 @@ GET_TOKEN_PARAMS = 0x0036
 SET_UTC_TIME = 0x0037
 OBJECT_ADD = 0x0038
 OBJECT_SET_ATTR = 0x0039
+OPEN_SESSION = 0x003A
+CLOSE_SESSION = 0x003B
 MLDSA_KEYGEN = 0x0050
 MLDSA_SIGN = 0x0051
 MLDSA_VERIFY = 0x0052
@@ -120,6 +122,8 @@ CKR_NAMES = {
     0xC0: "CKR_SIGNATURE_INVALID",
     0xA0: "CKR_PIN_INCORRECT",
     0xA2: "CKR_PIN_LEN_RANGE",
+    0xB1: "CKR_SESSION_COUNT",
+    0xB3: "CKR_SESSION_HANDLE_INVALID",
     0x100: "CKR_USER_ALREADY_LOGGED_IN",
     0x101: "CKR_USER_NOT_LOGGED_IN",
 }
@@ -211,6 +215,16 @@ def set_utc_time(utc16: bytes) -> Req:
 
 def get_token_params() -> Req:
     return (GET_TOKEN_PARAMS, [])
+
+
+def open_session(pid: int, sid: int, flags: int = 0) -> Req:
+    """[pid | sid | flags] -> resp [hsm_sid (1..255)]."""
+    return (OPEN_SESSION, [wire.u32(pid), wire.u32(sid), wire.u32(flags)])
+
+
+def close_session(hsm_sid: int) -> Req:
+    """[hsm_sid] -> (ack)."""
+    return (CLOSE_SESSION, [wire.u32(hsm_sid)])
 
 
 def vd_ping() -> Req:

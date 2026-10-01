@@ -323,6 +323,21 @@ class AppGui(QMainWindow):
         rw3 = QWidget(); rw3.setLayout(row3); ag.addRow("Init token", rw3)
         v.addWidget(a)
 
+        # Session CI (OpenSession/CloseSession -> HSM SID)
+        se = QGroupBox("Session (CI 0x003A/0x003B)")
+        sg = QHBoxLayout(se)
+        self.sess_pid = QLineEdit(str(os.getpid())); self.sess_pid.setMaximumWidth(90)
+        self.sess_sid = QSpinBox(); self.sess_sid.setRange(0, 2_000_000_000)
+        self.sess_hsid = QSpinBox(); self.sess_hsid.setRange(0, 255)
+        b_open = QPushButton("Open"); b_open.clicked.connect(self._open_session)
+        b_close = QPushButton("Close"); b_close.clicked.connect(self._close_session)
+        sg.addWidget(QLabel("pid:")); sg.addWidget(self.sess_pid)
+        sg.addWidget(QLabel("sid:")); sg.addWidget(self.sess_sid)
+        sg.addWidget(b_open)
+        sg.addWidget(QLabel("HSM SID:")); sg.addWidget(self.sess_hsid)
+        sg.addWidget(b_close)
+        v.addWidget(se)
+
         self.state_out = QPlainTextEdit(); self.state_out.setReadOnly(True)
         self.state_out.setFont(MONO)
         v.addWidget(self.state_out, 1)
@@ -331,6 +346,32 @@ class AppGui(QMainWindow):
     def _login(self) -> None:
         ut = ci.CKU_USER if self.user_type.currentIndex() == 0 else ci.CKU_SO
         self._q(ci.login(ut, self.pin.text().encode()), "login")
+
+    def _open_session(self) -> None:
+        try:
+            pid = int(self.sess_pid.text(), 0)
+        except ValueError:
+            pid = os.getpid()
+        msg = self.exec_ci(ci.open_session(pid, self.sess_sid.value()))
+        if msg is None:
+            return
+        if msg.ack == ci.CKR_OK:
+            hsid = wire.rd_u32(msg.param(0))
+            self.sess_hsid.setValue(hsid)
+            self._log(self.state_out,
+                      f"OPEN_SESSION pid={pid} sid={self.sess_sid.value()} "
+                      f"-> HSM SID {hsid}")
+        else:
+            self._log(self.state_out,
+                      f"OPEN_SESSION failed: {ci.ckr_name(msg.ack)}")
+
+    def _close_session(self) -> None:
+        msg = self.exec_ci(ci.close_session(self.sess_hsid.value()))
+        if msg is None:
+            return
+        self._log(self.state_out,
+                  f"CLOSE_SESSION HSM SID {self.sess_hsid.value()} "
+                  f"-> {ci.ckr_name(msg.ack)}")
 
     def _q(self, req, kind: str) -> None:
         msg = self.exec_ci(req)

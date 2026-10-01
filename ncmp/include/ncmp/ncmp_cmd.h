@@ -79,6 +79,17 @@ enum ncmp_opcode {
     NCMP_CMD_OBJECT_SET_ATTR = 0x0039, /**< [class|key_type|attrs] -> (ack). Validate key attribute changes. */
 
     /*
+     * Session management. The token owns a per-slot session table that maps the
+     * requesting (process id, caller session id) pair to an 8-bit token-side
+     * session id ("HSM SID", 1..255, unique within the slot, collision-free).
+     * OPEN_SESSION allocates/returns the HSM SID; the STDLL then carries it in
+     * the wire header's session_id for every subsequent command. CLOSE_SESSION
+     * releases it. See docs/session-id-mapping.md.
+     */
+    NCMP_CMD_OPEN_SESSION  = 0x003A, /**< [pid(u32)|sid(u32)|flags(u32)] -> [hsm_sid(u32,1..255)]. */
+    NCMP_CMD_CLOSE_SESSION = 0x003B, /**< [hsm_sid(u32)] -> (ack). */
+
+    /*
      * Post-quantum (PKCS#11 3.2 ML-DSA / ML-KEM). All keys are forwarded as
      * opaque blobs; the mock produces deterministic, size-correct outputs so
      * round-trips (sign->verify, encaps->decaps) succeed. param0 always carries

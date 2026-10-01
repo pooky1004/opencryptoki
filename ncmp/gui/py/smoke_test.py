@@ -93,6 +93,23 @@ def main() -> int:
     check("data: fail-bit forces CKR_FUNCTION_FAILED",
           f.ack == ci.CKR_FUNCTION_FAILED, ci.ckr_name(f.ack))
 
+    # Session mapping: (pid,sid) -> unique 8-bit HSM SID, idempotent, closeable
+    o1 = dl.command(ci.open_session(4242, 1))
+    o2 = dl.command(ci.open_session(4242, 2))
+    sid1 = wire.rd_u32(o1.param(0))
+    sid2 = wire.rd_u32(o2.param(0))
+    check("data: OPEN_SESSION returns distinct HSM SIDs in 1..255",
+          o1.ack == 0 and o2.ack == 0 and sid1 != sid2
+          and 1 <= sid1 <= 255 and 1 <= sid2 <= 255)
+    o1b = dl.command(ci.open_session(4242, 1))
+    check("data: OPEN_SESSION is idempotent per (pid,sid)",
+          wire.rd_u32(o1b.param(0)) == sid1)
+    cl = dl.command(ci.close_session(sid1))
+    bad = dl.command(ci.close_session(sid1))
+    check("data: CLOSE_SESSION ok then invalid-on-reclose",
+          cl.ack == ci.CKR_OK and bad.ack != ci.CKR_OK)
+    dl.command(ci.close_session(sid2))
+
     # Stats + debug reflect the traffic
     stt = ctrl.stats(0)
     check("control: stats counted requests",

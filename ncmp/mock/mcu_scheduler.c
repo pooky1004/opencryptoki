@@ -28,6 +28,8 @@
 #define MOCK_CKR_DEVICE_MEMORY 0x31u
 #define MOCK_CKR_MECHANISM_INVALID 0x70u
 #define MOCK_CKR_SIGNATURE_INVALID 0xC0u
+#define MOCK_CKR_SESSION_COUNT 0xB1u
+#define MOCK_CKR_SESSION_HANDLE_INVALID 0xB3u
 #define MOCK_CKR_PIN_INCORRECT 0xA0u
 #define MOCK_CKR_PIN_LEN_RANGE 0xA2u
 #define MOCK_CKR_TEMPLATE_INCOMPLETE 0xD0u
@@ -1037,6 +1039,75 @@ static void mock_exec_command(mock_device_t *dev, NCMP_Message *msg)
             msg->param_len[i] = 0;
         msg->header.ack = MOCK_CKR_OK;
 object_set_attr_done:
+        break;
+    }
+    case NCMP_CMD_OPEN_SESSION: {
+        /* [pid(u32) | sid(u32) | flags(u32)] -> [hsm_sid(u32, 1..255)].
+         * Map the requesting (pid, sid) pair to a slot-unique 8-bit HSM SID.
+         * Idempotent: re-opening the same pair returns the existing SID. The
+         * HSM SID is the table index + 1, so it is never 0 and never collides
+         * with another live session in this slot. */
+        const uint8_t *ppid, *psid, *pflags;
+        uint32_t lpid, lsid, lflags, pid, sid, flags = 0;
+        int free_idx = -1, found = -1;
+
+        if (ncmp_msg_param(msg, 0, &ppid, &lpid) != NCMP_OK || lpid < 4 ||
+            ncmp_msg_param(msg, 1, &psid, &lsid) != NCMP_OK || lsid < 4) {
+            msg->param_len[0] = 0;
+            msg->header.ack = MOCK_CKR_ARGUMENTS_BAD;
+            break;
+        }
+        pid = ncmp_rd_u32le(ppid);
+        sid = ncmp_rd_u32le(psid);
+        if (ncmp_msg_param(msg, 2, &pflags, &lflags) == NCMP_OK && lflags >= 4)
+            flags = ncmp_rd_u32le(pflags);
+
+        for (int i = 0; i < NCMP_MOCK_SESSION_MAX; ++i) {
+            mock_session_t *s = &dev->sessions[i];
+            if (s->in_use) {
+                if (s->pid == pid && s->sid == sid) { found = i; break; }
+            } else if (free_idx < 0) {
+                free_idx = i;
+            }
+        }
+        if (found < 0 && free_idx < 0) {
+            msg->param_len[0] = 0;
+            msg->header.ack = MOCK_CKR_SESSION_COUNT; /* table full (255) */
+            break;
+        }
+        if (found < 0) {
+            dev->sessions[free_idx].in_use = 1;
+            dev->sessions[free_idx].pid = pid;
+            dev->sessions[free_idx].sid = sid;
+            dev->sessions[free_idx].flags = flags;
+            found = free_idx;
+        }
+        ncmp_wr_u32le(msg->payload, (uint32_t)(found + 1)); /* HSM SID 1..255 */
+        msg->param_len[0] = 4;
+        for (int i = 1; i < NCMP_MAX_PARAM_COUNT; ++i)
+            msg->param_len[i] = 0;
+        msg->header.ack = MOCK_CKR_OK;
+        break;
+    }
+    case NCMP_CMD_CLOSE_SESSION: {
+        /* [hsm_sid(u32)] -> (ack). Release the session mapping. */
+        const uint8_t *psid;
+        uint32_t lsid, hsm_sid;
+
+        if (ncmp_msg_param(msg, 0, &psid, &lsid) != NCMP_OK || lsid < 4) {
+            msg->header.ack = MOCK_CKR_ARGUMENTS_BAD;
+            break;
+        }
+        hsm_sid = ncmp_rd_u32le(psid);
+        for (int i = 0; i < NCMP_MAX_PARAM_COUNT; ++i)
+            msg->param_len[i] = 0;
+        if (hsm_sid < 1 || hsm_sid > NCMP_MOCK_SESSION_MAX ||
+            !dev->sessions[hsm_sid - 1].in_use) {
+            msg->header.ack = MOCK_CKR_SESSION_HANDLE_INVALID;
+            break;
+        }
+        memset(&dev->sessions[hsm_sid - 1], 0, sizeof(dev->sessions[0]));
+        msg->header.ack = MOCK_CKR_OK;
         break;
     }
     case NCMP_CMD_SHAKE_DERIVE: {

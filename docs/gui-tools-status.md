@@ -50,6 +50,10 @@ Mock GUI ─ control(JSON) ─▶ mock_server(C) ◀─ data(wire frame) ─ App
 
 ### 2.3 모의 HSM GUI — `ncmp/gui/py/mock_gui.py`
 - 서버 **Start/Attach/Stop**, 슬롯 목록.
+- **ncmpd(comm thread target) 그룹**: transport 선택(**mock(socket→이 mock_server)** /
+  **real target**) + Start/Stop ncmpd + 상태. mock 선택 시 ncmpd `--transport socket`으로
+  이 GUI가 관리하는 mock_server에 붙여 **comm thread가 이 mock과 연동**(슬롯 패널로 실시간
+  모니터); real 선택 시 `--transport real`(실 HSM).
 - 슬롯 패널: **Identity**(label/serial/manufacturer/model/HW·FW/flags/UTC 조회·수정),
   **Statistics**(라이브), **Debug**(최근 메시지 표, 실패 ack 강조),
   **Link**(Up/Down/Reset). 0.6s 주기 폴링.

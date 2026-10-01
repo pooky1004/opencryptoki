@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -45,6 +46,24 @@ def find_server() -> str:
         os.path.join(here, "..", "..", "build", "mock_server"),
         os.path.join(here, "..", "server", "mock_server"),
         shutil.which("mock_server") or "",
+    ]
+    for c in candidates:
+        if c and os.path.exists(c):
+            return os.path.abspath(c)
+    return ""
+
+
+def find_ncmpd() -> str:
+    """Best-effort locate an ncmpd binary (all-backends build)."""
+    env = os.environ.get("NCMP_DAEMON")
+    if env and os.path.exists(env):
+        return env
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(here, "..", "..", "build", "daemon", "ncmpd"),
+        os.path.join(here, "..", "build-standalone", "ncmpd"),
+        "/usr/local/sbin/ncmpd", "/usr/sbin/ncmpd",
+        shutil.which("ncmpd") or "",
     ]
     for c in candidates:
         if c and os.path.exists(c):
@@ -246,6 +265,7 @@ class MockGui(QMainWindow):
         self.setWindowTitle("NCMP Mock HSM")
         self.resize(760, 640)
         self._proc: Optional[subprocess.Popen] = None
+        self._ncmpd_proc: Optional[subprocess.Popen] = None
         self._ctrl: Optional[link.ControlClient] = None
         self._panels: List[SlotPanel] = []
         self._data_base = 7010
@@ -277,6 +297,26 @@ class MockGui(QMainWindow):
         cg.addWidget(self.btn_start); cg.addWidget(self.btn_attach)
         cg.addWidget(self.btn_stop)
         outer.addWidget(conn)
+
+        # ncmpd: the comm thread's token target (real HSM or this mock via socket)
+        nd = QGroupBox("ncmpd (comm thread target)")
+        ng = QHBoxLayout(nd)
+        self.ncmpd_path = QLineEdit(find_ncmpd())
+        nb = QPushButton("…"); nb.setFixedWidth(30); nb.clicked.connect(self._browse_ncmpd)
+        self.ncmpd_transport = QComboBox()
+        self.ncmpd_transport.addItems(["mock (socket → this mock)", "real target"])
+        self.ncmpd_sock = QLineEdit(os.environ.get("NCMP_SOCK_PATH", "/tmp/ncmpd.sock"))
+        self.btn_nd_start = QPushButton("Start ncmpd")
+        self.btn_nd_start.clicked.connect(self.start_ncmpd)
+        self.btn_nd_stop = QPushButton("Stop ncmpd")
+        self.btn_nd_stop.clicked.connect(self.stop_ncmpd)
+        self.ncmpd_state = QLabel("ncmpd: -")
+        ng.addWidget(QLabel("bin:")); ng.addWidget(self.ncmpd_path, 1); ng.addWidget(nb)
+        ng.addWidget(QLabel("transport:")); ng.addWidget(self.ncmpd_transport)
+        ng.addWidget(QLabel("sock:")); ng.addWidget(self.ncmpd_sock)
+        ng.addWidget(self.btn_nd_start); ng.addWidget(self.btn_nd_stop)
+        ng.addWidget(self.ncmpd_state)
+        outer.addWidget(nd)
 
         split = QSplitter(Qt.Horizontal)
         self.slot_list = QListWidget(); self.slot_list.setMaximumWidth(160)
@@ -355,6 +395,72 @@ class MockGui(QMainWindow):
         self.slot_list.clear(); self.slot_tabs.clear(); self._panels = []
         self.statusBar().showMessage("Stopped.")
 
+    # -- ncmpd lifecycle (comm thread target: real HSM or this mock) ------
+    def _browse_ncmpd(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Locate ncmpd")
+        if path:
+            self.ncmpd_path.setText(path)
+
+    def _ncmpd_alive(self) -> bool:
+        path = self.ncmpd_sock.text().strip()
+        if not path or not os.path.exists(path):
+            return False
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(0.5); s.connect(path); s.close()
+            return True
+        except OSError:
+            return False
+
+    def start_ncmpd(self) -> None:
+        path = self.ncmpd_path.text().strip()
+        if not path or not os.path.exists(path):
+            QMessageBox.warning(self, "ncmpd",
+                                "ncmpd 바이너리를 찾을 수 없습니다. 빌드하거나 경로를 지정하세요.")
+            return
+        if self._ncmpd_proc and self._ncmpd_proc.poll() is None:
+            QMessageBox.information(self, "ncmpd", "ncmpd가 이미 실행 중입니다.")
+            return
+        is_mock = self.ncmpd_transport.currentIndex() == 0
+        env = os.environ.copy()
+        sockp = self.ncmpd_sock.text().strip()
+        if sockp:
+            env["NCMP_SOCK_PATH"] = sockp            # ncmpd IPC + clients share this
+        cmd = [path, "--transport", "socket" if is_mock else "real"]
+        if is_mock:
+            # Point the comm thread's socket backend at THIS mock_server.
+            if not (self._proc or self._ctrl):
+                QMessageBox.warning(
+                    self, "ncmpd",
+                    "mock(socket) 대상을 쓰려면 먼저 위에서 mock_server를 Start/Attach 하세요.")
+                return
+            env["NCMP_SOCKET_HOST"] = "127.0.0.1"
+            env["NCMP_SOCKET_PORT_BASE"] = str(self.data_port.value())
+            env["NCMP_SOCKET_SLOTS"] = str(self.slots.value())
+        try:
+            self._ncmpd_proc = subprocess.Popen(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "ncmpd", f"ncmpd 실행 실패:\n{exc}")
+            return
+        target = "mock(socket→this mock_server)" if is_mock else "real target"
+        if not is_mock:
+            QMessageBox.information(
+                self, "ncmpd",
+                "real target으로 기동했습니다. comm thread는 실 HSM(libusb)과 연동하며,\n"
+                "이 GUI의 슬롯 패널(mock identity)은 해당하지 않습니다.")
+        self.statusBar().showMessage(f"ncmpd 실행: {os.path.basename(path)} → {target}")
+
+    def stop_ncmpd(self) -> None:
+        if self._ncmpd_proc and self._ncmpd_proc.poll() is None:
+            self._ncmpd_proc.terminate()
+            try:
+                self._ncmpd_proc.wait(timeout=2)
+            except Exception:  # noqa: BLE001
+                self._ncmpd_proc.kill()
+        self._ncmpd_proc = None
+        self.statusBar().showMessage("ncmpd 중지.")
+
     def _rebuild_slots(self, slots: List[dict]) -> None:
         self.slot_list.clear(); self.slot_tabs.clear(); self._panels = []
         for s in slots:
@@ -372,6 +478,16 @@ class MockGui(QMainWindow):
             self.slot_tabs.setCurrentIndex(row)
 
     def _tick(self) -> None:
+        # ncmpd status (independent of the mock_server control connection).
+        running = self._ncmpd_proc is not None and self._ncmpd_proc.poll() is None
+        if running:
+            tr = "mock" if self.ncmpd_transport.currentIndex() == 0 else "real"
+            self.ncmpd_state.setText(
+                f"ncmpd: RUNNING ({tr}), sock "
+                f"{'UP' if self._ncmpd_alive() else 'down'}")
+        else:
+            self.ncmpd_state.setText(
+                "ncmpd: alive(external)" if self._ncmpd_alive() else "ncmpd: -")
         if not self._ctrl:
             return
         idx = self.slot_tabs.currentIndex()
@@ -379,6 +495,7 @@ class MockGui(QMainWindow):
             self._panels[idx].refresh()
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        self.stop_ncmpd()
         self.stop_server()
         super().closeEvent(event)
 

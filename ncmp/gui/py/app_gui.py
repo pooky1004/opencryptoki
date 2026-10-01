@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
-from ncmp_gui import ci, link, swcrypto, wire
+from ncmp_gui import ci, link, pkcs11_link, swcrypto, wire
 
 MONO = QFont("monospace")
 
@@ -182,6 +182,7 @@ class AppGui(QMainWindow):
         self.link: Optional[link.DataLink] = None
         self.stats = SessionStats()
         self._worker: Optional[FileWorker] = None
+        self.p11 = pkcs11_link.Pkcs11Link()   # PKCS#11 (real stack) mode
 
         central = QWidget(); self.setCentralWidget(central)
         outer = QVBoxLayout(central)
@@ -193,6 +194,7 @@ class AppGui(QMainWindow):
         self.tabs.addTab(self._build_pqc_tab(), "PQC")
         self.tabs.addTab(self._build_file_tab(), "File Compare")
         self.tabs.addTab(self._build_scenario_tab(), "Scenarios")
+        self.tabs.addTab(self._build_pkcs11_tab(), "PKCS#11 (real stack)")
         self.tabs.addTab(self._build_stats_tab(), "Statistics")
         outer.addWidget(self.tabs, 1)
 
@@ -860,6 +862,122 @@ class AppGui(QMainWindow):
                     "ss identical" if ss2 == ss else "ss differ"))
         return out
 
+    # -- PKCS#11 (real stack) tab -----------------------------------------
+    def _build_pkcs11_tab(self) -> QWidget:
+        w = QWidget(); v = QVBoxLayout(w)
+
+        avail, detail = pkcs11_link.available()
+        banner = QLabel(
+            "실 PKCS#11 스택(App→libopencryptoki→STDLL→ncmpd→USB/소켓)을 C_* 로 구동. "
+            "프레임 링크(상단 Link)와는 독립이며, 표준 C_* 로 표현 가능한 연산만 제공. "
+            + ("" if avail else f"<br><b>{detail}</b>"))
+        banner.setWordWrap(True)
+        v.addWidget(banner)
+
+        conn = QGroupBox("PKCS#11 module")
+        cf = QFormLayout(conn)
+        self.p11_module = QLineEdit(os.environ.get("PKCS11_MODULE", ""))
+        self.p11_module.setPlaceholderText("/usr/local/lib/opencryptoki/libopencryptoki.so")
+        self.p11_slot = QSpinBox(); self.p11_slot.setRange(0, 254)
+        self.p11_pin = QLineEdit("1234")
+        row = QHBoxLayout()
+        b_load = QPushButton("Load+Open"); b_load.clicked.connect(self._p11_connect)
+        b_login = QPushButton("Login"); b_login.clicked.connect(self._p11_login)
+        b_logout = QPushButton("Logout"); b_logout.clicked.connect(self._p11_logout)
+        b_disc = QPushButton("Close"); b_disc.clicked.connect(self._p11_close)
+        row.addWidget(b_load); row.addWidget(b_login)
+        row.addWidget(b_logout); row.addWidget(b_disc); row.addStretch(1)
+        rw = QWidget(); rw.setLayout(row)
+        cf.addRow("module (.so)", self.p11_module)
+        hs = QHBoxLayout()
+        hs.addWidget(QLabel("slot:")); hs.addWidget(self.p11_slot)
+        hs.addWidget(QLabel("PIN:")); hs.addWidget(self.p11_pin)
+        hsw = QWidget(); hsw.setLayout(hs)
+        cf.addRow("slot / PIN", hsw)
+        cf.addRow(rw)
+        v.addWidget(conn)
+
+        ops = QGroupBox("Operations (C_*)")
+        og = QHBoxLayout(ops)
+        self.p11_rng_n = QSpinBox(); self.p11_rng_n.setRange(1, 4096); self.p11_rng_n.setValue(32)
+        b_rng = QPushButton("GenerateRandom"); b_rng.clicked.connect(self._p11_rng)
+        self.p11_mech = QComboBox()
+        for name in ci.MECH_NAMES.values():
+            self.p11_mech.addItem(name)
+        self.p11_in = QLineEdit("The quick brown fox")
+        b_dg = QPushButton("Digest"); b_dg.clicked.connect(self._p11_digest)
+        b_gcm = QPushButton("AES-GCM round-trip"); b_gcm.clicked.connect(self._p11_gcm)
+        b_ti = QPushButton("Token Info"); b_ti.clicked.connect(self._p11_tokeninfo)
+        og.addWidget(QLabel("RNG:")); og.addWidget(self.p11_rng_n); og.addWidget(b_rng)
+        og.addWidget(self.p11_mech); og.addWidget(self.p11_in, 1); og.addWidget(b_dg)
+        og.addWidget(b_gcm); og.addWidget(b_ti)
+        v.addWidget(ops)
+
+        note = QLabel(
+            "<i>벤더 datapath·세션 CI·fail-bit·원시 opcode는 C_* 로 도달 불가 → 프레임 "
+            "링크 모드에서 시험. 사용·레시피: docs/app-stdll-path-design.md.</i>")
+        note.setWordWrap(True)
+        v.addWidget(note)
+
+        self.p11_out = QPlainTextEdit(); self.p11_out.setReadOnly(True)
+        self.p11_out.setFont(MONO)
+        v.addWidget(self.p11_out, 1)
+        return w
+
+    def _p11_connect(self) -> None:
+        try:
+            self.p11.load(self.p11_module.text().strip())
+            slots = self.p11.slots()
+            self._log(self.p11_out, f"loaded; token-present slots: {slots}")
+            self.p11.open(self.p11_slot.value(), rw=True)
+            self._log(self.p11_out, f"session open on slot {self.p11_slot.value()}")
+        except pkcs11_link.Pkcs11Error as e:
+            self._log(self.p11_out, f"ERROR: {e}")
+
+    def _p11_login(self) -> None:
+        try:
+            self.p11.login(self.p11_pin.text())
+            self._log(self.p11_out, "C_Login OK")
+        except Exception as e:  # noqa: BLE001
+            self._log(self.p11_out, f"login error: {e}")
+
+    def _p11_logout(self) -> None:
+        self.p11.logout(); self._log(self.p11_out, "C_Logout")
+
+    def _p11_close(self) -> None:
+        self.p11.close(); self._log(self.p11_out, "session closed")
+
+    def _p11_rng(self) -> None:
+        try:
+            out = self.p11.generate_random(self.p11_rng_n.value())
+            self._log(self.p11_out, f"C_GenerateRandom({len(out)}): {out.hex()}")
+        except Exception as e:  # noqa: BLE001
+            self._log(self.p11_out, f"RNG error: {e}")
+
+    def _p11_digest(self) -> None:
+        try:
+            out = self.p11.digest(self.p11_mech.currentText(),
+                                  self.p11_in.text().encode())
+            self._log(self.p11_out,
+                      f"C_Digest {self.p11_mech.currentText()}: {out.hex()}")
+        except Exception as e:  # noqa: BLE001
+            self._log(self.p11_out, f"digest error: {e}")
+
+    def _p11_gcm(self) -> None:
+        try:
+            ok, detail = self.p11.aes_gcm_roundtrip(b"authenticated payload")
+            self._log(self.p11_out,
+                      f"AES-GCM: {detail} [{'PASS' if ok else 'FAIL'}]")
+        except Exception as e:  # noqa: BLE001
+            self._log(self.p11_out, f"AES-GCM error: {e}")
+
+    def _p11_tokeninfo(self) -> None:
+        try:
+            ti = self.p11.token_info(self.p11_slot.value())
+            self._log(self.p11_out, f"C_GetTokenInfo: {ti}")
+        except Exception as e:  # noqa: BLE001
+            self._log(self.p11_out, f"token info error: {e}")
+
     # -- Statistics tab ---------------------------------------------------
     def _build_stats_tab(self) -> QWidget:
         w = QWidget(); v = QVBoxLayout(w)
@@ -894,6 +1012,10 @@ class AppGui(QMainWindow):
 
     def closeEvent(self, event):  # noqa: N802
         self.disconnect_link()
+        try:
+            self.p11.close()
+        except Exception:  # noqa: BLE001
+            pass
         super().closeEvent(event)
 
 

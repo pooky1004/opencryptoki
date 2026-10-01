@@ -126,8 +126,14 @@ probe는 각 슬롯 포트에 실제 **connect가 되는 슬롯만** online으�
   `probe→open→send(RNG)→recv` 를 실행 중인 `mock_server`에 대해 검증(응답 ack=OK,
   결정론 바이트 0x5A/0x5B 일치). ncmpd가 `-DENABLE_SOCKET_TOKEN=ON`으로 이 백엔드와
   링크됨도 확인.
-- **PKCS#11 예제 클라이언트** `ncmp/gui/py/pkcs11_example.py` (PyKCS11): 실 스택을
-  `C_*`로 구동하는 Part-4 앱 예시(아래 레시피에서 사용).
+- **App GUI PKCS#11 모드** — `ncmp/gui/py/app_gui.py`의 **"PKCS#11 (real stack)" 탭**
+  + 어댑터 `ncmp_gui/pkcs11_link.py`(PyKCS11). module(.so)·slot·PIN 입력 →
+  Load+Open/Login/Logout/Close, 그리고 `C_GenerateRandom`/`C_Digest`/AES-GCM 왕복/
+  `C_GetTokenInfo` 버튼. 현행 프레임 링크 탭과 **독립 공존**. PyKCS11 부재·모듈 로드
+  실패·세션 미개시 등 오류 경로를 graceful 처리(검증: PyKCS11 유/무 양쪽에서 탭 생성·
+  오류 처리 확인). 실제 `C_*` 호출은 빌드된 libopencryptoki 필요(7.2).
+- **PKCS#11 예제 클라이언트** `ncmp/gui/py/pkcs11_example.py` (PyKCS11): GUI 없이 실
+  스택을 `C_*`로 구동하는 CLI 예시.
 
 ### 7.2 사용자 빌드 환경 end-to-end 레시피 (이 환경에선 실행 불가)
 ```bash
@@ -155,7 +161,8 @@ python3 ncmp/gui/py/pkcs11_example.py --slot 0 --pin 1234
 - 실 하드웨어면 4)를 생략하고 ncmpd를 **USB 백엔드**(기본, libusb)로 빌드/기동.
 
 ### 7.3 남은 단계
-1. App GUI에 **PKCS#11 모드**(libopencryptoki 로드) 추가, 현행 프레임 링크와 **공존**
-   (`pkcs11_example.py`의 호출을 GUI `Pkcs11Link`로 래핑).
-2. §6의 불가 명령은 UI에서 **프레임 링크 모드에서만** 노출(혹은 비활성/주석).
-3. opencryptoki 빌드 환경에서 위 레시피로 end-to-end 검증.
+1. ~~App GUI에 PKCS#11 모드 추가, 프레임 링크와 공존~~ — **완료**(§7.1, "PKCS#11
+   (real stack)" 탭 + `Pkcs11Link`). §6의 불가 명령은 이 탭에 노출하지 않고 프레임 링크
+   탭에서만 시험.
+2. opencryptoki 빌드 환경에서 위 레시피(7.2)로 end-to-end 검증(실 `C_*` 동작).
+3. (선택) PQC/파생 등 추가 C_* 연산을 PKCS#11 탭에 확대.

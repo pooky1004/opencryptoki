@@ -202,7 +202,20 @@ FW version(major.minor) / Flags(u32) / UTC(16자) / Login state(읽기전용)**.
 > 성공한다. 직전에 HSM State에서 로그인해 두면 "이미 로그인"으로 1단계가 실패(FAIL)
 > 표시될 수 있다 — 먼저 Logout 후 실행.
 
-### 4.7 "Statistics" 탭 — 세션 통계
+### 4.7 "PKCS#11 (real stack)" 탭 — 실 스택 구동
+프레임 링크와 **독립**으로, App이 **libopencryptoki(C_*)** 를 통해 실제 STDLL→ncmpd→
+USB/소켓 스택을 구동한다(표준 `C_*`로 표현 가능한 연산만).
+| 항목 | 용도 |
+|------|------|
+| module (.so) | `libopencryptoki.so` 경로(기본 `$PKCS11_MODULE`). |
+| slot / PIN | PKCS#11 슬롯·사용자 PIN. |
+| Load+Open / Login / Logout / Close | 모듈 로드+세션 열기 / 로그인 / 로그아웃 / 닫기. |
+| GenerateRandom · Digest · AES-GCM round-trip · Token Info | `C_*` 연산 버튼. |
+> **전제**: `pip install PyKCS11` + 빌드된 opencryptoki + 기동된 ncmpd. 설정·레시피는
+> [`app-stdll-path-design.md`](app-stdll-path-design.md). 벤더 datapath·세션 CI·fail-bit는
+> 이 탭에 없다(프레임 링크 모드에서 시험).
+
+### 4.8 "Statistics" 탭 — 세션 통계
 App이 보낸 명령을 **opcode별**로 집계: count / ok / fail / bytes_in / bytes_out /
 avg_ms. **Refresh**로 갱신, **Clear**로 초기화.
 

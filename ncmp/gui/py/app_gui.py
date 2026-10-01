@@ -878,6 +878,10 @@ class AppGui(QMainWindow):
         cf = QFormLayout(conn)
         self.p11_module = QLineEdit(os.environ.get("PKCS11_MODULE", ""))
         self.p11_module.setPlaceholderText("/usr/local/lib/opencryptoki/libopencryptoki.so")
+        b_browse = QPushButton("Browse…"); b_browse.clicked.connect(self._p11_browse)
+        mrow = QHBoxLayout()
+        mrow.addWidget(self.p11_module, 1); mrow.addWidget(b_browse)
+        mrw = QWidget(); mrw.setLayout(mrow)
         self.p11_slot = QSpinBox(); self.p11_slot.setRange(0, 254)
         self.p11_pin = QLineEdit("1234")
         row = QHBoxLayout()
@@ -888,7 +892,7 @@ class AppGui(QMainWindow):
         row.addWidget(b_load); row.addWidget(b_login)
         row.addWidget(b_logout); row.addWidget(b_disc); row.addStretch(1)
         rw = QWidget(); rw.setLayout(row)
-        cf.addRow("module (.so)", self.p11_module)
+        cf.addRow("module (.so)", mrw)
         hs = QHBoxLayout()
         hs.addWidget(QLabel("slot:")); hs.addWidget(self.p11_slot)
         hs.addWidget(QLabel("PIN:")); hs.addWidget(self.p11_pin)
@@ -924,17 +928,52 @@ class AppGui(QMainWindow):
         v.addWidget(self.p11_out, 1)
         return w
 
+    # Guidance shown when the real PKCS#11 stack is not usable yet.
+    _P11_HINT = (
+        "→ 지금 mock을 시험하려면 이 탭 대신 상단 Link 바에서 "
+        "target=mock, port=7010, slot 선택 후 Connect 하고 다른 탭(HSM State/"
+        "Crypto/PQC/File Compare/Scenarios)을 사용하세요.\n"
+        "→ 이 PKCS#11 탭을 쓰려면 빌드된 libopencryptoki.so + 기동된 ncmpd가 "
+        "필요합니다(레시피: docs/app-stdll-path-design.md)."
+    )
+
+    def _p11_browse(self) -> None:
+        start = self.p11_module.text().strip()
+        start_dir = os.path.dirname(start) if start else "/usr/local/lib"
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select PKCS#11 module (libopencryptoki.so)", start_dir,
+            "Shared libraries (*.so *.so.*);;All files (*)")
+        if path:
+            self.p11_module.setText(path)
+
     def _p11_connect(self) -> None:
+        module = self.p11_module.text().strip()
+        if not module:
+            self._log(self.p11_out,
+                      "모듈 경로가 비어 있습니다($PKCS11_MODULE 미설정).\n"
+                      + self._P11_HINT)
+            return
         try:
-            self.p11.load(self.p11_module.text().strip())
+            self.p11.load(module)
             slots = self.p11.slots()
             self._log(self.p11_out, f"loaded; token-present slots: {slots}")
             self.p11.open(self.p11_slot.value(), rw=True)
             self._log(self.p11_out, f"session open on slot {self.p11_slot.value()}")
         except pkcs11_link.Pkcs11Error as e:
-            self._log(self.p11_out, f"ERROR: {e}")
+            self._log(self.p11_out, f"ERROR: {e}\n" + self._P11_HINT)
+
+    def _p11_need_session(self) -> bool:
+        """Log guidance and return False when there is no open PKCS#11 session."""
+        if self.p11.connected:
+            return True
+        self._log(self.p11_out,
+                  "세션이 없습니다. 먼저 module 경로 지정 후 Load+Open 하세요.\n"
+                  + self._P11_HINT)
+        return False
 
     def _p11_login(self) -> None:
+        if not self._p11_need_session():
+            return
         try:
             self.p11.login(self.p11_pin.text())
             self._log(self.p11_out, "C_Login OK")
@@ -948,6 +987,8 @@ class AppGui(QMainWindow):
         self.p11.close(); self._log(self.p11_out, "session closed")
 
     def _p11_rng(self) -> None:
+        if not self._p11_need_session():
+            return
         try:
             out = self.p11.generate_random(self.p11_rng_n.value())
             self._log(self.p11_out, f"C_GenerateRandom({len(out)}): {out.hex()}")
@@ -955,6 +996,8 @@ class AppGui(QMainWindow):
             self._log(self.p11_out, f"RNG error: {e}")
 
     def _p11_digest(self) -> None:
+        if not self._p11_need_session():
+            return
         try:
             out = self.p11.digest(self.p11_mech.currentText(),
                                   self.p11_in.text().encode())
@@ -964,6 +1007,8 @@ class AppGui(QMainWindow):
             self._log(self.p11_out, f"digest error: {e}")
 
     def _p11_gcm(self) -> None:
+        if not self._p11_need_session():
+            return
         try:
             ok, detail = self.p11.aes_gcm_roundtrip(b"authenticated payload")
             self._log(self.p11_out,

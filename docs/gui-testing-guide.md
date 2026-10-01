@@ -154,6 +154,9 @@ FW version(major.minor) / Flags(u32) / UTC(16자) / Login state(읽기전용)**.
   - **Logout**.
   - **Set PIN**: old→new PIN 변경.
   - **Init Token**: SO PIN + 라벨로 토큰 초기화.
+- **Session (CI 0x003A/0x003B)**: `pid`+`sid`로 **Open** → 토큰이 발급한 **HSM SID(1~255)**
+  표시, 그 HSM SID로 **Close**. (PID+SID→HSM SID 매핑은
+  [`session-id-mapping.md`](session-id-mapping.md).)
 
 ### 4.3 "Crypto / Hash" 탭 — 암복호/해시 시험 (+ SW 비교)
 | 그룹 | 설정 | 동작/확인 |
@@ -211,6 +214,12 @@ avg_ms. **Refresh**로 갱신, **Clear**로 초기화.
 1. `mock_server`(또는 Mock GUI Start) → Mock GUI **Attach**.
 2. Mock GUI **Identity** 탭에서 Label/Serial 등 수정 → **Apply**.
 3. App GUI **Connect**(같은 슬롯) → **HSM State → Token Info / Token Params**로 변경 확인.
+
+### 5.1b 세션 매핑(OpenSession/CloseSession) 시험
+1. App **Connect**.
+2. **HSM State → Session**: pid(자동)·sid 입력 → **Open** → HSM SID(1~255) 확인.
+3. 같은 pid·sid로 다시 Open → 같은 HSM SID(멱등). sid를 바꿔 Open → 다른 HSM SID.
+4. 표시된 HSM SID로 **Close** → CKR_OK, 재Close → CKR_SESSION_HANDLE_INVALID.
 
 ### 5.2 로그인 / PIN 시험
 1. App **Connect**.

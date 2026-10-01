@@ -203,6 +203,8 @@ enum { CI_CKU_SO = 0, CI_CKU_USER = 1, CI_CKU_CONTEXT_SPECIFIC = 2 }; /* user_ty
 | | | CI_CMD_SET_UTC_TIME | 0x0037 | UTC 시각 설정(SO) |
 | 객체 관리 | 키 객체 | CI_CMD_OBJECT_ADD | 0x0038 | 키 객체 등록/임포트 |
 | | | CI_CMD_OBJECT_SET_ATTR | 0x0039 | 키 속성 변경 검증 |
+| 세션 관리 | 세션 | CI_CMD_OPEN_SESSION | 0x003A | 세션 열기 ((pid,sid)→HSM SID) |
+| | | CI_CMD_CLOSE_SESSION | 0x003B | 세션 닫기 (HSM SID 해제) |
 | 포스트양자 | ML-DSA | CI_CMD_MLDSA_KEYGEN | 0x0050 | ML-DSA 키 쌍 생성 |
 | | | CI_CMD_MLDSA_SIGN | 0x0051 | ML-DSA 서명 |
 | | | CI_CMD_MLDSA_VERIFY | 0x0052 | ML-DSA 검증 |
@@ -880,6 +882,60 @@ enum {
   - `utc`는 정확히 16바이트여야 한다(그 외 `CKR_ARGUMENTS_BAD`).
   - 이후 `CI_CMD_GET_UTC_TIME`은 설정한 값을 그대로 되돌려준다.
   - PKCS#11에는 시각 설정용 표준 C_ 함수가 없어, 이 CI는 `ncmp_admin` 어댑터를 통한 관리 전용 경로다.
+
+#### 6.3.9. CI_CMD_OPEN_SESSION (0x003A)
+
+- 기능
+  요청 프로세스의 `(pid, sid)` 쌍을 슬롯 내에서 유일한 **8비트 HSM SID(1~255)** 로
+  매핑하여 세션을 연다. 토큰이 슬롯별 세션 테이블을 소유·관리하며, HSM SID는 중첩되지
+  않는다. 같은 `(pid, sid)` 재요청은 **멱등**(동일 HSM SID 반환).
+- 반환 값
+  - CKR_OK
+  - CKR_SESSION_COUNT (슬롯 세션 테이블이 255개로 가득 참)
+  - CKR_ARGUMENTS_BAD
+- 명령 블록
+  ```c
+  typedef struct CI_OpenSessionReq {
+      uint32_t pid;    /* param0: 요청 프로세스 ID */
+      uint32_t sid;    /* param1: 호출자(STDLL/앱) 세션 ID */
+      uint32_t flags;  /* param2: 세션 flags(CKF_RW_SESSION 등), 선택 */
+  } CI_OpenSessionReq;
+  ```
+- 응답 블록
+  ```c
+  typedef struct CI_OpenSessionRsp {
+      uint32_t hsm_sid; /* param0: 발급된 HSM SID(1..255) */
+  } CI_OpenSessionRsp;
+  ```
+- 주의사항
+  - 발급된 `hsm_sid`는 이후 그 세션의 모든 명령에서 와이어 헤더 `session_id`로 사용한다.
+  - `(pid 32비트 + sid 32비트) → hsm_sid 8비트` 매핑 규칙·충돌 회피는
+    [`session-id-mapping.md`](session-id-mapping.md) 참조.
+  - mock 구현은 테이블 인덱스+1을 HSM SID로 사용해 슬롯 내 유일성을 보장한다.
+
+#### 6.3.10. CI_CMD_CLOSE_SESSION (0x003B)
+
+- 기능
+  HSM SID로 식별되는 세션 매핑을 해제한다.
+- 반환 값
+  - CKR_OK
+  - CKR_SESSION_HANDLE_INVALID (존재하지 않는/이미 닫힌 HSM SID)
+  - CKR_ARGUMENTS_BAD
+- 명령 블록
+  ```c
+  typedef struct CI_CloseSessionReq {
+      uint32_t hsm_sid; /* param0: 닫을 HSM SID(1..255) */
+  } CI_CloseSessionReq;
+  ```
+- 응답 블록
+  ```c
+  typedef struct CI_CloseSessionRsp { /* 없음 */ } CI_CloseSessionRsp;
+  ```
+- 주의사항
+  - 닫은 HSM SID 슬롯은 재사용 가능해진다(이후 OPEN_SESSION이 재할당 가능).
+  - 표준 PKCS#11 `C_OpenSession`/`C_CloseSession`을 이 CI로 포워딩하려면 opencryptoki
+    `token_specific`에 세션 훅이 필요한데 현재 SPI에는 없다(구조적 제약).
+    → [`app-stdll-path-design.md`](app-stdll-path-design.md) 참조.
 
 ### 6.4. 객체 관리 기능 블록
 

@@ -17,6 +17,9 @@
 | [`command-interface.md`](command-interface.md) | **Command Interface(CI)** 규격. 토큰으로 가는 모든 명령별 request/response 구조체(`CI_*Req`/`CI_*Rsp`)와 필드 설명, 공통 프레임(`CI_Header`/`CI_Message`), ack(CKR_*) 표. `CI_Cmd`는 `enum ncmp_opcode`의 **별칭(alias)** 으로 정의(lockstep). advertised mechanism만 남긴 정리된 opcode 집합 + 신규 조회 CI(`GET_UTC_TIME`/`GET_TOKEN_PARAMS`) + 로그인 flags 포함. |
 | [`gui-tools-status.md`](gui-tools-status.md) | **GUI 도구 진행상황**. 모의 HSM GUI + 테스트 App GUI(+ 실 HSM 브리지)의 설계 결정·한 일·검증 결과·요구사항 대응·남은 과제 요약. 아키텍처(frame_server 공통 골격 + mock/USB 백엔드)와 파일 목록 포함. |
 | [`../ncmp/gui/README.md`](../ncmp/gui/README.md) | **GUI 도구 사용법**. `mock_server`/`hsm_bridge`(C 소켓 서버) + PySide6 두 GUI의 빌드·실행 방법, 데이터/컨트롤 프로토콜, 요구사항 대응표, 헤드리스 검증(`smoke_test.py`), 한계/후속. |
+| [`session-id-mapping.md`](session-id-mapping.md) | **세션 ID 매핑 설계·구현**. OpenSession/CloseSession CI(0x003A/B)와 `(pid 32b + sid 32b) → HSM SID 8b(1~255, 슬롯별·토큰 소유·중첩 금지·멱등)` 매핑 규칙. mock 구현·검증(고유성/멱등/해제/상한) 포함. |
+| [`slot-scaling-design.md`](slot-scaling-design.md) | **슬롯 255 확장 설계(Part 2)**. `uint32 slot_mask`(≤32) 한계, SHM 인라인 배열·comm_thread 모델·포트·시스템(2)/사용자 분류 영향분석과 마이그레이션, 구조적 제약/HW 필요 항목. |
+| [`app-stdll-path-design.md`](app-stdll-path-design.md) | **App→실 STDLL 경로 설계(Part 4)**. GUI App이 libopencryptoki→STDLL→token_specific→ncmpd→USB/소켓(mock)으로 실제 스택을 구동하는 설계, mock 소켓 전송 옵션, 그리고 **표준 C_* 경로에서 구조적으로 불가한 명령 목록**(세션 CI·벤더 datapath·seed·wrap 등). |
 | [`gui-testing-guide.md`](gui-testing-guide.md) | **GUI 시험 가이드(상세)**. 무엇을 실행·설정하고 각 메뉴/탭이 어떤 용도인지, 어떤 시험을 할 때 무엇을 실행/설정하는지 단계별 설명. Mock GUI(Server 바·Identity·Statistics·Debug·Link)·App GUI(Link·HSM State·Crypto·PQC·File Compare·Scenarios·Statistics) 메뉴 레퍼런스 + 시험별 요리책 + 트러블슈팅. |
 
 ## 핵심 소스 진입점

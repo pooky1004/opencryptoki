@@ -159,8 +159,9 @@ opencryptoki(`pkcsslotd`)·SHM 없이 토큰을 구동·시험하는 GUI 도구.
   `hsm_bridge`(실 FX3, `ncmp_transport_*`/libusb). 슬롯 = 토큰, `data port = base+slot`
   에서 wire 프레임 링크, 공용 control 포트로 상태 조회/설정. libusb 없이도 브리지 빌드
   (데이터 명령은 device 오류 반환).
-- **ncmpd 소켓 전송**(`ncmp/daemon/socket_transport.c`, `-DENABLE_SOCKET_TOKEN=ON`):
-  ncmpd가 mock_server에 TCP로 붙어 **실 STDLL 스택**을 하드웨어 없이 구동
+- **ncmpd 런타임 전송 선택**(`ncmp/daemon/transport.c` 디스패처): `--transport
+  real|mock|socket`(기본 real)/`$NCMP_TRANSPORT`로 comm thread 대상을 고름(real USB /
+  내장 mock / mock_server 소켓). 하드웨어 없이 실 STDLL 스택 구동
   (→ [`app-stdll-path-design.md`](app-stdll-path-design.md)).
 - **Python 코어**(`ncmp/gui/py/ncmp_gui/`): wire 코덱·소켓 링크·CI 빌더·SW 기준 암호
   (에뮬레이터 알고리즘 정확 복제 + 실 암호 `hashlib`/`cryptography`)·PKCS#11 어댑터

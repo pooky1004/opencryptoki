@@ -61,15 +61,15 @@ USB(실 토큰)/소켓(mock) 의 **실제 생산 경로**를 구동하도록 바
 
 ## 4. mock을 "소켓으로" 붙이는 방법
 
-현재 ncmpd는 빌드시 **인프로세스 mock_transport** 또는 **usb_transport** 중 하나만 링크한다
-(`ENABLE_MOCK_TOKEN`). 그림의 "ncmpd ──소켓──▶ mock"을 실현하려면:
+ncmpd는 이제 **모든 백엔드를 링크하고 런타임에 선택**한다(`--transport real|mock|socket`,
+기본 real / `$NCMP_TRANSPORT`). 그림의 "ncmpd ──소켓──▶ mock"은:
 
-- **옵션 A (신규 소켓 전송) — 구현 완료**: `ncmp/daemon/socket_transport.c`가
-  `ncmp_transport_*`를 **TCP 소켓**으로 구현한다(슬롯 s → `host:(base+s)`). ncmpd를
-  `-DENABLE_SOCKET_TOKEN=ON`으로 빌드하면 USB/인프로세스mock 대신 이 백엔드가 링크되어
-  우리 `mock_server`에 접속한다. → GUI 도구의 mock_server를 그대로 재사용, 실 STDLL
-  경로로 end-to-end.
-- **옵션 B (인프로세스)**: `ENABLE_MOCK_TOKEN`으로 ncmpd에 mock을 링크(소켓 아님). 그림의
+- **옵션 A (소켓 전송) — 구현 완료**: `ncmp/daemon/socket_transport.c`가
+  `ncmp_socket_ops`(TCP, 슬롯 s → `host:(base+s)`)를 제공한다. ncmpd를
+  **`--transport socket`** 으로 기동하면 우리 `mock_server`에 접속한다. → GUI 도구의
+  mock_server를 그대로 재사용, 실 STDLL 경로로 end-to-end.
+- **옵션 B (인프로세스 mock)**: `--transport mock` — ncmpd가 내장 에뮬레이터로 처리(소켓
+  아님). 하드웨어·mock_server 없이 가장 단순. 그림의
   "소켓" 요건은 못 맞추지만 가장 단순.
 - 권장: **옵션 A** — 기존 mock_server/`frame_server` 자산을 실 STDLL 경로에서 재사용.
 
@@ -124,8 +124,8 @@ probe는 각 슬롯 포트에 실제 **connect가 되는 슬롯만** online으�
 ### 7.1 구현된 것 (이 저장소에서 검증)
 - **소켓 전송 백엔드** `ncmp/daemon/socket_transport.c` (옵션 A). C 단위 테스트로
   `probe→open→send(RNG)→recv` 를 실행 중인 `mock_server`에 대해 검증(응답 ack=OK,
-  결정론 바이트 0x5A/0x5B 일치). ncmpd가 `-DENABLE_SOCKET_TOKEN=ON`으로 이 백엔드와
-  링크됨도 확인.
+  결정론 바이트 0x5A/0x5B 일치). ncmpd가 `--transport socket`으로 이 백엔드를
+  선택함도 확인.
 - **App GUI PKCS#11 모드** — `ncmp/gui/py/app_gui.py`의 **"PKCS#11 (real stack)" 탭**
   + 어댑터 `ncmp_gui/pkcs11_link.py`(PyKCS11). module(.so)·slot·PIN 입력 →
   Load+Open/Login/Logout/Close, 그리고 `C_GenerateRandom`/`C_Digest`/AES-GCM 왕복/
@@ -140,15 +140,15 @@ probe는 각 슬롯 포트에 실제 **connect가 되는 슬롯만** online으�
 # 1) opencryptoki + STDLL 빌드
 ./configure --enable-ncmptok && make            # libopencryptoki, libpkcs11_ncmp.so, pkcsslotd
 
-# 2) 소켓 백엔드로 ncmpd 빌드
-cd ncmp && cmake -S . -B build -DENABLE_SOCKET_TOKEN=ON && cmake --build build -j
+# 2) ncmpd 빌드 (모든 백엔드 포함; 런타임 --transport로 선택)
+cd ncmp && cmake -S . -B build && cmake --build build -j
 
 # 3) mock 토큰(소켓) 기동
 ./build/gui/mock_server --slots 2 --data-port 7010 --ctrl-port 7000
 
 # 4) ncmpd 기동 (소켓 전송 → mock_server)
 NCMP_SOCKET_HOST=127.0.0.1 NCMP_SOCKET_PORT_BASE=7010 NCMP_SOCKET_SLOTS=2 \
-    ./build/daemon/ncmpd
+    ./build/daemon/ncmpd --transport socket
 
 # 5) pkcsslotd 기동 + opencryptoki.conf에 ncmp 슬롯 정의
 
@@ -158,7 +158,7 @@ export PKCS11_MODULE=/usr/local/lib/opencryptoki/libopencryptoki.so
 python3 ncmp/gui/py/pkcs11_example.py --slot 0 --pin 1234
 # (GUI를 PKCS#11 모드로 쓰려면 app_gui에 PyKCS11 기반 Pkcs11Link 추가 — §5 공존안)
 ```
-- 실 하드웨어면 4)를 생략하고 ncmpd를 **USB 백엔드**(기본, libusb)로 빌드/기동.
+- 실 하드웨어면 3)·4)를 생략하고 ncmpd를 **기본(`--transport real`, libusb)** 으로 기동.
 
 ### 7.3 남은 단계
 1. ~~App GUI에 PKCS#11 모드 추가, 프레임 링크와 공존~~ — **완료**(§7.1, "PKCS#11

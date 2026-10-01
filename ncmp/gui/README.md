@@ -88,14 +88,15 @@ cd ncmp/gui/py && python3 app_gui.py
 #   → App GUI에서 host=127.0.0.1, base port=7010, slot 선택 후 Connect
 ```
 
-### 실 STDLL 스택으로 구동 (App → libopencryptoki → STDLL → ncmpd → 소켓/USB)
+### 실 STDLL 스택으로 구동 (App → STDLL → ncmpd → USB/소켓/mock)
 
 위 두 GUI는 토큰에 **wire 프레임을 직접** 보낸다. 반대로 **실제 PKCS#11 스택 전체**를
-구동하려면 ncmpd를 **소켓 전송 백엔드**로 빌드해 `mock_server`에 붙이면 된다:
+구동하려면 ncmpd를 띄우고 **런타임 `--transport`로 대상을 고른다**(기본 real):
 ```bash
-cd ncmp && cmake -S . -B build -DENABLE_SOCKET_TOKEN=ON && cmake --build build -j
+cd ncmp && cmake -S . -B build && cmake --build build -j
 ./build/gui/mock_server --slots 2 --data-port 7010 --ctrl-port 7000 &
-NCMP_SOCKET_PORT_BASE=7010 NCMP_SOCKET_SLOTS=2 ./build/daemon/ncmpd
+# comm thread가 mock_server(소켓)로 보내도록 선택:
+NCMP_SOCKET_PORT_BASE=7010 NCMP_SOCKET_SLOTS=2 ./build/daemon/ncmpd --transport socket
 # 앱은 libopencryptoki(C_*)로 구동 — 예제: py/pkcs11_example.py (PyKCS11)
 ```
 전체 레시피·구조적 제약은 [`../../docs/app-stdll-path-design.md`](../../docs/app-stdll-path-design.md).
@@ -170,7 +171,7 @@ cd ncmp/gui/py && python3 smoke_test.py     # RNG/digest/AES-CTR/세션CI/링크
 | PQC 시험 | App GUI **PQC**(ML-DSA keygen→sign→verify(+위조), ML-KEM keygen→encaps→decaps 공유비밀 일치) |
 | 테스트 시나리오 | App GUI **Scenarios**(내장 4종: smoke/admin/crypto/PQC, step별 pass/fail) |
 | 1MB+ 파일 SW 비교 | App GUI **File Compare**(스트리밍 digest / chunked AES-CTR, token vs SW, MB/s) |
-| 실 PKCS#11 스택 구동 | App GUI **PKCS#11 (real stack)** 탭 + ncmpd 소켓 전송(`-DENABLE_SOCKET_TOKEN=ON`) → [`app-stdll-path-design.md`](../../docs/app-stdll-path-design.md) |
+| 실 PKCS#11 스택 구동 | App GUI **PKCS#11 (real stack)** 탭 + ncmpd `--transport socket`(런타임 선택) → [`app-stdll-path-design.md`](../../docs/app-stdll-path-design.md) |
 
 ## 한계 / 후속 과제
 

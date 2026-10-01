@@ -34,9 +34,10 @@ Mock GUI ─ control(JSON) ─▶ mock_server(C) ◀─ data(wire frame) ─ App
 - CMake: `ncmp/gui/server/CMakeLists.txt`(`ENABLE_GUI_SERVER`) — `ncmp_frame_server`
   라이브러리 + `mock_server` + `hsm_bridge`(libusb 있으면 자동 링크). 상위
   `ncmp/CMakeLists.txt`에 `add_subdirectory(gui/server)`.
-- **ncmpd 소켓 전송 백엔드** `ncmp/daemon/socket_transport.c`
-  (`-DENABLE_SOCKET_TOKEN=ON`): ncmpd가 `ncmp_transport_*`를 TCP로 구현해 `mock_server`에
-  접속 → App이 실 STDLL 스택을 하드웨어 없이 구동(→ [`app-stdll-path-design.md`](app-stdll-path-design.md)).
+- **ncmpd 런타임 전송 선택**: 모든 백엔드를 링크하고 디스패처(`ncmp/daemon/transport.c`)
+  가 `--transport real|mock|socket`(기본 real)/`$NCMP_TRANSPORT`로 고른다 —
+  `usb_transport.c`(real)·`mock_backend.c`(에뮬레이터)·`socket_transport.c`(mock_server).
+  소켓/mock으로 App이 실 STDLL 스택을 하드웨어 없이 구동(→ [`app-stdll-path-design.md`](app-stdll-path-design.md)).
 
 ### 2.2 Python 공용 코어 — `ncmp/gui/py/ncmp_gui/`
 - `wire.py`: wire 프레임 LE 인코드/디코드(프레임 프리픽스+헤더+param_len[8]+params).
@@ -103,7 +104,7 @@ Mock GUI ─ control(JSON) ─▶ mock_server(C) ◀─ data(wire frame) ─ App
 | 테스트 시나리오 | ✅ 내장 4종(smoke/admin/crypto/PQC) |
 | 1MB+ 파일 SW 비교 | ✅ File Compare 탭 |
 | 세션 관리(OpenSession/CloseSession) | ✅ CI 0x003A/B + HSM State→Session((pid,sid)→HSM SID 1~255) |
-| 실 PKCS#11 스택 구동 | ✅ ncmpd 소켓 전송(`ENABLE_SOCKET_TOKEN`) + App **PKCS#11 (real stack)** 탭 (실 C_* 는 빌드 환경) |
+| 실 PKCS#11 스택 구동 | ✅ ncmpd `--transport real|mock|socket`(기본 real) + App **PKCS#11 (real stack)** 탭(모드 2, ncmpd transport 콤보) (실 C_* 는 빌드 환경) |
 
 ## 5. 남은 과제 (TODO)
 

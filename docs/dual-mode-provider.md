@@ -105,14 +105,15 @@ CK_BYTE r[16]; fl->C_GenerateRandom(s, r, sizeof r);
 ### 5.0.1 풀빌드 없이 돌려보는 데모 (검증됨)
 opencryptoki 전체 빌드 없이 **모드 2 전용 provider**와 mock 데몬만 빌드해 실행한다:
 ```bash
-sh ncmp/gui/build_standalone_p11.sh                # → build-standalone/{libpkcs11_ncmp_p11.so, ncmpd_mock}
+sh ncmp/gui/build_standalone_p11.sh                # → build-standalone/{libpkcs11_ncmp_p11.so, ncmpd}
 export NCMP_SOCK_PATH=/tmp/ncmpd.sock
-./ncmp/gui/build-standalone/ncmpd_mock &           # SHM 생성 + conn/comm 스레드
+./ncmp/gui/build-standalone/ncmpd --transport mock &   # SHM 생성 + conn/comm 스레드(mock 대상)
 NCMP_PKCS11_MODULE=$PWD/ncmp/gui/build-standalone/libpkcs11_ncmp_p11.so \
     python3 ncmp/gui/py/app_gui.py                 # PKCS#11 탭 → Load+Open → GenerateRandom
 ```
 - `build_standalone_p11.sh`는 facade(`ncmp_p11.c`) + ncmp 어댑터/클라이언트/common 으로
-  **`libpkcs11_ncmp_p11.so`**(C_* 만, 모드 2 전용)와 **`ncmpd_mock`**을 gcc로 빌드한다.
+  **`libpkcs11_ncmp_p11.so`**(C_* 만, 모드 2 전용)와 **`ncmpd`**(전 백엔드; `--transport`로
+  real/mock/socket 선택)을 gcc로 빌드한다.
   (운영용 `libpkcs11_ncmp.so`는 autotools 빌드로 SC_*/ST_Initialize(모드 1)까지 포함.)
 - **검증**: GUI의 ctypes 링크로 이 `.so`를 dlopen → `C_Initialize`(ncmpd 접속+SHM) →
   `C_GetSlotList=[0]` → `C_OpenSession` → `C_GenerateRandom(16)` = `5a5b5c…`(mock RNG와

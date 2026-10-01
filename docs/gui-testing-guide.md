@@ -78,10 +78,10 @@ cd ncmp/gui/py && python3 app_gui.py
 **두 가지 구동 방식**:
 - **프레임 링크 모드**(기본, 위 ①~③): App이 토큰에 **wire 프레임을 직접** 보냄. 전체
   CI(벤더·세션·fail-bit 포함) 시험 가능.
-- **실 PKCS#11 스택 모드**: App이 **libopencryptoki(C_*)** → STDLL → ncmpd(소켓 전송) →
-  mock_server 로 **실제 스택**을 구동. App GUI의 **"PKCS#11 (real stack)" 탭** 사용(§4.7).
-  ncmpd를 `-DENABLE_SOCKET_TOKEN=ON`으로 빌드·기동해야 하며, 레시피는
-  [`app-stdll-path-design.md`](app-stdll-path-design.md).
+- **실 PKCS#11 스택 모드(= 모드 2)**: App이 `libpkcs11_ncmp.so`를 직접 dlopen+dlsym →
+  STDLL 파사드 → ncmpd → USB(real)/mock/socket 로 **실제 스택**을 구동. App GUI의
+  **"PKCS#11 (real stack)" 탭** 사용(§4.7). ncmpd는 `--transport real|mock|socket`
+  (기본 real)로 대상을 고른다. 레시피: [`dual-mode-provider.md`](dual-mode-provider.md).
 
 ---
 
@@ -218,6 +218,7 @@ FW version(major.minor) / Flags(u32) / UTC(16자) / Login state(읽기전용)**.
 |------|------|
 | module (.so) | `libpkcs11_ncmp.so` 경로(기본값 자동 탐색, env `NCMP_PKCS11_MODULE` 우선, **Browse…**). |
 | slot / PIN | PKCS#11 슬롯·사용자 PIN. |
+| ncmpd transport | 이 탭에서 ncmpd를 **autostart**할 때 comm thread 대상(**mock** 또는 **real**). 이미 떠 있는 ncmpd에는 영향 없음. |
 | Resolve (dlsym) | dlopen 후 `C_GetFunctionList`/`C_GetInterfaceList`/`C_GetInterface` 발견 여부 표시. |
 | Load+Open / Login / Logout / Close | dlopen→`C_Initialize`→`C_GetSlotList`→`C_OpenSession` / login / logout / `C_CloseSession`+`C_Finalize`. `C_Initialize` 실패 시 **ncmpd 진단 팝업**(살아있으면 경고, 미실행이면 "실행할까요?"→실행 후 자동 재시도). |
 | GenerateRandom · Digest · AES-GCM round-trip · Token Info | `C_*` 연산 버튼. |
@@ -225,8 +226,8 @@ FW version(major.minor) / Flags(u32) / UTC(16자) / Login state(읽기전용)**.
 > [`dual-mode-provider.md`](dual-mode-provider.md). 벤더 datapath·세션 CI·fail-bit는
 > 이 탭에 없다(프레임 링크 모드에서 시험).
 > **풀빌드 없이 데모**: `sh ncmp/gui/build_standalone_p11.sh`로 모드-2 전용 provider
-> (`libpkcs11_ncmp_p11.so`)와 `ncmpd_mock`을 빌드 → `export NCMP_SOCK_PATH=/tmp/ncmpd.sock`
-> → `ncmpd_mock &` → `NCMP_PKCS11_MODULE=…/libpkcs11_ncmp_p11.so python3 app_gui.py`.
+> (`libpkcs11_ncmp_p11.so`)와 `ncmpd`(전 백엔드)을 빌드 → `export NCMP_SOCK_PATH=/tmp/ncmpd.sock`
+> → `ncmpd --transport mock &` → `NCMP_PKCS11_MODULE=…/libpkcs11_ncmp_p11.so python3 app_gui.py`.
 > **Load+Open** 시 `C_Initialize`가 ncmpd conn 스레드에 접속·SHM 부착, 이후 `C_*`가
 > 해당 슬롯 큐에 인큐된다(검증됨: GenerateRandom → mock → 5a5b5c…).
 > **아직 빌드 전이면**: 모듈 미설정/세션 없음 상태에서 버튼을 누르면 탭이

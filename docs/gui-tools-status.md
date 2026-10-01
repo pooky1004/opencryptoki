@@ -44,7 +44,8 @@ Mock GUI ─ control(JSON) ─▶ mock_server(C) ◀─ data(wire frame) ─ App
 - `link.py`: `DataLink`(프레임 링크, 스레드 안전) + `ControlClient`(JSON RPC).
 - `swcrypto.py`: **에뮬레이터 알고리즘 바이트 정확 복제**(`mock_*`: RNG/digest fold·
   finalize/AES 스트림) + **실 암호**(`real_*`: hashlib/cryptography).
-- `pkcs11_link.py`: **PKCS#11 어댑터**(PyKCS11, 지연 import) — 실 스택 C_* 구동용.
+- `pkcs11_ctypes.py`: **모드 2 PKCS#11 링크**(ctypes로 직접 dlopen+dlsym; App GUI 기본).
+- `pkcs11_link.py`: PyKCS11 어댑터(대안; `pkcs11_example.py`에서 사용).
 
 ### 2.3 모의 HSM GUI — `ncmp/gui/py/mock_gui.py`
 - 서버 **Start/Attach/Stop**, 슬롯 목록.
@@ -60,7 +61,8 @@ Mock GUI ─ control(JSON) ─▶ mock_server(C) ◀─ data(wire frame) ─ App
   **PQC**(ML-DSA keygen→sign→verify(+위조 거부), ML-KEM keygen→encaps→decaps 공유비밀 일치),
   **File Compare**(스트리밍 digest / chunked AES-CTR, token↔SW, MB/s, 진행바; 워커 스레드),
   **Scenarios**(내장 4종: smoke/admin/crypto/PQC, step별 pass/fail 표),
-  **PKCS#11 (real stack)**(libopencryptoki C_* 로 실 스택 구동; 프레임 링크와 독립 공존),
+  **PKCS#11 (real stack)**(모드 2: `libpkcs11_ncmp.so`를 직접 dlopen+dlsym해 C_* 호출;
+  ctypes만, 프레임 링크와 독립 공존),
   **Statistics**(opcode별 count/ok/fail/bytes/avg_ms).
 - opcode별 세션 통계 자동 집계.
 

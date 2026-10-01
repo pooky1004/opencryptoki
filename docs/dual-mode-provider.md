@@ -87,6 +87,19 @@ CK_BYTE r[16]; fl->C_GenerateRandom(s, r, sizeof r);
 - **런타임 검증**: full opencryptoki 빌드 + 기동된 ncmpd 필요 → 이 환경에선 불가(컴파일
   까지). 빌드 환경에서 `pkcs11-tool --module ./libpkcs11_ncmp.so ...`로 확인 가능.
 
+## 5.1 Test App GUI의 모드 2 사용
+
+`ncmp/gui/py/app_gui.py`의 **"PKCS#11 (real stack)" 탭**이 모드 2로 동작한다
+(어댑터 `ncmp/gui/py/ncmp_gui/pkcs11_ctypes.py`, **ctypes만** 사용 — PyKCS11·
+libopencryptoki 불사용):
+- **Resolve (dlsym)**: `.so`를 dlopen 하고 `C_GetFunctionList`/`C_GetInterfaceList`/
+  `C_GetInterface` 를 dlsym 으로 찾았는지 표시(모드 2 발견 과정 시연).
+- **Load+Open**: dlopen → `C_Initialize` → `C_GetSlotList` → `C_OpenSession`.
+- **Login / GenerateRandom / Digest / AES-GCM / Token Info / Close**: 각 `C_*` 직접 호출.
+- 모듈 경로 기본값은 `libpkcs11_ncmp.so`(env `NCMP_PKCS11_MODULE` 우선, Browse 가능).
+- 검증: stub `.so`로 dlopen+dlsym+호출 경로를 종단 확인(C_Initialize/SlotList/
+  OpenSession/GenerateRandom/Finalize). 실 `.so`는 빌드 + 기동된 ncmpd 필요.
+
 ## 6. 후속
 1. `C_Sign/Verify`(ML-DSA), `C_GenerateKeyPair`(ML-DSA/ML-KEM),
    `C_EncapsulateKey/DecapsulateKey`(ML-KEM), `C_DeriveKey`(SHAKE)를 기존 어댑터로 배선.

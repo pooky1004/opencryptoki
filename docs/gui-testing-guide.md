@@ -210,21 +210,22 @@ FW version(major.minor) / Flags(u32) / UTC(16자) / Login state(읽기전용)**.
 > 성공한다. 직전에 HSM State에서 로그인해 두면 "이미 로그인"으로 1단계가 실패(FAIL)
 > 표시될 수 있다 — 먼저 Logout 후 실행.
 
-### 4.7 "PKCS#11 (real stack)" 탭 — 실 스택 구동
-프레임 링크와 **독립**으로, App이 **libopencryptoki(C_*)** 를 통해 실제 STDLL→ncmpd→
-USB/소켓 스택을 구동한다(표준 `C_*`로 표현 가능한 연산만).
+### 4.7 "PKCS#11 (real stack)" 탭 — 모드 2(직접 dlopen+dlsym)
+프레임 링크와 **독립**으로, App이 **`libpkcs11_ncmp.so`를 직접 dlopen** 하고 **dlsym**
+으로 `C_*`를 찾아 호출한다(libopencryptoki·PyKCS11 불사용, **ctypes만**). → 실제 STDLL
+파사드 → ncmpd → USB/소켓. 표준 `C_*`로 표현 가능한 연산만 제공.
 | 항목 | 용도 |
 |------|------|
-| module (.so) | `libopencryptoki.so` 경로(기본 `$PKCS11_MODULE`). **Browse…** 로 파일 선택 가능. |
+| module (.so) | `libpkcs11_ncmp.so` 경로(기본값 자동 탐색, env `NCMP_PKCS11_MODULE` 우선, **Browse…**). |
 | slot / PIN | PKCS#11 슬롯·사용자 PIN. |
-| Load+Open / Login / Logout / Close | 모듈 로드+세션 열기 / 로그인 / 로그아웃 / 닫기. |
+| Resolve (dlsym) | dlopen 후 `C_GetFunctionList`/`C_GetInterfaceList`/`C_GetInterface` 발견 여부 표시. |
+| Load+Open / Login / Logout / Close | dlopen→`C_Initialize`→`C_GetSlotList`→`C_OpenSession` / login / logout / `C_CloseSession`+`C_Finalize`. |
 | GenerateRandom · Digest · AES-GCM round-trip · Token Info | `C_*` 연산 버튼. |
-> **전제**: `pip install PyKCS11` + 빌드된 opencryptoki + 기동된 ncmpd. 설정·레시피는
-> [`app-stdll-path-design.md`](app-stdll-path-design.md). 벤더 datapath·세션 CI·fail-bit는
+> **전제**: 빌드된 `libpkcs11_ncmp.so` + 기동된 ncmpd. 설정·레시피는
+> [`dual-mode-provider.md`](dual-mode-provider.md). 벤더 datapath·세션 CI·fail-bit는
 > 이 탭에 없다(프레임 링크 모드에서 시험).
 > **아직 빌드 전이면**: 모듈 미설정/세션 없음 상태에서 버튼을 누르면 탭이
-> **프레임 링크 모드(상단 Link 바, target=mock)로 시험하라**고 안내한다 — 지금 mock을
-> 시험할 때는 이 탭 대신 상단 Link 바로 Connect 후 다른 탭을 쓰면 된다.
+> **프레임 링크 모드(상단 Link 바, target=mock)로 시험하라**고 안내한다.
 
 ### 4.8 "Statistics" 탭 — 세션 통계
 App이 보낸 명령을 **opcode별**로 집계: count / ok / fail / bytes_in / bytes_out /

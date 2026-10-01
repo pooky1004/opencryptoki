@@ -18,6 +18,8 @@ Requires PySide6:  pip install -r requirements.txt
 from __future__ import annotations
 
 import os
+import socket
+import subprocess
 import sys
 import time
 from collections import defaultdict
@@ -28,8 +30,9 @@ from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
-    QLabel, QLineEdit, QMainWindow, QPlainTextEdit, QProgressBar, QPushButton,
-    QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
+    QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar,
+    QPushButton, QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget,
+    QVBoxLayout, QWidget,
 )
 
 from ncmp_gui import ci, link, pkcs11_ctypes, swcrypto, wire
@@ -53,6 +56,23 @@ def find_ncmp_module() -> str:
         if os.path.exists(c):
             return os.path.abspath(c)
     return "libpkcs11_ncmp.so"
+
+
+def find_ncmpd() -> str:
+    """Best-effort locate an ncmpd binary to offer to start."""
+    env = os.environ.get("NCMP_DAEMON")
+    if env and os.path.exists(env):
+        return env
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(here, "..", "build-standalone", "ncmpd_mock"),
+        os.path.join(here, "..", "..", "build", "daemon", "ncmpd"),
+        "/usr/local/sbin/ncmpd", "/usr/sbin/ncmpd",
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return os.path.abspath(c)
+    return ""
 
 
 # --------------------------------------------------------------------------- #
@@ -201,6 +221,7 @@ class AppGui(QMainWindow):
         self.stats = SessionStats()
         self._worker: Optional[FileWorker] = None
         self.p11 = pkcs11_ctypes.Pkcs11CtypesLink()  # mode 2: direct dlopen+dlsym
+        self._ncmpd_proc: Optional[subprocess.Popen] = None  # ncmpd we started
 
         central = QWidget(); self.setCentralWidget(central)
         outer = QVBoxLayout(central)
@@ -988,14 +1009,103 @@ class AppGui(QMainWindow):
             return
         try:
             self.p11.load(module)                 # dlopen
-            self.p11.initialize()                  # C_Initialize (dlsym)
-            slots = self.p11.slots()               # C_GetSlotList
+        except pkcs11_ctypes.Pkcs11CtypesError as e:
+            self._log(self.p11_out, f"ERROR: {e}\n" + self._P11_HINT)
+            return
+        # C_Initialize connects to ncmpd (conn thread) + attaches SHM. If that
+        # fails, diagnose whether ncmpd is running and offer to start it.
+        if not self._p11_try_initialize():
+            return
+        try:
+            slots = self.p11.slots()               # C_GetSlotList (from SHM)
             self._log(self.p11_out,
                       f"dlopen+C_Initialize OK; token-present slots: {slots}")
             self.p11.open(self.p11_slot.value(), rw=True)
             self._log(self.p11_out, f"C_OpenSession on slot {self.p11_slot.value()}")
         except pkcs11_ctypes.Pkcs11CtypesError as e:
-            self._log(self.p11_out, f"ERROR: {e}\n" + self._P11_HINT)
+            self._log(self.p11_out, f"ERROR: {e}")
+
+    # -- ncmpd connectivity diagnosis / autostart -------------------------
+    @staticmethod
+    def _ncmpd_sock_path() -> str:
+        return os.environ.get("NCMP_SOCK_PATH") or "/run/ncmpd/ncmpd.sock"
+
+    def _ncmpd_alive(self) -> bool:
+        """True if ncmpd's conn thread is listening on the IPC socket."""
+        path = self._ncmpd_sock_path()
+        if not os.path.exists(path):
+            return False
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(0.5)
+            s.connect(path)
+            s.close()
+            return True
+        except OSError:
+            return False
+
+    def _p11_try_initialize(self) -> bool:
+        """C_Initialize with ncmpd diagnosis: alive→warn, not running→offer start."""
+        try:
+            self.p11.initialize()
+            return True
+        except pkcs11_ctypes.Pkcs11CtypesError as e:
+            first_err = e
+
+        if self._ncmpd_alive():
+            QMessageBox.warning(
+                self, "ncmpd",
+                "ncmpd가 실행 중인데도 연결에 실패했습니다.\n"
+                f"소켓: {self._ncmpd_sock_path()}\n"
+                f"원인(예: 버전/SHM 불일치): {first_err}\n"
+                "ncmpd 로그를 확인하세요.")
+            self._log(self.p11_out,
+                      f"C_Initialize 실패(ncmpd 살아있음): {first_err}")
+            return False
+
+        btn = QMessageBox.question(
+            self, "ncmpd",
+            "ncmpd가 실행되고 있지 않습니다.\n지금 실행할까요?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        if btn != QMessageBox.Yes:
+            self._log(self.p11_out, "C_Initialize 실패: ncmpd 미실행(실행 취소)")
+            return False
+        if not self._start_ncmpd():
+            return False
+        try:
+            self.p11.initialize()                  # retry after starting ncmpd
+            self._log(self.p11_out, "ncmpd 실행 후 C_Initialize 재시도 성공")
+            return True
+        except pkcs11_ctypes.Pkcs11CtypesError as e:
+            QMessageBox.critical(self, "ncmpd",
+                                 f"ncmpd 실행 후에도 연결에 실패했습니다:\n{e}")
+            self._log(self.p11_out, f"재시도 실패: {e}")
+            return False
+
+    def _start_ncmpd(self) -> bool:
+        """Launch the ncmpd daemon and wait for its socket to come up."""
+        daemon = find_ncmpd()
+        if not daemon or not os.path.exists(daemon):
+            daemon, _ = QFileDialog.getOpenFileName(self, "Locate ncmpd binary")
+            if not daemon:
+                self._log(self.p11_out, "ncmpd 실행 취소(바이너리 미지정)")
+                return False
+        try:
+            self._ncmpd_proc = subprocess.Popen(
+                [daemon], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                env=os.environ.copy())   # inherits NCMP_SOCK_PATH
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "ncmpd", f"ncmpd 실행 실패:\n{exc}")
+            return False
+        for _ in range(30):            # up to ~3s for the socket to appear
+            if self._ncmpd_alive():
+                self._log(self.p11_out, f"ncmpd 실행: {daemon}")
+                return True
+            time.sleep(0.1)
+        QMessageBox.critical(self, "ncmpd",
+                             "ncmpd를 실행했지만 소켓이 열리지 않았습니다.\n"
+                             f"소켓: {self._ncmpd_sock_path()}")
+        return False
 
     def _p11_need_session(self) -> bool:
         """Log guidance and return False when there is no open PKCS#11 session."""
@@ -1095,8 +1205,15 @@ class AppGui(QMainWindow):
         self.disconnect_link()
         try:
             self.p11.close()
+            self.p11.finalize()
         except Exception:  # noqa: BLE001
             pass
+        if self._ncmpd_proc is not None and self._ncmpd_proc.poll() is None:
+            self._ncmpd_proc.terminate()
+            try:
+                self._ncmpd_proc.wait(timeout=2)
+            except Exception:  # noqa: BLE001
+                self._ncmpd_proc.kill()
         super().closeEvent(event)
 
 

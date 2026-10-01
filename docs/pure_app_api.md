@@ -9,6 +9,13 @@ opencryptoki(pkcsslotd)와 그 슬롯매니저 공유메모리를 **사용하지
 > export 심볼**을 다루되, 이 문서는 앱이 심볼을 **직접** 호출하는 관점,
 > `cryptoki_app_api.md`는 libopencryptoki가 대신 호출해 주는 관점이다.
 
+> **갱신(중요)**: 아래 §전제는 "STDLL이 `C_*`/`C_GetFunctionList`를 export 하지 않는다"
+> 고 서술하지만, 이후 **독립 PKCS#11 provider 파사드**(`ncmp_p11.c`)가 추가되어
+> `libpkcs11_ncmp.so`가 이제 **`C_GetFunctionList`/`C_GetInterface(List)`/`C_*`도
+> export** 한다. 즉 앱이 `dlopen`+`dlsym`으로 **직접 표준 PKCS#11 모듈처럼** 쓸 수 있다
+> (→ [`dual-mode-provider.md`](dual-mode-provider.md)). 본문의 `SC_*` 설명은 "모드 1"
+> (libopencryptoki 경유 SPI) 관점으로 읽을 것.
+
 ---
 
 ## 반드시 먼저 이해할 전제 (중요)

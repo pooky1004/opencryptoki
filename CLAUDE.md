@@ -84,9 +84,12 @@ cmake/          FindLibUSB.cmake
   `ncmp/include/ncmp/ncmp_cmd.h`; mock implementation in
   `ncmp/mock/mcu_scheduler.c`.
 
-> Note: a self-contained dlopen-able PKCS#11 provider (`ncmp/pkcs11/`, p11_*.c)
-> once existed as a second build shape but was **removed** — the STDLL is the
-> only PKCS#11 entry point now.
+> Note: the standalone provider now lives **inside** the STDLL as a facade
+> (`usr/lib/ncmp_stdll/ncmp_p11.c`), so `libpkcs11_ncmp.so` serves two modes at
+> once: ① via libopencryptoki (`SC_*`/`ST_Initialize`), and ② direct
+> `dlopen`+`dlsym` of `C_GetFunctionList`/`C_GetInterface(List)`/`C_*`
+> (2.40/3.0/3.2). See `docs/dual-mode-provider.md`. (The earlier separate
+> `ncmp/pkcs11/` build shape remains removed.)
 
 ## Build & test
 ```bash

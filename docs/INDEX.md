@@ -19,6 +19,7 @@
 | [`../ncmp/gui/README.md`](../ncmp/gui/README.md) | **GUI 도구 사용법**. `mock_server`/`hsm_bridge`(C 소켓 서버) + PySide6 두 GUI의 빌드·실행 방법, 데이터/컨트롤 프로토콜, 요구사항 대응표, 헤드리스 검증(`smoke_test.py`), 한계/후속. |
 | [`session-id-mapping.md`](session-id-mapping.md) | **세션 ID 매핑 설계·구현**. OpenSession/CloseSession CI(0x003A/B)와 `(pid 32b + sid 32b) → HSM SID 8b(1~255, 슬롯별·토큰 소유·중첩 금지·멱등)` 매핑 규칙. mock 구현·검증(고유성/멱등/해제/상한) 포함. |
 | [`slot-scaling-design.md`](slot-scaling-design.md) | **슬롯 255 확장 설계(Part 2)**. `uint32 slot_mask`(≤32) 한계, SHM 인라인 배열·comm_thread 모델·포트·시스템(2)/사용자 분류 영향분석과 마이그레이션, 구조적 제약/HW 필요 항목. |
+| [`dual-mode-provider.md`](dual-mode-provider.md) | **libpkcs11_ncmp.so 이중 사용 모드**. ① libopencryptoki 경유(SC_*/ST_Initialize) ② 앱이 직접 dlopen+dlsym(C_GetFunctionList/C_GetInterface/C_* 전체, 2.40/3.0/3.2) — 두 모드를 한 .so에 공존. 독립 파사드 `usr/lib/ncmp_stdll/ncmp_p11.c`(어댑터 직호출, 로컬 슬롯/세션/오브젝트), export-map·빌드 배선, 구현/미구현(후속) 범위. |
 | [`app-stdll-path-design.md`](app-stdll-path-design.md) | **App→실 STDLL 경로 설계(Part 4)**. GUI App이 libopencryptoki→STDLL→token_specific→ncmpd→USB/소켓(mock)으로 실제 스택을 구동하는 설계, mock 소켓 전송 옵션, 그리고 **표준 C_* 경로에서 구조적으로 불가한 명령 목록**(세션 CI·벤더 datapath·seed·wrap 등). |
 | [`gui-testing-guide.md`](gui-testing-guide.md) | **GUI 시험 가이드(상세)**. 무엇을 실행·설정하고 각 메뉴/탭이 어떤 용도인지, 어떤 시험을 할 때 무엇을 실행/설정하는지 단계별 설명. Mock GUI(Server 바·Identity·Statistics·Debug·Link)·App GUI(Link·HSM State·Crypto·PQC·File Compare·Scenarios·Statistics) 메뉴 레퍼런스 + 시험별 요리책 + 트러블슈팅. |
 

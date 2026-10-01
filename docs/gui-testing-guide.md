@@ -215,13 +215,16 @@ FW version(major.minor) / Flags(u32) / UTC(16자) / Login state(읽기전용)**.
 USB/소켓 스택을 구동한다(표준 `C_*`로 표현 가능한 연산만).
 | 항목 | 용도 |
 |------|------|
-| module (.so) | `libopencryptoki.so` 경로(기본 `$PKCS11_MODULE`). |
+| module (.so) | `libopencryptoki.so` 경로(기본 `$PKCS11_MODULE`). **Browse…** 로 파일 선택 가능. |
 | slot / PIN | PKCS#11 슬롯·사용자 PIN. |
 | Load+Open / Login / Logout / Close | 모듈 로드+세션 열기 / 로그인 / 로그아웃 / 닫기. |
 | GenerateRandom · Digest · AES-GCM round-trip · Token Info | `C_*` 연산 버튼. |
 > **전제**: `pip install PyKCS11` + 빌드된 opencryptoki + 기동된 ncmpd. 설정·레시피는
 > [`app-stdll-path-design.md`](app-stdll-path-design.md). 벤더 datapath·세션 CI·fail-bit는
 > 이 탭에 없다(프레임 링크 모드에서 시험).
+> **아직 빌드 전이면**: 모듈 미설정/세션 없음 상태에서 버튼을 누르면 탭이
+> **프레임 링크 모드(상단 Link 바, target=mock)로 시험하라**고 안내한다 — 지금 mock을
+> 시험할 때는 이 탭 대신 상단 Link 바로 Connect 후 다른 탭을 쓰면 된다.
 
 ### 4.8 "Statistics" 탭 — 세션 통계
 App이 보낸 명령을 **opcode별**로 집계: count / ok / fail / bytes_in / bytes_out /

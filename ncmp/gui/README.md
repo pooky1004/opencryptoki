@@ -83,6 +83,18 @@ cd ncmp/gui/py && python3 app_gui.py
 ./build/gui/hsm_bridge --data-port 7010 --ctrl-port 7000
 #   → App GUI에서 host=127.0.0.1, base port=7010, slot 선택 후 Connect
 ```
+
+### 실 STDLL 스택으로 구동 (App → libopencryptoki → STDLL → ncmpd → 소켓/USB)
+
+위 두 GUI는 토큰에 **wire 프레임을 직접** 보낸다. 반대로 **실제 PKCS#11 스택 전체**를
+구동하려면 ncmpd를 **소켓 전송 백엔드**로 빌드해 `mock_server`에 붙이면 된다:
+```bash
+cd ncmp && cmake -S . -B build -DENABLE_SOCKET_TOKEN=ON && cmake --build build -j
+./build/gui/mock_server --slots 2 --data-port 7010 --ctrl-port 7000 &
+NCMP_SOCKET_PORT_BASE=7010 NCMP_SOCKET_SLOTS=2 ./build/daemon/ncmpd
+# 앱은 libopencryptoki(C_*)로 구동 — 예제: py/pkcs11_example.py (PyKCS11)
+```
+전체 레시피·구조적 제약은 [`../../docs/app-stdll-path-design.md`](../../docs/app-stdll-path-design.md).
 > Mock GUI의 **Start** 버튼으로 서버를 직접 띄울 수 있다(바이너리 경로 지정). App GUI는
 > `데이터 포트 = base + slot`으로 접속한다.
 

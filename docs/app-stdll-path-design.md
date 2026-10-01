@@ -64,12 +64,23 @@ USB(실 토큰)/소켓(mock) 의 **실제 생산 경로**를 구동하도록 바
 현재 ncmpd는 빌드시 **인프로세스 mock_transport** 또는 **usb_transport** 중 하나만 링크한다
 (`ENABLE_MOCK_TOKEN`). 그림의 "ncmpd ──소켓──▶ mock"을 실현하려면:
 
-- **옵션 A (신규 소켓 전송)**: `ncmp_transport_*`를 **TCP 소켓**으로 구현한 백엔드
-  (`socket_transport.c`)를 추가해, ncmpd가 우리 `mock_server`(이미 wire 프레임 서버)에
-  접속. → GUI 도구의 mock_server를 그대로 재사용, 실 STDLL 경로로 end-to-end 테스트.
+- **옵션 A (신규 소켓 전송) — 구현 완료**: `ncmp/daemon/socket_transport.c`가
+  `ncmp_transport_*`를 **TCP 소켓**으로 구현한다(슬롯 s → `host:(base+s)`). ncmpd를
+  `-DENABLE_SOCKET_TOKEN=ON`으로 빌드하면 USB/인프로세스mock 대신 이 백엔드가 링크되어
+  우리 `mock_server`에 접속한다. → GUI 도구의 mock_server를 그대로 재사용, 실 STDLL
+  경로로 end-to-end.
 - **옵션 B (인프로세스)**: `ENABLE_MOCK_TOKEN`으로 ncmpd에 mock을 링크(소켓 아님). 그림의
   "소켓" 요건은 못 맞추지만 가장 단순.
 - 권장: **옵션 A** — 기존 mock_server/`frame_server` 자산을 실 STDLL 경로에서 재사용.
+
+### 4.1 소켓 전송 설정(환경변수)
+| 변수 | 기본값 | 의미 |
+|------|--------|------|
+| `NCMP_SOCKET_HOST` | `127.0.0.1` | frame server 호스트 |
+| `NCMP_SOCKET_PORT_BASE` | `7010` | 데이터 base 포트(슬롯 s = base+s) |
+| `NCMP_SOCKET_SLOTS` | `PKCS11_MAX_SLOT_COUNT` | probe할 최대 슬롯 수 |
+
+probe는 각 슬롯 포트에 실제 **connect가 되는 슬롯만** online으로 보고한다.
 
 ## 5. 권장: 두 모드 공존 (현행 유지 + 신규)
 
@@ -108,9 +119,43 @@ USB(실 토큰)/소켓(mock) 의 **실제 생산 경로**를 구동하도록 바
 > 대응이 없어 구조적으로 불가하다. 이들은 프레임 링크 모드(또는 전용 관리 인터페이스)로만
 > 시험할 수 있다.
 
-## 7. 권장 단계
+## 7. 구현 상태 / end-to-end 레시피
 
-1. (선택) ncmpd에 **소켓 전송 백엔드**(옵션 A) 추가 → mock_server 재사용.
-2. App GUI에 **PKCS#11 모드**(libopencryptoki 로드) 추가, 현행 프레임 링크와 **공존**.
-3. §6의 불가 명령은 UI에서 **프레임 링크 모드에서만** 노출(혹은 비활성/주석).
-4. opencryptoki 빌드 환경(cmake/libusb/`--enable-ncmptok`)에서 end-to-end 검증.
+### 7.1 구현된 것 (이 저장소에서 검증)
+- **소켓 전송 백엔드** `ncmp/daemon/socket_transport.c` (옵션 A). C 단위 테스트로
+  `probe→open→send(RNG)→recv` 를 실행 중인 `mock_server`에 대해 검증(응답 ack=OK,
+  결정론 바이트 0x5A/0x5B 일치). ncmpd가 `-DENABLE_SOCKET_TOKEN=ON`으로 이 백엔드와
+  링크됨도 확인.
+- **PKCS#11 예제 클라이언트** `ncmp/gui/py/pkcs11_example.py` (PyKCS11): 실 스택을
+  `C_*`로 구동하는 Part-4 앱 예시(아래 레시피에서 사용).
+
+### 7.2 사용자 빌드 환경 end-to-end 레시피 (이 환경에선 실행 불가)
+```bash
+# 1) opencryptoki + STDLL 빌드
+./configure --enable-ncmptok && make            # libopencryptoki, libpkcs11_ncmp.so, pkcsslotd
+
+# 2) 소켓 백엔드로 ncmpd 빌드
+cd ncmp && cmake -S . -B build -DENABLE_SOCKET_TOKEN=ON && cmake --build build -j
+
+# 3) mock 토큰(소켓) 기동
+./build/gui/mock_server --slots 2 --data-port 7010 --ctrl-port 7000
+
+# 4) ncmpd 기동 (소켓 전송 → mock_server)
+NCMP_SOCKET_HOST=127.0.0.1 NCMP_SOCKET_PORT_BASE=7010 NCMP_SOCKET_SLOTS=2 \
+    ./build/daemon/ncmpd
+
+# 5) pkcsslotd 기동 + opencryptoki.conf에 ncmp 슬롯 정의
+
+# 6) App이 실 스택을 PKCS#11로 구동
+pip install PyKCS11
+export PKCS11_MODULE=/usr/local/lib/opencryptoki/libopencryptoki.so
+python3 ncmp/gui/py/pkcs11_example.py --slot 0 --pin 1234
+# (GUI를 PKCS#11 모드로 쓰려면 app_gui에 PyKCS11 기반 Pkcs11Link 추가 — §5 공존안)
+```
+- 실 하드웨어면 4)를 생략하고 ncmpd를 **USB 백엔드**(기본, libusb)로 빌드/기동.
+
+### 7.3 남은 단계
+1. App GUI에 **PKCS#11 모드**(libopencryptoki 로드) 추가, 현행 프레임 링크와 **공존**
+   (`pkcs11_example.py`의 호출을 GUI `Pkcs11Link`로 래핑).
+2. §6의 불가 명령은 UI에서 **프레임 링크 모드에서만** 노출(혹은 비활성/주석).
+3. opencryptoki 빌드 환경에서 위 레시피로 end-to-end 검증.

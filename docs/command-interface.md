@@ -377,12 +377,14 @@ CI 명령에 따른 응답 헤더의 리턴 값(RV : `header.ack`)에 관한 내
 
 - 기능
   무동작 명령. 요청 payload를 그대로 반향(에코/loopback)한다.
+
 - 명령 블록
   ```c
   typedef struct CI_NopReq {
       uint8_t data[];   /* param0: 임의 바이트(그대로 반향) */
   } CI_NopReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_NopRsp {
@@ -399,13 +401,16 @@ CI 명령에 따른 응답 헤더의 리턴 값(RV : `header.ack`)에 관한 내
 
 - 기능
   난수를 생성한다.
+
 - 관련 호스트 API : `ncmp_crypto_rng`
+
 - 명령 블록
   ```c
   typedef struct CI_RngReq {
       uint32_t count;   /* param0: 요청 난수 바이트 수 (≤ 65512 B) */
   } CI_RngReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_RngRsp {
@@ -422,8 +427,11 @@ CI 명령에 따른 응답 헤더의 리턴 값(RV : `header.ack`)에 관한 내
 
 - 기능
   단발(one-shot) 해시를 수행한다.
+
 - 관련 호스트 API : `ncmp_crypto_digest`
+
 - 관련 메커니즘 : CKM_SHA256, CKM_SHA512, CKM_SHA3_* 등
+
 - 명령 블록
   ```c
   typedef struct CI_DigestReq {
@@ -431,6 +439,7 @@ CI 명령에 따른 응답 헤더의 리턴 값(RV : `header.ack`)에 관한 내
       uint8_t  data[];  /* param0[4..):  입력 메시지 (mech 뒤에 이어붙임) */
   } CI_DigestReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_DigestRsp {
@@ -451,16 +460,19 @@ CI 명령에 따른 응답 헤더의 리턴 값(RV : `header.ack`)에 관한 내
 
 - 기능
   토큰이 지원하는 mechanism 목록을 조회한다.
+
 - 명령 블록
   ```c
   typedef struct CI_GetMechListReq { /* 없음 */ } CI_GetMechListReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_GetMechListRsp {
       uint32_t mechs[]; /* param0: 지원 mechanism(CKM_*) 배열 (LE u32 나열) */
   } CI_GetMechListRsp;
   ```
+
 - 주의사항
   - 현재 미구현(예약)이다. 하드웨어에서 mechanism 목록을 조회할 때 사용할 예정이다.
 
@@ -468,13 +480,16 @@ CI 명령에 따른 응답 헤더의 리턴 값(RV : `header.ack`)에 관한 내
 
 - 기능
   멀티파트 해시를 시작하고 컨텍스트를 할당한다.
+
 - 관련 호스트 API : `ncmp_crypto_digest_init`
+
 - 명령 블록
   ```c
   typedef struct CI_DigestInitReq {
       uint32_t mech;    /* param0: 해시 mechanism */
   } CI_DigestInitReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_DigestInitRsp {
@@ -491,7 +506,9 @@ CI 명령에 따른 응답 헤더의 리턴 값(RV : `header.ack`)에 관한 내
 
 - 기능
   멀티파트 해시 컨텍스트에 입력 조각을 흡수한다.
+
 - 관련 호스트 API : `ncmp_crypto_digest_update`
+
 - 명령 블록
   ```c
   typedef struct CI_DigestUpdateReq {
@@ -499,6 +516,7 @@ CI 명령에 따른 응답 헤더의 리턴 값(RV : `header.ack`)에 관한 내
       uint8_t  data[];  /* param1: 이번에 흡수할 입력 조각 */
   } CI_DigestUpdateReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_DigestUpdateRsp { /* 없음 (ack만) */ } CI_DigestUpdateRsp;
@@ -514,19 +532,23 @@ CI 명령에 따른 응답 헤더의 리턴 값(RV : `header.ack`)에 관한 내
 
 - 기능
   멀티파트 해시를 종료하고 최종 해시를 돌려준다.
+
 - 관련 호스트 API : `ncmp_crypto_digest_final`
+
 - 명령 블록
   ```c
   typedef struct CI_DigestFinalReq {
       uint32_t ctx_id;  /* param0: 종료할 컨텍스트 id (반환 후 해제됨) */
   } CI_DigestFinalReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_DigestFinalRsp {
       uint8_t  digest[]; /* param0: 최종 해시 출력 */
   } CI_DigestFinalRsp;
   ```
+
 - 주의사항
   - 응답 후 컨텍스트는 토큰에서 해제된다.
 
@@ -534,8 +556,11 @@ CI 명령에 따른 응답 헤더의 리턴 값(RV : `header.ack`)에 관한 내
 
 - 기능
   SHAKE XOF로 기반 키 재료를 지정 길이만큼 유도한다.
+
 - 관련 호스트 API : `ncmp_crypto_shake_derive`
+
 - 관련 메커니즘 : CKM_SHAKE_128_KEY_DERIVATION, CKM_SHAKE_256_KEY_DERIVATION
+
 - 명령 블록
   ```c
   typedef struct CI_ShakeDeriveReq {
@@ -544,6 +569,7 @@ CI 명령에 따른 응답 헤더의 리턴 값(RV : `header.ack`)에 관한 내
       uint8_t  base[];  /* param2: 기반 키 재료(base key의 CKA_VALUE) */
   } CI_ShakeDeriveReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_ShakeDeriveRsp {
@@ -570,11 +596,13 @@ enum { CI_AES_FLAG_ENCRYPT = 0x1 };  /* flags bit0: 1=암호화, 0=복호화 */
 
 - 기능
   AES-GCM(AEAD) 단발 암/복호를 수행한다.
+
 - 관련 호스트 API : `ncmp_crypto_aes_gcm`
 - 반환 값
   - CKR_OK
   - CKR_ENCRYPTED_DATA_INVALID (복호화 태그 불일치)
   - CKR_MECHANISM_INVALID
+
 - 명령 블록
   ```c
   typedef struct CI_AesGcmReq {
@@ -586,6 +614,7 @@ enum { CI_AES_FLAG_ENCRYPT = 0x1 };  /* flags bit0: 1=암호화, 0=복호화 */
       uint8_t  data[];   /* param5: 암호화=평문 / 복호화=ciphertext‖tag */
   } CI_AesGcmReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_AesGcmRsp {
@@ -610,7 +639,9 @@ enum { CI_AES_FLAG_ENCRYPT = 0x1 };  /* flags bit0: 1=암호화, 0=복호화 */
 
 - 기능
   AES-CTR 스트림 암/복호를 수행한다. AES-CTR은 유일하게 광고되는 AES 스트림 모드다.
+
 - 관련 호스트 API : `ncmp_crypto_aes_stream`
+
 - 명령 블록
   ```c
   typedef struct CI_AesCtrReq {
@@ -620,6 +651,7 @@ enum { CI_AES_FLAG_ENCRYPT = 0x1 };  /* flags bit0: 1=암호화, 0=복호화 */
       uint8_t  data[];  /* param3: 입력 (임의 길이) */
   } CI_AesCtrReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_AesCtrRsp {
@@ -642,7 +674,9 @@ enum { CI_AES_FLAG_ENCRYPT = 0x1 };  /* flags bit0: 1=암호화, 0=복호화 */
 
 - 기능
   멀티파트 AES-GCM을 수행하는 상태형(컨텍스트) 연산이다. 컨텍스트 배치는 3.2절의 두 모델을 따른다.
+
 - 관련 호스트 API : `ncmp_crypto_aes_gcm_init` / `_update` / `_final`
+
 - 명령 블록(INIT)
   ```c
   /* INIT: [flags|key|iv|aad|taglen] -> 응답 param0 = 컨텍스트(슬롯). */
@@ -677,9 +711,13 @@ enum { CI_AES_FLAG_ENCRYPT = 0x1 };  /* flags bit0: 1=암호화, 0=복호화 */
 
 - 기능
   멀티파트 연산을 FINAL 없이 중단할 때 컨텍스트를 회수한다.
+
 - 관련 호스트 API : `ncmp_crypto_ctx_free`
+
 - 명령 블록 : `[ctx|kind]` (param0 = 컨텍스트, param1 = 컨텍스트 종류)
+
 - 응답 블록 : 없음(ack만)
+
 - 주의사항
   - 멱등이며 teardown에서 best-effort로 동작한다(3.3절).
 
@@ -700,6 +738,7 @@ enum {
 
 - 기능
   로그인(PIN 검증)을 수행한다. SO/User 역할(`user_type`) **외에** 부가 조건을 `flags`로 함께 전달한다.
+
 - 관련 호스트 API : `ncmp_admin_login`
 - 반환 값
   - CKR_OK
@@ -707,6 +746,7 @@ enum {
   - CKR_USER_TYPE_INVALID
   - CKR_USER_ALREADY_LOGGED_IN
   - CKR_USER_NOT_LOGGED_IN
+
 - 명령 블록
   ```c
   typedef struct CI_LoginReq {
@@ -715,6 +755,7 @@ enum {
       uint8_t  pin[];      /* param2: PIN 바이트 (protected-auth면 비어 있음) */
   } CI_LoginReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_LoginRsp { /* 없음. ack=OK / CKR_PIN_INCORRECT / CKR_USER_* */ } CI_LoginRsp;
@@ -736,11 +777,14 @@ enum {
 
 - 기능
   로그아웃한다.
+
 - 관련 호스트 API : `ncmp_admin_logout`
+
 - 명령 블록
   ```c
   typedef struct CI_LogoutReq { /* 없음 */ } CI_LogoutReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_LogoutRsp { /* 없음. ack=CKR_OK */ } CI_LogoutRsp;
@@ -750,17 +794,20 @@ enum {
 
 - 기능
   SO가 사용자 PIN을 설정한다.
+
 - 관련 호스트 API : `ncmp_admin_init_pin`
 - 반환 값
   - CKR_OK
   - CKR_USER_NOT_LOGGED_IN
   - CKR_PIN_LEN_RANGE
+
 - 명령 블록
   ```c
   typedef struct CI_InitPinReq {
       uint8_t  new_pin[];  /* param0: 설정할 사용자 PIN */
   } CI_InitPinReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_InitPinRsp { /* 없음 */ } CI_InitPinRsp;
@@ -770,11 +817,13 @@ enum {
 
 - 기능
   현재 사용자의 PIN을 변경한다.
+
 - 관련 호스트 API : `ncmp_admin_set_pin`
 - 반환 값
   - CKR_OK
   - CKR_PIN_INCORRECT
   - CKR_PIN_LEN_RANGE
+
 - 명령 블록
   ```c
   typedef struct CI_SetPinReq {
@@ -782,6 +831,7 @@ enum {
       uint8_t  new_pin[];  /* param1: 새 PIN */
   } CI_SetPinReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_SetPinRsp { /* 없음 */ } CI_SetPinRsp;
@@ -791,10 +841,12 @@ enum {
 
 - 기능
   SO PIN을 검증하고 토큰을 초기화하며 새 라벨을 설정한다.
+
 - 관련 호스트 API : `ncmp_admin_init_token`
 - 반환 값
   - CKR_OK
   - CKR_PIN_INCORRECT
+
 - 명령 블록
   ```c
   typedef struct CI_InitTokenReq {
@@ -802,10 +854,12 @@ enum {
       uint8_t  label[32];  /* param1: 새 토큰 라벨 (32바이트, 공백 패딩) */
   } CI_InitTokenReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_InitTokenRsp { /* 없음 */ } CI_InitTokenRsp;
   ```
+
 - 주의사항(호스트 STDLL 후속 처리)
   - `INIT_TOKEN` 성공 후 STDLL은 `CI_CMD_VD_TOKEN_INFO`로 **라벨을 다시 읽어와 요청 라벨과 정밀 검증**한다.
   - 일치하면 토큰 정체성을 `nv_token_data`에 캐시하고 `save_token_data()`로 영속화한 뒤, 사용한 **임시 SO PIN·라벨 버퍼를 즉시 0으로 소거(zeroization)** 한다.
@@ -815,17 +869,21 @@ enum {
 
 - 기능
   토큰의 UTC 시각을 조회한다.
+
 - 관련 호스트 API : `ncmp_admin_get_utc_time`
+
 - 명령 블록
   ```c
   typedef struct CI_GetUtcTimeReq { /* 없음 */ } CI_GetUtcTimeReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_GetUtcTimeRsp {
       uint8_t  utc[16];    /* param0: CK_TOKEN_INFO.utcTime ("YYYYMMDDhhmmssxx") */
   } CI_GetUtcTimeRsp;
   ```
+
 - 주의사항
   - STDLL은 이 값을 `C_GetTokenInfo`의 `utcTime` 필드에 반영한다.
 
@@ -833,11 +891,14 @@ enum {
 
 - 기능
   토큰 라벨·시리얼·PIN 길이 범위를 조회한다.
+
 - 관련 호스트 API : `ncmp_admin_get_token_params`
+
 - 명령 블록
   ```c
   typedef struct CI_GetTokenParamsReq { /* 없음 */ } CI_GetTokenParamsReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_GetTokenParamsRsp {
@@ -862,21 +923,25 @@ enum {
 
 - 기능
   토큰 클럭(UTC 시각)을 설정한다.
+
 - 관련 호스트 API : `ncmp_admin_set_utc_time`
 - 반환 값
   - CKR_OK
   - CKR_USER_NOT_LOGGED_IN
   - CKR_ARGUMENTS_BAD
+
 - 명령 블록
   ```c
   typedef struct CI_SetUtcTimeReq {
       uint8_t  utc[16];    /* param0: 설정할 CK_TOKEN_INFO.utcTime ("YYYYMMDDhhmmssxx") */
   } CI_SetUtcTimeReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_SetUtcTimeRsp { /* 없음 */ } CI_SetUtcTimeRsp;
   ```
+
 - 주의사항
   - **SO 로그인 상태에서만** 허용된다(그 외 `CKR_USER_NOT_LOGGED_IN`).
   - `utc`는 정확히 16바이트여야 한다(그 외 `CKR_ARGUMENTS_BAD`).
@@ -893,6 +958,7 @@ enum {
   - CKR_OK
   - CKR_SESSION_COUNT (슬롯 세션 테이블이 255개로 가득 참)
   - CKR_ARGUMENTS_BAD
+
 - 명령 블록
   ```c
   typedef struct CI_OpenSessionReq {
@@ -901,12 +967,14 @@ enum {
       uint32_t flags;  /* param2: 세션 flags(CKF_RW_SESSION 등), 선택 */
   } CI_OpenSessionReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_OpenSessionRsp {
       uint32_t hsm_sid; /* param0: 발급된 HSM SID(1..255) */
   } CI_OpenSessionRsp;
   ```
+
 - 주의사항
   - 발급된 `hsm_sid`는 이후 그 세션의 모든 명령에서 와이어 헤더 `session_id`로 사용한다.
   - `(pid 32비트 + sid 32비트) → hsm_sid 8비트` 매핑 규칙·충돌 회피는
@@ -921,16 +989,19 @@ enum {
   - CKR_OK
   - CKR_SESSION_HANDLE_INVALID (존재하지 않는/이미 닫힌 HSM SID)
   - CKR_ARGUMENTS_BAD
+
 - 명령 블록
   ```c
   typedef struct CI_CloseSessionReq {
       uint32_t hsm_sid; /* param0: 닫을 HSM SID(1..255) */
   } CI_CloseSessionReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_CloseSessionRsp { /* 없음 */ } CI_CloseSessionRsp;
   ```
+
 - 주의사항
   - 닫은 HSM SID 슬롯은 재사용 가능해진다(이후 OPEN_SESSION이 재할당 가능).
   - 표준 PKCS#11 `C_OpenSession`/`C_CloseSession`을 이 CI로 포워딩하려면 opencryptoki
@@ -945,11 +1016,13 @@ enum {
 
 - 기능
   `C_CreateObject`로 임포트된 **키 객체**를 토큰에 등록한다(`t_object_add`).
+
 - 관련 호스트 API : `ncmp_object_add`
 - 반환 값
   - CKR_OK
   - CKR_TEMPLATE_INCOMPLETE
   - CKR_ARGUMENTS_BAD
+
 - 명령 블록
   ```c
   typedef struct CI_ObjectAddReq {
@@ -958,10 +1031,12 @@ enum {
       uint8_t  value[];    /* param2: 키 데이터 (CKA_VALUE) */
   } CI_ObjectAddReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_ObjectAddRsp { /* 없음 */ } CI_ObjectAddRsp;
   ```
+
 - 주의사항
   - 비키 객체(데이터·인증서) 및 키 데이터가 없는 객체는 전달하지 않고 공통 계층이 로컬 처리한다.
   - 객체 저장·핸들·열거·삭제는 공통 계층 전용이다.
@@ -970,10 +1045,12 @@ enum {
 
 - 기능
   `C_SetAttributeValue`/`C_CopyObject`로 키 객체의 속성이 바뀌면 변경분을 토큰에 전달해 검증한다(`t_set_attribute_values`).
+
 - 관련 호스트 API : `ncmp_object_set_attrs`
 - 반환 값
   - CKR_OK
   - CKR_ATTRIBUTE_VALUE_INVALID
+
 - 명령 블록
   ```c
   typedef struct CI_ObjectSetAttrReq {
@@ -982,10 +1059,12 @@ enum {
       uint8_t  attrs[];    /* param2: count(u32) 다음 count개의 {type(u32)|len(u32)|value[len]} */
   } CI_ObjectSetAttrReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_ObjectSetAttrRsp { /* 없음 */ } CI_ObjectSetAttrRsp;
   ```
+
 - 주의사항
   - STDLL은 전달 후 직렬화 버퍼를 소거한다.
 
@@ -997,7 +1076,9 @@ enum {
 
 - 기능
   ML-DSA 키 쌍을 생성한다.
+
 - 관련 호스트 API : `ncmp_crypto_mldsa_keygen`
+
 - 명령 블록
   ```c
   typedef struct CI_MlDsaKeygenReq {
@@ -1006,6 +1087,7 @@ enum {
       uint32_t priv_len;   /* param2: 생성할 개인 블롭 길이 (> pub_len) */
   } CI_MlDsaKeygenReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_MlDsaKeygenRsp {
@@ -1018,7 +1100,9 @@ enum {
 
 - 기능
   ML-DSA 서명을 생성한다.
+
 - 관련 호스트 API : `ncmp_crypto_mldsa_sign`
+
 - 명령 블록
   ```c
   typedef struct CI_MlDsaSignReq {
@@ -1029,6 +1113,7 @@ enum {
       uint8_t  data[];     /* param4: 서명 대상 메시지 */
   } CI_MlDsaSignReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_MlDsaSignRsp {
@@ -1040,10 +1125,12 @@ enum {
 
 - 기능
   ML-DSA 서명을 검증한다.
+
 - 관련 호스트 API : `ncmp_crypto_mldsa_verify`
 - 반환 값
   - CKR_OK
   - CKR_SIGNATURE_INVALID
+
 - 명령 블록
   ```c
   typedef struct CI_MlDsaVerifyReq {
@@ -1053,6 +1140,7 @@ enum {
       uint8_t  sig[];      /* param3: 대조할 서명 */
   } CI_MlDsaVerifyReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_MlDsaVerifyRsp { /* 없음 */ } CI_MlDsaVerifyRsp;
@@ -1062,7 +1150,9 @@ enum {
 
 - 기능
   ML-KEM 키 쌍을 생성한다.
+
 - 관련 호스트 API : `ncmp_crypto_mlkem_keygen`
+
 - 명령 블록
   ```c
   typedef struct CI_MlKemKeygenReq {
@@ -1071,6 +1161,7 @@ enum {
       uint32_t priv_len;   /* param2: 개인 블롭 길이(sk_len, > pub_len) */
   } CI_MlKemKeygenReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_MlKemKeygenRsp {
@@ -1083,7 +1174,9 @@ enum {
 
 - 기능
   ML-KEM 캡슐화를 수행한다.
+
 - 관련 호스트 API : `ncmp_crypto_mlkem_encaps`
+
 - 명령 블록
   ```c
   typedef struct CI_MlKemEncapsReq {
@@ -1093,6 +1186,7 @@ enum {
       uint8_t  pub[];      /* param3: 상대 공개 키 블롭 */
   } CI_MlKemEncapsReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_MlKemEncapsRsp {
@@ -1105,7 +1199,9 @@ enum {
 
 - 기능
   ML-KEM 역캡슐화를 수행하여 공유 비밀을 복원한다.
+
 - 관련 호스트 API : `ncmp_crypto_mlkem_decaps`
+
 - 명령 블록
   ```c
   typedef struct CI_MlKemDecapsReq {
@@ -1116,6 +1212,7 @@ enum {
       uint8_t  ct[];       /* param4: 캡슐화된 암호문 */
   } CI_MlKemDecapsReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_MlKemDecapsRsp {
@@ -1132,6 +1229,7 @@ enum {
 - 기능
   스크래치 RAM에 데이터를 기록한다.
 - 반환 값 : CKR_OK, CKR_DEVICE_MEMORY
+
 - 명령 블록
   ```c
   typedef struct CI_VdMemWriteReq {
@@ -1139,6 +1237,7 @@ enum {
       uint8_t  bytes[]; /* param1: 기록할 데이터 (addr+len ≤ 4 KB) */
   } CI_VdMemWriteReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_VdMemWriteRsp { /* 없음 */ } CI_VdMemWriteRsp;
@@ -1148,6 +1247,7 @@ enum {
 
 - 기능
   스크래치 RAM에서 데이터를 읽는다.
+
 - 명령 블록
   ```c
   typedef struct CI_VdMemReadReq {
@@ -1155,6 +1255,7 @@ enum {
       uint32_t len;     /* param1: 읽을 바이트 수 */
   } CI_VdMemReadReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_VdMemReadRsp {
@@ -1166,10 +1267,12 @@ enum {
 
 - 기능
   토큰 epoch 카운터를 조회한다.
+
 - 명령 블록
   ```c
   typedef struct CI_VdPingReq { /* 없음 */ } CI_VdPingReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_VdPingRsp {
@@ -1181,10 +1284,12 @@ enum {
 
 - 기능
   토큰 서브시스템 자가 시험을 수행한다.
+
 - 명령 블록
   ```c
   typedef struct CI_VdSelftestReq { /* 없음 */ } CI_VdSelftestReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_VdSelftestRsp {
@@ -1196,10 +1301,12 @@ enum {
 
 - 기능
   펌웨어 버전 정보를 조회한다.
+
 - 명령 블록
   ```c
   typedef struct CI_VdFwInfoReq { /* 없음 */ } CI_VdFwInfoReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_VdFwInfoRsp {  /* param0 = 아래 4개 LE u32 (16바이트) */
@@ -1215,6 +1322,7 @@ enum {
 - 기능
   스크래치 RAM의 지정 영역을 한 바이트 값으로 채운다.
 - 반환 값 : CKR_OK, CKR_DEVICE_MEMORY
+
 - 명령 블록
   ```c
   typedef struct CI_VdMemFillReq {
@@ -1223,6 +1331,7 @@ enum {
       uint8_t  value;   /* param2: 채울 바이트 값 (1바이트) */
   } CI_VdMemFillReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_VdMemFillRsp { /* 없음 */ } CI_VdMemFillRsp;
@@ -1232,6 +1341,7 @@ enum {
 
 - 기능
   스크래치 RAM 지정 영역의 CRC-32를 계산한다.
+
 - 명령 블록
   ```c
   typedef struct CI_VdMemCrcReq {
@@ -1239,6 +1349,7 @@ enum {
       uint32_t len;     /* param1: 길이 */
   } CI_VdMemCrcReq;
   ```
+
 - 응답 블록
   ```c
   typedef struct CI_VdMemCrcRsp {
@@ -1250,11 +1361,14 @@ enum {
 
 - 기능
   토큰 정체성(라벨/시리얼/제조사/모델/HW·FW 버전/상태 플래그)을 조회한다.
+
 - 관련 호스트 API : `ncmp_admin_token_info`
+
 - 명령 블록
   ```c
   typedef struct CI_VdTokenInfoReq { /* 없음 */ } CI_VdTokenInfoReq;
   ```
+
 - 응답 블록
   ```c
   /* param0 = 고정 104바이트 정체성 블롭 (문자 필드는 NUL 패딩). */

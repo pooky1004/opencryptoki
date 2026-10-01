@@ -224,6 +224,11 @@ FW version(major.minor) / Flags(u32) / UTC(16자) / Login state(읽기전용)**.
 > **전제**: 빌드된 `libpkcs11_ncmp.so` + 기동된 ncmpd. 설정·레시피는
 > [`dual-mode-provider.md`](dual-mode-provider.md). 벤더 datapath·세션 CI·fail-bit는
 > 이 탭에 없다(프레임 링크 모드에서 시험).
+> **풀빌드 없이 데모**: `sh ncmp/gui/build_standalone_p11.sh`로 모드-2 전용 provider
+> (`libpkcs11_ncmp_p11.so`)와 `ncmpd_mock`을 빌드 → `export NCMP_SOCK_PATH=/tmp/ncmpd.sock`
+> → `ncmpd_mock &` → `NCMP_PKCS11_MODULE=…/libpkcs11_ncmp_p11.so python3 app_gui.py`.
+> **Load+Open** 시 `C_Initialize`가 ncmpd conn 스레드에 접속·SHM 부착, 이후 `C_*`가
+> 해당 슬롯 큐에 인큐된다(검증됨: GenerateRandom → mock → 5a5b5c…).
 > **아직 빌드 전이면**: 모듈 미설정/세션 없음 상태에서 버튼을 누르면 탭이
 > **프레임 링크 모드(상단 Link 바, target=mock)로 시험하라**고 안내한다.
 

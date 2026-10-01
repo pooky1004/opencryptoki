@@ -87,6 +87,37 @@ CK_BYTE r[16]; fl->C_GenerateRandom(s, r, sizeof r);
 - **런타임 검증**: full opencryptoki 빌드 + 기동된 ncmpd 필요 → 이 환경에선 불가(컴파일
   까지). 빌드 환경에서 `pkcs11-tool --module ./libpkcs11_ncmp.so ...`로 확인 가능.
 
+## 5.0 모드 2에서 C_Initialize가 실제로 하는 일 (ncmpd 연동)
+
+모드 2 `C_Initialize`는 facade가 `ncmp_client_init()`를 호출해 **ncmpd의 conn 스레드에
+접속(IPC HELLO/ATTACH)하고 공유메모리(동적 메모리)를 부착**한다. 이후:
+
+- `C_GetSlotList`는 ncmpd가 HELLO로 돌려준 **online 슬롯 마스크**(SHM 기준)를 반환.
+- `C_OpenSession(slot)`은 그 **slot 값으로 SHM의 해당 슬롯**(`ncmp_shm_slot`)을 가리킨다.
+- 각 `C_*`(예: `C_GenerateRandom`)는 어댑터→`ncmp_client_command_mp`→`ncmp_slot_enqueue`
+  로 **해당 슬롯의 링 큐에 인큐**하고, ncmpd의 **comm 스레드가 큐를 드레인**해 토큰(실
+  USB 또는 mock)으로 보낸 뒤 응답을 돌려준다.
+
+즉 `dlopen → dlsym → C_Initialize`가 곧바로 ncmpd 전송 경로(conn 스레드 + SHM + 슬롯
+큐)에 연결된다. 비-root에서는 `NCMP_SOCK_PATH`로 ncmpd와 클라이언트가 같은 UNIX 소켓을
+공유하면 된다(기본값 `/run/ncmpd/ncmpd.sock`은 root 필요).
+
+### 5.0.1 풀빌드 없이 돌려보는 데모 (검증됨)
+opencryptoki 전체 빌드 없이 **모드 2 전용 provider**와 mock 데몬만 빌드해 실행한다:
+```bash
+sh ncmp/gui/build_standalone_p11.sh                # → build-standalone/{libpkcs11_ncmp_p11.so, ncmpd_mock}
+export NCMP_SOCK_PATH=/tmp/ncmpd.sock
+./ncmp/gui/build-standalone/ncmpd_mock &           # SHM 생성 + conn/comm 스레드
+NCMP_PKCS11_MODULE=$PWD/ncmp/gui/build-standalone/libpkcs11_ncmp_p11.so \
+    python3 ncmp/gui/py/app_gui.py                 # PKCS#11 탭 → Load+Open → GenerateRandom
+```
+- `build_standalone_p11.sh`는 facade(`ncmp_p11.c`) + ncmp 어댑터/클라이언트/common 으로
+  **`libpkcs11_ncmp_p11.so`**(C_* 만, 모드 2 전용)와 **`ncmpd_mock`**을 gcc로 빌드한다.
+  (운영용 `libpkcs11_ncmp.so`는 autotools 빌드로 SC_*/ST_Initialize(모드 1)까지 포함.)
+- **검증**: GUI의 ctypes 링크로 이 `.so`를 dlopen → `C_Initialize`(ncmpd 접속+SHM) →
+  `C_GetSlotList=[0]` → `C_OpenSession` → `C_GenerateRandom(16)` = `5a5b5c…`(mock RNG와
+  정확히 일치) 까지 **실 ncmpd(mock)에 대해 end-to-end 통과**.
+
 ## 5.1 Test App GUI의 모드 2 사용
 
 `ncmp/gui/py/app_gui.py`의 **"PKCS#11 (real stack)" 탭**이 모드 2로 동작한다

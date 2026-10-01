@@ -128,8 +128,32 @@ int main(int argc, char **argv)
     uint32_t started = 0;
     int rc;
 
-    (void)argc;
-    (void)argv;
+    /* Transport backend: comm threads send to the real target (USB) or the
+     * mock (or a socket frame server). Default = real; override with
+     * --transport real|mock|socket or $NCMP_TRANSPORT. */
+    ncmp_backend_kind backend = NCMP_BACKEND_REAL;
+    const char *tsel = getenv("NCMP_TRANSPORT");
+    for (int i = 1; i < argc; ++i) {
+        if (!strcmp(argv[i], "--transport") && i + 1 < argc)
+            tsel = argv[++i];
+    }
+    if (tsel) {
+        if (!strcmp(tsel, "mock"))
+            backend = NCMP_BACKEND_MOCK;
+        else if (!strcmp(tsel, "socket"))
+            backend = NCMP_BACKEND_SOCKET;
+        else if (!strcmp(tsel, "real"))
+            backend = NCMP_BACKEND_REAL;
+        else {
+            fprintf(stderr, "ncmpd: unknown --transport '%s' "
+                    "(use real|mock|socket)\n", tsel);
+            return 2;
+        }
+    }
+    ncmp_transport_set_backend(backend);
+    fprintf(stderr, "ncmpd: transport = %s\n",
+            backend == NCMP_BACKEND_MOCK ? "mock" :
+            backend == NCMP_BACKEND_SOCKET ? "socket" : "real");
 
     if (ncmpd_install_signals() != NCMP_OK) {
         fprintf(stderr, "ncmpd: failed to install signal handlers\n");

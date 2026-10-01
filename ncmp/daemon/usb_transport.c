@@ -80,7 +80,7 @@ static libusb_device *ncmp_pick_device(libusb_device **list, ssize_t n,
     return chosen;
 }
 
-int ncmp_transport_probe(uint32_t *out_slot_mask)
+static int usb_probe(uint32_t *out_slot_mask)
 {
     libusb_context *ctx = NULL;
     libusb_device **list = NULL;
@@ -107,7 +107,7 @@ int ncmp_transport_probe(uint32_t *out_slot_mask)
     return NCMP_OK;
 }
 
-int ncmp_transport_open(uint32_t slot_id, ncmp_transport_t **out)
+static int usb_open(uint32_t slot_id, ncmp_transport_t **out)
 {
     ncmp_transport_t *t;
     libusb_device **list = NULL;
@@ -179,7 +179,7 @@ static int ncmp_bulk_exact(ncmp_transport_t *t, uint8_t ep, uint8_t *buf,
     return NCMP_OK;
 }
 
-int ncmp_transport_send(ncmp_transport_t *t, const uint8_t *frame, size_t len)
+static int usb_send(ncmp_transport_t *t, const uint8_t *frame, size_t len)
 {
     if (!t || !frame)
         return NCMP_ERR_INVAL;
@@ -219,7 +219,7 @@ static int ncmp_bulk_read_frame(ncmp_transport_t *t, uint8_t *buf,
     return NCMP_OK;
 }
 
-int ncmp_transport_recv(ncmp_transport_t *t, uint8_t *buf, size_t buf_len,
+static int usb_recv(ncmp_transport_t *t, uint8_t *buf, size_t buf_len,
                         size_t *out_len)
 {
     const size_t fixed = NCMP_FRAME_PREFIX_SIZE + NCMP_HEADER_WIRE_SIZE;
@@ -255,7 +255,7 @@ int ncmp_transport_recv(ncmp_transport_t *t, uint8_t *buf, size_t buf_len,
     return NCMP_OK;
 }
 
-int ncmp_transport_close(ncmp_transport_t *t)
+static int usb_close(ncmp_transport_t *t)
 {
     if (!t)
         return NCMP_OK;
@@ -278,7 +278,7 @@ int ncmp_transport_close(ncmp_transport_t *t)
  */
 struct ncmp_transport { int unused; };
 
-int ncmp_transport_probe(uint32_t *out_slot_mask)
+static int usb_probe(uint32_t *out_slot_mask)
 {
     if (!out_slot_mask)
         return NCMP_ERR_INVAL;
@@ -286,14 +286,14 @@ int ncmp_transport_probe(uint32_t *out_slot_mask)
     return NCMP_OK;
 }
 
-int ncmp_transport_open(uint32_t slot_id, ncmp_transport_t **out)
+static int usb_open(uint32_t slot_id, ncmp_transport_t **out)
 {
     (void)slot_id;
     (void)out;
     return NCMP_ERR_USB;
 }
 
-int ncmp_transport_send(ncmp_transport_t *t, const uint8_t *frame, size_t len)
+static int usb_send(ncmp_transport_t *t, const uint8_t *frame, size_t len)
 {
     (void)t;
     (void)frame;
@@ -301,7 +301,7 @@ int ncmp_transport_send(ncmp_transport_t *t, const uint8_t *frame, size_t len)
     return NCMP_ERR_USB;
 }
 
-int ncmp_transport_recv(ncmp_transport_t *t, uint8_t *buf, size_t buf_len,
+static int usb_recv(ncmp_transport_t *t, uint8_t *buf, size_t buf_len,
                         size_t *out_len)
 {
     (void)t;
@@ -311,10 +311,15 @@ int ncmp_transport_recv(ncmp_transport_t *t, uint8_t *buf, size_t buf_len,
     return NCMP_ERR_USB;
 }
 
-int ncmp_transport_close(ncmp_transport_t *t)
+static int usb_close(ncmp_transport_t *t)
 {
     (void)t;
     return NCMP_OK;
 }
 
 #endif /* NCMP_HAVE_LIBUSB */
+
+/* Backend op table (dispatcher selects this for NCMP_BACKEND_REAL). */
+const ncmp_transport_ops ncmp_usb_ops = {
+    usb_probe, usb_open, usb_send, usb_recv, usb_close
+};

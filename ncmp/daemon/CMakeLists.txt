@@ -1,36 +1,36 @@
 # Token NCMP - ncmpd daemon.
 #
-# Transport backend is chosen at configure time: the in-process mock loopback
-# (ncmp_mock) when ENABLE_MOCK_TOKEN is set, otherwise the real libusb path in
-# usb_transport.c. Exactly one implementation of ncmp_transport_* is linked.
-set(NCMPD_SOURCES
+# The daemon links ALL transport backends and selects one at RUNTIME via the
+# transport dispatcher (transport.c): --transport real|mock|socket (default
+# real) / $NCMP_TRANSPORT. So one ncmpd binary can drive the real FX3 (libusb),
+# the in-process mock emulator, or a socket frame server (mock_server).
+add_executable(ncmpd
     main.c
     conn_thread.c
     comm_thread.c
+    transport.c                 # runtime dispatcher (ncmp_transport_*)
+    usb_transport.c             # ncmp_usb_ops   (real; libusb or stub)
+    socket_transport.c          # ncmp_socket_ops
+    mock_backend.c              # ncmp_mock_ops  (uses the emulator below)
+    # emulator sources for the mock backend (NOT ncmp_mock, which would also
+    # export the public ncmp_transport_* and clash with the dispatcher):
+    ${CMAKE_SOURCE_DIR}/mock/mcu_scheduler.c
+    ${CMAKE_SOURCE_DIR}/mock/container.c
+    ${CMAKE_SOURCE_DIR}/mock/fx3_dma.c
 )
-
-add_executable(ncmpd ${NCMPD_SOURCES})
+target_include_directories(ncmpd PRIVATE ${CMAKE_SOURCE_DIR}/mock)
 target_link_libraries(ncmpd PRIVATE ncmp_common)
 
-# Transport backend selection (exactly one):
-#   ENABLE_MOCK_TOKEN   -> in-process emulator (ncmp_mock)
-#   ENABLE_SOCKET_TOKEN -> TCP socket to a frame server (GUI mock_server); lets
-#                          ncmpd drive the real STDLL stack without hardware.
-#   (default)           -> real libusb FX3 transport (usb_transport.c)
-option(ENABLE_SOCKET_TOKEN
-       "Route the daemon transport over a TCP socket to a frame server (mock_server)"
-       OFF)
-
-if(ENABLE_MOCK_TOKEN)
-    target_compile_definitions(ncmpd PRIVATE NCMP_USE_MOCK_TRANSPORT=1)
-    target_link_libraries(ncmpd PRIVATE ncmp_mock)
-elseif(ENABLE_SOCKET_TOKEN)
-    target_compile_definitions(ncmpd PRIVATE NCMP_USE_SOCKET_TRANSPORT=1)
-    target_sources(ncmpd PRIVATE socket_transport.c)
-else()
-    target_sources(ncmpd PRIVATE usb_transport.c)
-    find_package(LibUSB REQUIRED)
+# libusb is optional: usb_transport.c auto-detects it via __has_include and
+# compiles a no-device stub when absent. Link it when found so the real path
+# is built.
+find_package(LibUSB QUIET)
+if(LibUSB_FOUND OR TARGET LibUSB::LibUSB)
     target_link_libraries(ncmpd PRIVATE LibUSB::LibUSB)
+    message(STATUS "Token NCMP: ncmpd linked against libusb (real transport active)")
+else()
+    message(STATUS "Token NCMP: libusb not found; ncmpd real transport is a "
+                   "no-device stub (mock/socket still work)")
 endif()
 
 install(TARGETS ncmpd RUNTIME DESTINATION sbin)

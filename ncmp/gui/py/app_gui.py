@@ -65,7 +65,7 @@ def find_ncmpd() -> str:
         return env
     here = os.path.dirname(os.path.abspath(__file__))
     candidates = [
-        os.path.join(here, "..", "build-standalone", "ncmpd_mock"),
+        os.path.join(here, "..", "build-standalone", "ncmpd"),
         os.path.join(here, "..", "..", "build", "daemon", "ncmpd"),
         "/usr/local/sbin/ncmpd", "/usr/sbin/ncmpd",
     ]
@@ -936,8 +936,15 @@ class AppGui(QMainWindow):
         hs = QHBoxLayout()
         hs.addWidget(QLabel("slot:")); hs.addWidget(self.p11_slot)
         hs.addWidget(QLabel("PIN:")); hs.addWidget(self.p11_pin)
+        hs.addWidget(QLabel("ncmpd transport:"))
+        self.p11_ncmpd_transport = QComboBox()
+        self.p11_ncmpd_transport.addItems(["mock", "real"])
+        self.p11_ncmpd_transport.setToolTip(
+            "ncmpd를 여기서 실행(autostart)할 때 comm thread가 보낼 대상: "
+            "real target(USB) 또는 mock. 이미 떠 있는 ncmpd에는 영향 없음.")
+        hs.addWidget(self.p11_ncmpd_transport)
         hsw = QWidget(); hsw.setLayout(hs)
-        cf.addRow("slot / PIN", hsw)
+        cf.addRow("slot / PIN / ncmpd", hsw)
         cf.addRow(rw)
         v.addWidget(conn)
 
@@ -1090,16 +1097,19 @@ class AppGui(QMainWindow):
             if not daemon:
                 self._log(self.p11_out, "ncmpd 실행 취소(바이너리 미지정)")
                 return False
+        transport = self.p11_ncmpd_transport.currentText()  # mock | real
         try:
             self._ncmpd_proc = subprocess.Popen(
-                [daemon], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                [daemon, "--transport", transport],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 env=os.environ.copy())   # inherits NCMP_SOCK_PATH
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "ncmpd", f"ncmpd 실행 실패:\n{exc}")
             return False
         for _ in range(30):            # up to ~3s for the socket to appear
             if self._ncmpd_alive():
-                self._log(self.p11_out, f"ncmpd 실행: {daemon}")
+                self._log(self.p11_out,
+                          f"ncmpd 실행: {daemon} --transport {transport}")
                 return True
             time.sleep(0.1)
         QMessageBox.critical(self, "ncmpd",

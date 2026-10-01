@@ -35,17 +35,20 @@ gcc $CFLAGS -shared -fPIC \
     "$ROOT/ncmp/common/ncmp_slotmap.c" \
     -lpthread -lrt -o "$OUT/libpkcs11_ncmp_p11.so"
 
-echo "building $OUT/ncmpd_mock (daemon + mock transport)"
-gcc -std=gnu11 -D_GNU_SOURCE -DNCMP_USE_MOCK_TRANSPORT=1 -O2 -Wall \
+echo "building $OUT/ncmpd (all backends; pick at runtime with --transport)"
+gcc -std=gnu11 -D_GNU_SOURCE -O2 -Wall \
     -I"$ROOT/ncmp/include" -I"$ROOT/ncmp/mock" \
     "$ROOT/ncmp/daemon/main.c" "$ROOT/ncmp/daemon/conn_thread.c" \
-    "$ROOT/ncmp/daemon/comm_thread.c" \
-    "$ROOT/ncmp/mock/mock_transport.c" "$ROOT/ncmp/mock/fx3_dma.c" \
-    "$ROOT/ncmp/mock/container.c" "$ROOT/ncmp/mock/mcu_scheduler.c" \
+    "$ROOT/ncmp/daemon/comm_thread.c" "$ROOT/ncmp/daemon/transport.c" \
+    "$ROOT/ncmp/daemon/usb_transport.c" "$ROOT/ncmp/daemon/socket_transport.c" \
+    "$ROOT/ncmp/daemon/mock_backend.c" \
+    "$ROOT/ncmp/mock/mcu_scheduler.c" "$ROOT/ncmp/mock/container.c" \
+    "$ROOT/ncmp/mock/fx3_dma.c" \
     "$ROOT"/ncmp/common/*.c \
-    -lpthread -lrt -o "$OUT/ncmpd_mock"
+    $(pkg-config --cflags --libs libusb-1.0 2>/dev/null) \
+    -lpthread -lrt -o "$OUT/ncmpd"
 
-echo "done. Run:"
+echo "done. Run (transport defaults to real; use --transport mock without HW):"
 echo "  export NCMP_SOCK_PATH=/tmp/ncmpd.sock"
-echo "  $OUT/ncmpd_mock &"
+echo "  $OUT/ncmpd --transport mock &"
 echo "  NCMP_PKCS11_MODULE=$OUT/libpkcs11_ncmp_p11.so python3 $ROOT/ncmp/gui/py/app_gui.py"

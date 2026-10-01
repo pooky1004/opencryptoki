@@ -74,4 +74,42 @@ int ncmp_transport_recv(ncmp_transport_t *t, uint8_t *buf, size_t buf_len,
  */
 int ncmp_transport_close(ncmp_transport_t *t);
 
+/* -------------------------------------------------------------------------- */
+/* Runtime backend selection                                                  */
+/*                                                                            */
+/* The daemon links every backend and picks one at startup (default: the real */
+/* FX3 over libusb). The five ncmp_transport_* calls above are a dispatcher    */
+/* (daemon/transport.c) that forwards to the selected backend's ops. The       */
+/* standalone test suite instead links a single backend directly and does not  */
+/* use the dispatcher.                                                         */
+/* -------------------------------------------------------------------------- */
+
+/** Which token transport the daemon's comm threads use. */
+typedef enum ncmp_backend_kind {
+    NCMP_BACKEND_REAL   = 0, /**< Real FX3 over libusb (default). */
+    NCMP_BACKEND_MOCK   = 1, /**< In-process software emulator. */
+    NCMP_BACKEND_SOCKET = 2, /**< TCP to a frame server (GUI mock_server). */
+} ncmp_backend_kind;
+
+/** Per-backend operation table (one instance exported by each backend). */
+typedef struct ncmp_transport_ops {
+    int (*probe)(uint32_t *out_slot_mask);
+    int (*open)(uint32_t slot_id, ncmp_transport_t **out);
+    int (*send)(ncmp_transport_t *t, const uint8_t *frame, size_t len);
+    int (*recv)(ncmp_transport_t *t, uint8_t *buf, size_t buf_len,
+                size_t *out_len);
+    int (*close)(ncmp_transport_t *t);
+} ncmp_transport_ops;
+
+extern const ncmp_transport_ops ncmp_usb_ops;     /**< usb_transport.c */
+extern const ncmp_transport_ops ncmp_mock_ops;    /**< mock_backend.c */
+extern const ncmp_transport_ops ncmp_socket_ops;  /**< socket_transport.c */
+
+/**
+ * @brief Select the active transport backend. Call once before the first
+ *        probe/open. Default is NCMP_BACKEND_REAL.
+ * @return NCMP_OK or NCMP_ERR_INVAL.
+ */
+int ncmp_transport_set_backend(ncmp_backend_kind kind);
+
 #endif /* NCMP_TRANSPORT_H */

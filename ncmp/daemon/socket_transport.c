@@ -126,7 +126,7 @@ static int write_full(int fd, const void *buf, size_t n)
 
 /* --- ncmp_transport_* implementation -------------------------------------- */
 
-int ncmp_transport_probe(uint32_t *out_slot_mask)
+static int sock_probe(uint32_t *out_slot_mask)
 {
     const char *host = sock_host();
     int base = sock_port_base();
@@ -146,7 +146,7 @@ int ncmp_transport_probe(uint32_t *out_slot_mask)
     return NCMP_OK;
 }
 
-int ncmp_transport_open(uint32_t slot_id, ncmp_transport_t **out)
+static int sock_open(uint32_t slot_id, ncmp_transport_t **out)
 {
     ncmp_transport_t *t;
     int fd;
@@ -167,14 +167,14 @@ int ncmp_transport_open(uint32_t slot_id, ncmp_transport_t **out)
     return NCMP_OK;
 }
 
-int ncmp_transport_send(ncmp_transport_t *t, const uint8_t *frame, size_t len)
+static int sock_send(ncmp_transport_t *t, const uint8_t *frame, size_t len)
 {
     if (!t || !frame || len < NCMP_FRAME_PREFIX_SIZE)
         return NCMP_ERR_INVAL;
     return write_full(t->fd, frame, len);
 }
 
-int ncmp_transport_recv(ncmp_transport_t *t, uint8_t *buf, size_t buf_len,
+static int sock_recv(ncmp_transport_t *t, uint8_t *buf, size_t buf_len,
                         size_t *out_len)
 {
     uint32_t frame_len;
@@ -203,7 +203,7 @@ int ncmp_transport_recv(ncmp_transport_t *t, uint8_t *buf, size_t buf_len,
     return NCMP_OK;
 }
 
-int ncmp_transport_close(ncmp_transport_t *t)
+static int sock_close(ncmp_transport_t *t)
 {
     if (t) {
         if (t->fd >= 0)
@@ -212,3 +212,8 @@ int ncmp_transport_close(ncmp_transport_t *t)
     }
     return NCMP_OK;
 }
+
+/* Backend op table (dispatcher selects this for NCMP_BACKEND_SOCKET). */
+const ncmp_transport_ops ncmp_socket_ops = {
+    sock_probe, sock_open, sock_send, sock_recv, sock_close
+};

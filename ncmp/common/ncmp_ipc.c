@@ -9,6 +9,7 @@
 #include "ncmp/ncmp_errno.h"
 
 #include <string.h>
+#include <stdlib.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -16,6 +17,10 @@
 /** Fill @p addr for @p path; returns NCMP_ERR_INVAL if the path is too long. */
 static int ncmp_ipc_addr(const char *path, struct sockaddr_un *addr)
 {
+    /* NULL path => honour $NCMP_SOCK_PATH (the daemon uses the same env), so a
+     * non-root run can rendezvous on a user-writable socket; else the default. */
+    if (!path)
+        path = getenv("NCMP_SOCK_PATH");
     if (!path)
         path = NCMP_IPC_SOCK_PATH;
     if (strlen(path) >= sizeof(addr->sun_path))

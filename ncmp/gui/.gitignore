@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 # Local test artifacts
 *.bin
+# standalone mode-2 demo build (build_standalone_p11.sh)
+build-standalone/

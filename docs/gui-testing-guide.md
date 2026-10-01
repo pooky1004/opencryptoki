@@ -219,7 +219,7 @@ FW version(major.minor) / Flags(u32) / UTC(16자) / Login state(읽기전용)**.
 | module (.so) | `libpkcs11_ncmp.so` 경로(기본값 자동 탐색, env `NCMP_PKCS11_MODULE` 우선, **Browse…**). |
 | slot / PIN | PKCS#11 슬롯·사용자 PIN. |
 | Resolve (dlsym) | dlopen 후 `C_GetFunctionList`/`C_GetInterfaceList`/`C_GetInterface` 발견 여부 표시. |
-| Load+Open / Login / Logout / Close | dlopen→`C_Initialize`→`C_GetSlotList`→`C_OpenSession` / login / logout / `C_CloseSession`+`C_Finalize`. |
+| Load+Open / Login / Logout / Close | dlopen→`C_Initialize`→`C_GetSlotList`→`C_OpenSession` / login / logout / `C_CloseSession`+`C_Finalize`. `C_Initialize` 실패 시 **ncmpd 진단 팝업**(살아있으면 경고, 미실행이면 "실행할까요?"→실행 후 자동 재시도). |
 | GenerateRandom · Digest · AES-GCM round-trip · Token Info | `C_*` 연산 버튼. |
 > **전제**: 빌드된 `libpkcs11_ncmp.so` + 기동된 ncmpd. 설정·레시피는
 > [`dual-mode-provider.md`](dual-mode-provider.md). 벤더 datapath·세션 CI·fail-bit는

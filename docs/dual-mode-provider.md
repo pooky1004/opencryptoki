@@ -126,6 +126,11 @@ libopencryptoki 불사용):
 - **Resolve (dlsym)**: `.so`를 dlopen 하고 `C_GetFunctionList`/`C_GetInterfaceList`/
   `C_GetInterface` 를 dlsym 으로 찾았는지 표시(모드 2 발견 과정 시연).
 - **Load+Open**: dlopen → `C_Initialize` → `C_GetSlotList` → `C_OpenSession`.
+  `C_Initialize`(ncmpd conn 스레드 접속)가 **실패하면 ncmpd 생존을 진단**한다:
+  - ncmpd가 **살아있는데 연결 실패** → 경고 팝업(버전/SHM 불일치 등, 로그 확인 안내).
+  - ncmpd가 **미실행** → "실행할까요?" 팝업 → 예 선택 시 ncmpd 데몬을 실행하고
+    `C_Initialize`를 자동 재시도. (ncmpd 바이너리는 `NCMP_DAEMON` 또는 자동 탐색,
+    없으면 파일 선택. 소켓은 `NCMP_SOCK_PATH` 공유. GUI가 띄운 ncmpd는 종료 시 정리.)
 - **Login / GenerateRandom / Digest / AES-GCM / Token Info / Close**: 각 `C_*` 직접 호출.
 - 모듈 경로 기본값은 `libpkcs11_ncmp.so`(env `NCMP_PKCS11_MODULE` 우선, Browse 가능).
 - 검증: stub `.so`로 dlopen+dlsym+호출 경로를 종단 확인(C_Initialize/SlotList/

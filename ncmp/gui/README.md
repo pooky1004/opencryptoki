@@ -30,11 +30,15 @@ opencryptoki(pkcsslotd)나 SHM 없이, **C mock을 소켓 서버로 확장**하�
 - **Mock GUI** (`py/mock_gui.py`): 서버를 실행/부착하고, 슬롯별 **identity 입력·조회·
   수정**, **통계**, **디버그(최근 메시지)**, **링크 up/down·reset**을 제공. 한 창에서
   여러 mock을 동시에 관리.
-- **App GUI** (`py/app_gui.py`): 슬롯을 선택해 mock(또는 실 타깃 브리지)에 링크로
-  붙어 **CI 전송**, **HSM 상태 조회/설정**, **암복호/해시 시험**, **테스트 시나리오**,
-  **1MB+ 파일 암복호/해시 후 SW 결과 비교**, **통계**를 수행.
-- **ncmp_gui** (`py/ncmp_gui/`): wire 코덱·소켓 링크·CI 빌더·SW 기준 암호(에뮬레이터
-  알고리즘 정확 복제 + 실 암호). GUI 없이 스크립트로도 사용 가능.
+- **App GUI** (`py/app_gui.py`): 슬롯을 선택해 mock(또는 실 타깃 브리지)에 링크로 붙어
+  시험한다. 탭: **HSM State**(상태 조회·login/PIN·init-token·**Session Open/Close**),
+  **Crypto/Hash**(RNG·digest·AES-CTR·AES-GCM + SW 비교), **PQC**(ML-DSA·ML-KEM 왕복),
+  **File Compare**(1MB+ 스트리밍 digest / chunked AES-CTR, token vs SW), **Scenarios**
+  (내장 4종), **PKCS#11 (real stack)**(libopencryptoki C_* 로 실 스택 구동 — 별도 모드),
+  **Statistics**.
+- **ncmp_gui** (`py/ncmp_gui/`): wire 코덱·소켓 링크(`link`)·CI 빌더(`ci`)·SW 기준 암호
+  (`swcrypto`: 에뮬레이터 알고리즘 정확 복제 + 실 암호)·PKCS#11 어댑터(`pkcs11_link`).
+  GUI 없이 스크립트로도 사용 가능.
 
 ## 빌드
 
@@ -144,7 +148,7 @@ cd ncmp/gui/py && python3 mock_gui.py            # (또는 app_gui.py)
 서버 + 파이썬 코어의 종단 간 동작은 `py/smoke_test.py`로 검증한다(디스플레이 불필요):
 ```bash
 ./mock_server --slots 2 &
-cd ncmp/gui/py && python3 smoke_test.py     # 15개 체크: RNG/digest/AES-CTR/링크/통계 …
+cd ncmp/gui/py && python3 smoke_test.py     # RNG/digest/AES-CTR/세션CI/링크/통계 등 체크
 ```
 
 ## 요구사항 대응표
@@ -161,10 +165,12 @@ cd ncmp/gui/py && python3 smoke_test.py     # 15개 체크: RNG/digest/AES-CTR/�
 | 슬롯 선택 | App GUI slot 스핀박스 → `base+slot` 포트 |
 | mock/real 타깃 연결 | ✅ mock=`mock_server`, real=`hsm_bridge`(동일 링크 프로토콜). App GUI target 선택 |
 | HSM 상태 조회/설정 | App GUI **HSM State**(ping/selftest/fw/token-info/params/utc, login/PIN/init-token) |
+| 세션 관리(OpenSession/CloseSession) | App GUI **HSM State → Session**((pid,sid)→HSM SID 1~255); CI 0x003A/0x003B |
 | 다양한 암복호/해시 시험 | App GUI **Crypto/Hash**(RNG, digest, AES-CTR, AES-GCM) |
 | PQC 시험 | App GUI **PQC**(ML-DSA keygen→sign→verify(+위조), ML-KEM keygen→encaps→decaps 공유비밀 일치) |
 | 테스트 시나리오 | App GUI **Scenarios**(내장 4종: smoke/admin/crypto/PQC, step별 pass/fail) |
 | 1MB+ 파일 SW 비교 | App GUI **File Compare**(스트리밍 digest / chunked AES-CTR, token vs SW, MB/s) |
+| 실 PKCS#11 스택 구동 | App GUI **PKCS#11 (real stack)** 탭 + ncmpd 소켓 전송(`-DENABLE_SOCKET_TOKEN=ON`) → [`app-stdll-path-design.md`](../../docs/app-stdll-path-design.md) |
 
 ## 한계 / 후속 과제
 

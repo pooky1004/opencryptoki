@@ -75,6 +75,14 @@ cd ncmp/gui/py && python3 app_gui.py
 - 실 하드웨어면 ① 대신 `./build/gui/hsm_bridge --data-port 7010 --ctrl-port 7000`,
   App GUI에서 **target=real**.
 
+**두 가지 구동 방식**:
+- **프레임 링크 모드**(기본, 위 ①~③): App이 토큰에 **wire 프레임을 직접** 보냄. 전체
+  CI(벤더·세션·fail-bit 포함) 시험 가능.
+- **실 PKCS#11 스택 모드**: App이 **libopencryptoki(C_*)** → STDLL → ncmpd(소켓 전송) →
+  mock_server 로 **실제 스택**을 구동. App GUI의 **"PKCS#11 (real stack)" 탭** 사용(§4.7).
+  ncmpd를 `-DENABLE_SOCKET_TOKEN=ON`으로 빌드·기동해야 하며, 레시피는
+  [`app-stdll-path-design.md`](app-stdll-path-design.md).
+
 ---
 
 ## 3. 모의 HSM GUI (`mock_gui.py`) 상세

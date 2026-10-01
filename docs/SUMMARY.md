@@ -22,7 +22,7 @@
 | 와이어 opcode | 23종 + 벤더 8종 (mem·crc/ping/selftest/fw/token-info; loopback은 NOP로 통합) |
 | **advertised mechanism** | AES-GCM/CTR · SHA-256/512 · SHA3-224/256/384/512 · SHAKE-128/256 KDF · ML-KEM(+keygen) · ML-DSA(+keygen) |
 | 소스 규모 | `ncmp/` 서브트리 + opencryptoki 통합(`usr/lib/ncmp_stdll/`) + GUI 도구(`ncmp/gui/`) |
-| **GUI 도구** | 모의 HSM GUI + 테스트 App GUI(PySide6) + C 소켓 서버 `mock_server`/`hsm_bridge`(공통 `frame_server`); 헤드리스 스모크 **15/15**, PQC 왕복 6종 검증 |
+| **GUI 도구** | 모의 HSM GUI + 테스트 App GUI(PySide6) + C 소켓 서버 `mock_server`/`hsm_bridge`(공통 `frame_server`) + ncmpd 소켓 전송·App PKCS#11 모드; 헤드리스 스모크 **18/18**, PQC 왕복 6종 검증 |
 | **미완(하드웨어 필요)** | 실 FX3 브링업 (VID/PID/EP 확정, `pkcsconf` 런타임 검증, 실 암호 정합성) |
 
 ---
@@ -159,18 +159,24 @@ opencryptoki(`pkcsslotd`)·SHM 없이 토큰을 구동·시험하는 GUI 도구.
   `hsm_bridge`(실 FX3, `ncmp_transport_*`/libusb). 슬롯 = 토큰, `data port = base+slot`
   에서 wire 프레임 링크, 공용 control 포트로 상태 조회/설정. libusb 없이도 브리지 빌드
   (데이터 명령은 device 오류 반환).
+- **ncmpd 소켓 전송**(`ncmp/daemon/socket_transport.c`, `-DENABLE_SOCKET_TOKEN=ON`):
+  ncmpd가 mock_server에 TCP로 붙어 **실 STDLL 스택**을 하드웨어 없이 구동
+  (→ [`app-stdll-path-design.md`](app-stdll-path-design.md)).
 - **Python 코어**(`ncmp/gui/py/ncmp_gui/`): wire 코덱·소켓 링크·CI 빌더·SW 기준 암호
-  (에뮬레이터 알고리즘 정확 복제 + 실 암호 `hashlib`/`cryptography`).
+  (에뮬레이터 알고리즘 정확 복제 + 실 암호 `hashlib`/`cryptography`)·PKCS#11 어댑터
+  (`pkcs11_link`).
 - **모의 HSM GUI**(`mock_gui.py`): 여러 mock을 한 창에서 — identity 조회/수정, 통계,
   디버그(최근 메시지), 링크 up/down·reset.
 - **테스트 App GUI**(`app_gui.py`): 슬롯 선택·mock/real 연결, HSM 상태(조회/login/PIN/
-  init-token), 암복호/해시, **PQC**(ML-DSA sign/verify·ML-KEM encaps/decaps 왕복),
-  **1MB+ 파일 SW 비교**(스트리밍 digest / chunked AES-CTR, MB/s), 시나리오(4종), 통계.
-- **검증**: C 서버 gcc 빌드(경고 0), 헤드리스 E2E 스모크(`smoke_test.py`) **15/15**,
-  PQC 왕복 6종·위조 서명 거부 확인, GUI `py_compile` OK. **PySide6 6.11.2로 두 GUI를
-  offscreen 구동해 실제 핸들러 동작 검증**(attach/identity/통계/디버그/링크, 연결/HSM상태/
-  암호/PQC/시나리오/1MB+ 파일비교/통계) + 스크린샷 캡처. 온스크린(xcb) 창 표시는 시스템
-  패키지 `libxcb-cursor0`만 추가 설치하면 됨.
+  init-token·**세션 Open/Close**), 암복호/해시, **PQC**(ML-DSA sign/verify·ML-KEM
+  encaps/decaps 왕복), **1MB+ 파일 SW 비교**, 시나리오(4종), **PKCS#11(real stack)** 탭,
+  통계.
+- **세션 CI**: `OPEN_SESSION`/`CLOSE_SESSION`(0x003A/B) — 토큰이 슬롯별 `(pid,sid)→HSM
+  SID(1~255)` 매핑 소유(중첩 금지·멱등). → [`session-id-mapping.md`](session-id-mapping.md).
+- **검증**: C 서버 gcc 빌드(경고 0), 헤드리스 E2E 스모크(`smoke_test.py`) **18/18**
+  (세션 CI 포함), PQC 왕복 6종·위조 서명 거부, 소켓 전송 C 단위 통과, GUI `py_compile` OK.
+  **PySide6 6.11.2로 두 GUI를 offscreen+xcb 구동해 실제 핸들러 동작 검증**(+스크린샷).
+  온스크린(xcb) 창 표시는 시스템 패키지 `libxcb-cursor0` 필요(비-root 우회는 README).
 
 ---
 

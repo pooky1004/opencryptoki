@@ -34,13 +34,17 @@ Mock GUI ─ control(JSON) ─▶ mock_server(C) ◀─ data(wire frame) ─ App
 - CMake: `ncmp/gui/server/CMakeLists.txt`(`ENABLE_GUI_SERVER`) — `ncmp_frame_server`
   라이브러리 + `mock_server` + `hsm_bridge`(libusb 있으면 자동 링크). 상위
   `ncmp/CMakeLists.txt`에 `add_subdirectory(gui/server)`.
+- **ncmpd 소켓 전송 백엔드** `ncmp/daemon/socket_transport.c`
+  (`-DENABLE_SOCKET_TOKEN=ON`): ncmpd가 `ncmp_transport_*`를 TCP로 구현해 `mock_server`에
+  접속 → App이 실 STDLL 스택을 하드웨어 없이 구동(→ [`app-stdll-path-design.md`](app-stdll-path-design.md)).
 
 ### 2.2 Python 공용 코어 — `ncmp/gui/py/ncmp_gui/`
 - `wire.py`: wire 프레임 LE 인코드/디코드(프레임 프리픽스+헤더+param_len[8]+params).
-- `ci.py`: opcode·메커니즘·CKR 상수 + CI 요청 빌더(RNG/digest/AES/admin/vendor …).
+- `ci.py`: opcode·메커니즘·CKR 상수 + CI 요청 빌더(RNG/digest/AES/PQC/admin/세션/vendor …).
 - `link.py`: `DataLink`(프레임 링크, 스레드 안전) + `ControlClient`(JSON RPC).
 - `swcrypto.py`: **에뮬레이터 알고리즘 바이트 정확 복제**(`mock_*`: RNG/digest fold·
   finalize/AES 스트림) + **실 암호**(`real_*`: hashlib/cryptography).
+- `pkcs11_link.py`: **PKCS#11 어댑터**(PyKCS11, 지연 import) — 실 스택 C_* 구동용.
 
 ### 2.3 모의 HSM GUI — `ncmp/gui/py/mock_gui.py`
 - 서버 **Start/Attach/Stop**, 슬롯 목록.
@@ -50,11 +54,13 @@ Mock GUI ─ control(JSON) ─▶ mock_server(C) ◀─ data(wire frame) ─ App
 
 ### 2.4 테스트 App GUI — `ncmp/gui/py/app_gui.py`
 - 연결 바: host/base port/slot/target(mock·real) + Connect/Disconnect(`포트=base+slot`).
-- 탭: **HSM State**(ping/selftest/fw/token-info/params/utc, login/PIN/init-token),
+- 탭: **HSM State**(ping/selftest/fw/token-info/params/utc, login/PIN/init-token,
+  **Session Open/Close**: (pid,sid)→HSM SID),
   **Crypto/Hash**(RNG·digest·AES-CTR·AES-GCM + SW 비교),
   **PQC**(ML-DSA keygen→sign→verify(+위조 거부), ML-KEM keygen→encaps→decaps 공유비밀 일치),
   **File Compare**(스트리밍 digest / chunked AES-CTR, token↔SW, MB/s, 진행바; 워커 스레드),
   **Scenarios**(내장 4종: smoke/admin/crypto/PQC, step별 pass/fail 표),
+  **PKCS#11 (real stack)**(libopencryptoki C_* 로 실 스택 구동; 프레임 링크와 독립 공존),
   **Statistics**(opcode별 count/ok/fail/bytes/avg_ms).
 - opcode별 세션 통계 자동 집계.
 
@@ -67,9 +73,12 @@ Mock GUI ─ control(JSON) ─▶ mock_server(C) ◀─ data(wire frame) ─ App
 | 항목 | 결과 |
 |------|------|
 | C 서버 gcc 빌드(mock_server + hsm_bridge) | **성공**(경고 0) |
-| 헤드리스 스모크(`smoke_test.py`, frame_server 리팩터 후) | **15/15 PASS** (RNG·digest one-shot/multipart·AES-CTR 왕복이 SW 복제본과 바이트 일치, fail-bit·통계·디버그·링크 down) |
+| 헤드리스 스모크(`smoke_test.py`) | **18/18 PASS** (RNG·digest one-shot/multipart·AES-CTR 왕복이 SW 복제본과 바이트 일치, **세션 CI 고유/멱등/해제**, fail-bit·통계·디버그·링크 down) |
 | hsm_bridge(HW 없음) | 기동·control(list/stats) OK, identity=미지원, 데이터=device 오류로 링크 드롭(정상) |
-| App GUI CI 경로 개별 확인 | AES-GCM 왕복(ct‖tag)·token-info(104B)·token-params·login good/bad/logout **정상** |
+| App GUI CI 경로 개별 확인 | AES-GCM 왕복(ct‖tag)·token-info(104B)·token-params·login good/bad/logout·**세션 Open/Close** **정상** |
+| 세션 CI(OPEN/CLOSE_SESSION) | 서로 다른 (pid,sid)→고유 HSM SID(1~255), 멱등 재open, close/재close(INVALID), 255 상한(SESSION_COUNT) |
+| ncmpd 소켓 전송 백엔드 | C 단위 `probe→open→send(RNG)→recv` against mock_server 통과(ack=OK·0x5A/0x5B); ncmpd 소켓 백엔드 링크 OK |
+| App GUI PKCS#11 탭 | PyKCS11 유/무 양쪽 탭 생성·오류 처리 graceful(실 C_* 는 빌드 환경 필요) |
 | 전체 `py_compile` | **OK**(코어 4 + smoke + GUI 2) |
 | **GUI 실행(PySide6 6.11.2)** | Mock/App GUI **헤드리스(offscreen) 구동 검증**: attach·identity 수정·통계·디버그·링크, 연결·HSM상태·암호/해시·PQC·시나리오(4종)·1MB+ 파일비교·통계 핸들러 실동작 확인. 실제 렌더 스크린샷 캡처. |
 
@@ -91,6 +100,8 @@ Mock GUI ─ control(JSON) ─▶ mock_server(C) ◀─ data(wire frame) ─ App
 | PQC(ML-DSA/ML-KEM) 시험 | ✅ PQC 탭 (강도 3종씩 왕복, 위조 거부 확인) |
 | 테스트 시나리오 | ✅ 내장 4종(smoke/admin/crypto/PQC) |
 | 1MB+ 파일 SW 비교 | ✅ File Compare 탭 |
+| 세션 관리(OpenSession/CloseSession) | ✅ CI 0x003A/B + HSM State→Session((pid,sid)→HSM SID 1~255) |
+| 실 PKCS#11 스택 구동 | ✅ ncmpd 소켓 전송(`ENABLE_SOCKET_TOKEN`) + App **PKCS#11 (real stack)** 탭 (실 C_* 는 빌드 환경) |
 
 ## 5. 남은 과제 (TODO)
 

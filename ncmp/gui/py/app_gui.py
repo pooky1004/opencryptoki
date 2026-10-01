@@ -32,9 +32,27 @@ from PySide6.QtWidgets import (
     QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
-from ncmp_gui import ci, link, pkcs11_link, swcrypto, wire
+from ncmp_gui import ci, link, pkcs11_ctypes, swcrypto, wire
 
 MONO = QFont("monospace")
+
+
+def find_ncmp_module() -> str:
+    """Best-effort locate libpkcs11_ncmp.so for the mode-2 (dlopen) tab."""
+    env = os.environ.get("NCMP_PKCS11_MODULE") or os.environ.get("PKCS11_MODULE")
+    if env and os.path.exists(env):
+        return env
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(here, "..", "..", "..", "opencryptoki", "stdll",
+                     ".libs", "libpkcs11_ncmp.so"),
+        "/usr/local/lib/opencryptoki/stdll/libpkcs11_ncmp.so",
+        "/usr/lib/opencryptoki/stdll/libpkcs11_ncmp.so",
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return os.path.abspath(c)
+    return "libpkcs11_ncmp.so"
 
 
 # --------------------------------------------------------------------------- #
@@ -182,7 +200,7 @@ class AppGui(QMainWindow):
         self.link: Optional[link.DataLink] = None
         self.stats = SessionStats()
         self._worker: Optional[FileWorker] = None
-        self.p11 = pkcs11_link.Pkcs11Link()   # PKCS#11 (real stack) mode
+        self.p11 = pkcs11_ctypes.Pkcs11CtypesLink()  # mode 2: direct dlopen+dlsym
 
         central = QWidget(); self.setCentralWidget(central)
         outer = QVBoxLayout(central)
@@ -866,18 +884,18 @@ class AppGui(QMainWindow):
     def _build_pkcs11_tab(self) -> QWidget:
         w = QWidget(); v = QVBoxLayout(w)
 
-        avail, detail = pkcs11_link.available()
         banner = QLabel(
-            "실 PKCS#11 스택(App→libopencryptoki→STDLL→ncmpd→USB/소켓)을 C_* 로 구동. "
-            "프레임 링크(상단 Link)와는 독립이며, 표준 C_* 로 표현 가능한 연산만 제공. "
-            + ("" if avail else f"<br><b>{detail}</b>"))
+            "<b>모드 2</b>: App이 <code>libpkcs11_ncmp.so</code>를 <b>직접 dlopen</b> 하고 "
+            "<b>dlsym</b> 으로 <code>C_GetFunctionList</code>/<code>C_GetInterface</code>/"
+            "<code>C_*</code> 를 찾아 호출한다(libopencryptoki·PyKCS11 불사용, ctypes만). "
+            "프레임 링크(상단 Link)와 독립. 표준 C_* 로 표현 가능한 연산만 제공.")
         banner.setWordWrap(True)
         v.addWidget(banner)
 
-        conn = QGroupBox("PKCS#11 module")
+        conn = QGroupBox("PKCS#11 module (mode 2: dlopen + dlsym)")
         cf = QFormLayout(conn)
-        self.p11_module = QLineEdit(os.environ.get("PKCS11_MODULE", ""))
-        self.p11_module.setPlaceholderText("/usr/local/lib/opencryptoki/libopencryptoki.so")
+        self.p11_module = QLineEdit(find_ncmp_module())
+        self.p11_module.setPlaceholderText("…/libpkcs11_ncmp.so")
         b_browse = QPushButton("Browse…"); b_browse.clicked.connect(self._p11_browse)
         mrow = QHBoxLayout()
         mrow.addWidget(self.p11_module, 1); mrow.addWidget(b_browse)
@@ -885,11 +903,12 @@ class AppGui(QMainWindow):
         self.p11_slot = QSpinBox(); self.p11_slot.setRange(0, 254)
         self.p11_pin = QLineEdit("1234")
         row = QHBoxLayout()
+        b_res = QPushButton("Resolve (dlsym)"); b_res.clicked.connect(self._p11_resolve)
         b_load = QPushButton("Load+Open"); b_load.clicked.connect(self._p11_connect)
         b_login = QPushButton("Login"); b_login.clicked.connect(self._p11_login)
         b_logout = QPushButton("Logout"); b_logout.clicked.connect(self._p11_logout)
         b_disc = QPushButton("Close"); b_disc.clicked.connect(self._p11_close)
-        row.addWidget(b_load); row.addWidget(b_login)
+        row.addWidget(b_res); row.addWidget(b_load); row.addWidget(b_login)
         row.addWidget(b_logout); row.addWidget(b_disc); row.addStretch(1)
         rw = QWidget(); rw.setLayout(row)
         cf.addRow("module (.so)", mrw)
@@ -919,7 +938,7 @@ class AppGui(QMainWindow):
 
         note = QLabel(
             "<i>벤더 datapath·세션 CI·fail-bit·원시 opcode는 C_* 로 도달 불가 → 프레임 "
-            "링크 모드에서 시험. 사용·레시피: docs/app-stdll-path-design.md.</i>")
+            "링크 모드에서 시험. 사용·레시피: docs/dual-mode-provider.md.</i>")
         note.setWordWrap(True)
         v.addWidget(note)
 
@@ -928,38 +947,54 @@ class AppGui(QMainWindow):
         v.addWidget(self.p11_out, 1)
         return w
 
-    # Guidance shown when the real PKCS#11 stack is not usable yet.
+    # Guidance shown when the real stack is not usable yet.
     _P11_HINT = (
         "→ 지금 mock을 시험하려면 이 탭 대신 상단 Link 바에서 "
         "target=mock, port=7010, slot 선택 후 Connect 하고 다른 탭(HSM State/"
         "Crypto/PQC/File Compare/Scenarios)을 사용하세요.\n"
-        "→ 이 PKCS#11 탭을 쓰려면 빌드된 libopencryptoki.so + 기동된 ncmpd가 "
-        "필요합니다(레시피: docs/app-stdll-path-design.md)."
+        "→ 이 탭(모드 2)을 쓰려면 빌드된 libpkcs11_ncmp.so + 기동된 ncmpd가 "
+        "필요합니다(레시피: docs/dual-mode-provider.md)."
     )
 
     def _p11_browse(self) -> None:
         start = self.p11_module.text().strip()
         start_dir = os.path.dirname(start) if start else "/usr/local/lib"
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select PKCS#11 module (libopencryptoki.so)", start_dir,
+            self, "Select PKCS#11 module (libpkcs11_ncmp.so)", start_dir,
             "Shared libraries (*.so *.so.*);;All files (*)")
         if path:
             self.p11_module.setText(path)
+
+    def _p11_resolve(self) -> None:
+        """dlopen the .so and report which version entry points dlsym finds."""
+        module = self.p11_module.text().strip()
+        if not module:
+            self._log(self.p11_out, "모듈 경로가 비어 있습니다.\n" + self._P11_HINT)
+            return
+        try:
+            self.p11.load(module)
+            found = self.p11.resolve(pkcs11_ctypes.VERSIONED_ENTRIES)
+            self._log(self.p11_out, f"dlopen {module}")
+            for name, ok in found.items():
+                self._log(self.p11_out, f"  dlsym {name}: {'FOUND' if ok else 'missing'}")
+        except pkcs11_ctypes.Pkcs11CtypesError as e:
+            self._log(self.p11_out, f"ERROR: {e}\n" + self._P11_HINT)
 
     def _p11_connect(self) -> None:
         module = self.p11_module.text().strip()
         if not module:
             self._log(self.p11_out,
-                      "모듈 경로가 비어 있습니다($PKCS11_MODULE 미설정).\n"
-                      + self._P11_HINT)
+                      "모듈 경로가 비어 있습니다.\n" + self._P11_HINT)
             return
         try:
-            self.p11.load(module)
-            slots = self.p11.slots()
-            self._log(self.p11_out, f"loaded; token-present slots: {slots}")
+            self.p11.load(module)                 # dlopen
+            self.p11.initialize()                  # C_Initialize (dlsym)
+            slots = self.p11.slots()               # C_GetSlotList
+            self._log(self.p11_out,
+                      f"dlopen+C_Initialize OK; token-present slots: {slots}")
             self.p11.open(self.p11_slot.value(), rw=True)
-            self._log(self.p11_out, f"session open on slot {self.p11_slot.value()}")
-        except pkcs11_link.Pkcs11Error as e:
+            self._log(self.p11_out, f"C_OpenSession on slot {self.p11_slot.value()}")
+        except pkcs11_ctypes.Pkcs11CtypesError as e:
             self._log(self.p11_out, f"ERROR: {e}\n" + self._P11_HINT)
 
     def _p11_need_session(self) -> bool:
@@ -984,7 +1019,8 @@ class AppGui(QMainWindow):
         self.p11.logout(); self._log(self.p11_out, "C_Logout")
 
     def _p11_close(self) -> None:
-        self.p11.close(); self._log(self.p11_out, "session closed")
+        self.p11.close(); self.p11.finalize()
+        self._log(self.p11_out, "C_CloseSession + C_Finalize")
 
     def _p11_rng(self) -> None:
         if not self._p11_need_session():

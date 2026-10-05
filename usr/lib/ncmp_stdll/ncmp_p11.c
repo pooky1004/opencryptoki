@@ -35,6 +35,7 @@
 #include <pthread.h>
 #include <string.h>
 #include <stdint.h>
+#include <stdlib.h>   /* getenv (NCMP_SESSION0_FALLBACK) */
 
 /* -------------------------------------------------------------------------- */
 /* Local state (facade owns slots/sessions/objects)                           */
@@ -104,6 +105,18 @@ static p11_object_t   g_objects[P11_MAX_OBJECTS];
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                    */
 /* -------------------------------------------------------------------------- */
+
+/* Opt-in (NCMP_SESSION0_FALLBACK): when the token does not accept OPEN_SESSION,
+ * fall back to a local session that carries wire session_id 0. Read once. */
+static int session0_fallback_enabled(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("NCMP_SESSION0_FALLBACK");
+        cached = (e && *e && e[0] != '0') ? 1 : 0;
+    }
+    return cached;
+}
 
 static p11_session_t *sess_get(CK_SESSION_HANDLE h)
 {
@@ -370,16 +383,28 @@ CK_RV C_OpenSession(CK_SLOT_ID slotID, CK_FLAGS flags, CK_VOID_PTR pApp,
     for (int i = 0; i < P11_MAX_SESSIONS; ++i) {
         if (!g_sessions[i].in_use) {
             uint32_t handle = 0;
-            unsigned long ack;
 
-            /* Open a session on the token: zero wire-header session_id + a
-             * single flags parameter; the token returns the handle. */
-            g_client.active_session_id = 0;
-            ack = ncmp_admin_open_session(&g_client, (uint32_t)slotID,
-                                          (uint32_t)flags, &handle);
-            if (ack != CKR_OK) {
-                pthread_mutex_unlock(&g_lock);
-                return (CK_RV)ack;
+            if (session0_fallback_enabled()) {
+                /*
+                 * Bring-up/debug mode (NCMP_SESSION0_FALLBACK): do NOT open a
+                 * session on the token at all - create a local session that
+                 * carries wire session_id 0, so every subsequent command is
+                 * sent to the token with session_id = 0. Use this against
+                 * firmware that does not (yet) implement OPEN_SESSION. Off by
+                 * default; production behaviour (real open) is unchanged.
+                 */
+                handle = 0;
+            } else {
+                /* Open a session on the token: zero wire-header session_id + a
+                 * single flags parameter; the token returns the handle. */
+                unsigned long ack;
+                g_client.active_session_id = 0;
+                ack = ncmp_admin_open_session(&g_client, (uint32_t)slotID,
+                                              (uint32_t)flags, &handle);
+                if (ack != CKR_OK) {
+                    pthread_mutex_unlock(&g_lock);
+                    return (CK_RV)ack;
+                }
             }
             memset(&g_sessions[i], 0, sizeof(g_sessions[i]));
             g_sessions[i].in_use = 1;
@@ -405,8 +430,11 @@ CK_RV C_CloseSession(CK_SESSION_HANDLE hSession)
     }
     /* Close it on the token: the handle rides in the wire header
      * (active_session_id, set by sess_get above); CLOSE takes no parameters.
-     * The local slot is freed regardless so the handle is never reused. */
-    (void)ncmp_admin_close_session(&g_client, s->slot);
+     * The local slot is freed regardless so the handle is never reused. In the
+     * session0 fallback mode no token session was opened, so skip the token
+     * CLOSE. */
+    if (!session0_fallback_enabled())
+        (void)ncmp_admin_close_session(&g_client, s->slot);
     memset(s, 0, sizeof(*s));
     g_client.active_session_id = 0;
     pthread_mutex_unlock(&g_lock);

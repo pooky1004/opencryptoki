@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Token NCMP — Debug App (SHM Inspector)</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Token NCMP — Debug App · 공유메모리 뷰어</h1>
+    <div class="conn">
+      <button id="themeToggle" class="themebtn" type="button" title="테마 전환">☀️ 라이트</button>
+      <label>서버 토큰 <input id="authToken" type="password" placeholder="NCMP_DBG_TOKEN (선택)" size="14"></label>
+      <label><input type="checkbox" id="autoRefresh" checked> 자동 새로고침(2s)</label>
+      <button id="btnReconnect" type="button">재연결</button>
+      <span id="connDot" class="dot off"></span>
+      <span id="connText">확인 중…</span>
+    </div>
+  </header>
+
+  <section class="statusbar" id="statusbar">
+    <span><b>SHM</b> <span id="shmName">-</span></span>
+    <span><b>magic</b> <span id="shmMagic">-</span></span>
+    <span><b>version</b> <span id="shmVer">-</span></span>
+    <span><b>slotCount</b> <span id="shmSlots">-</span></span>
+    <span><b>totalSize</b> <span id="shmSize">-</span></span>
+    <span><b>slotMask</b> <span id="shmMask">-</span></span>
+    <span><b>sock</b> <span id="shmSock">-</span></span>
+  </section>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="shm">공유메모리 뷰어</button>
+    <button class="tab" data-tab="ci">CI 송수신 (실 target)</button>
+  </nav>
+
+  <main class="pane active" data-pane="shm">
+    <aside class="slots">
+      <h2>슬롯 (공유메모리)</h2>
+      <ul id="slotList"></ul>
+      <p class="muted small">ncmpd conn thread와 핸드셰이크 후 SHM을 읽어 표시합니다. 슬롯을 클릭하면 상세가 보입니다.</p>
+    </aside>
+
+    <section class="detail" id="detail">
+      <h2 id="detailTitle">슬롯을 선택하세요</h2>
+      <div id="detailBody" class="muted">왼쪽에서 슬롯을 선택하면 해당 슬롯의 공유메모리 내용(상태·토큰 신원·통계·세션·명령 링)을 표시합니다.</div>
+    </section>
+  </main>
+
+  <section class="pane cipane" data-pane="ci">
+    <div class="cibar">
+      <label>슬롯 <input type="number" id="ciSlot" value="0" min="0" style="width:70px"></label>
+      <label>CI <select id="ciCmd"></select></label>
+      <label>session_id <input type="number" id="ciSession" value="0" min="0" style="width:90px"></label>
+      <button id="ciSend" class="primary">▶ 전송</button>
+      <button id="ciClear">디버깅 창 지우기</button>
+      <span id="ciHint" class="muted small"></span>
+    </div>
+    <div class="ciparams">
+      <div class="muted small">파라미터(Hex, 공백 허용, 비우면 생략). 예: <code>01000000</code> = little-endian u32 값 1</div>
+      <div id="ciParamRows"></div>
+    </div>
+    <h3>디버깅 창 — 송신/수신을 Hex + 파싱 형식으로 동시 출력</h3>
+    <div id="ciDebug" class="cidebug"></div>
+  </section>
+
+  <footer>
+    <div class="row" style="padding:0 16px 6px"><strong>로그</strong><button id="btnClearLog" type="button">지우기</button></div>
+    <pre id="log" class="log"></pre>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

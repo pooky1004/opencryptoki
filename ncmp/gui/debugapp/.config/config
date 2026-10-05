@@ -1,0 +1,21 @@
+# Token NCMP - Debug App configuration (.config/config).
+#
+# ncmp_dbg loads this file first, then environment variables, then CLI flags
+# override it:   built-in defaults  <  this file  <  env  <  CLI flags
+# Search order: --config PATH, else $NCMP_DBG_CONFIG, else ./.config/config.
+# Format: "key = value", '#'/';' comments, optional surrounding quotes.
+
+# --- HTTP server ---------------------------------------------------------
+# 0.0.0.0 = reachable from other hosts; 127.0.0.1 = local only.
+host = 0.0.0.0
+port = 8090
+# Static web UI directory.
+webroot = web
+# Bearer token for the API. Empty = no auth. Set a strong secret when serving
+# to a network and enter the same value in the UI's "서버 토큰" box.
+token =
+
+# --- ncmpd handshake -----------------------------------------------------
+# UNIX control socket ncmpd listens on. Empty = default (NCMP_IPC_SOCK_PATH);
+# must match the NCMP_SOCK_PATH the daemon was started with.
+sock =

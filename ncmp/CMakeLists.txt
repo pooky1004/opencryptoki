@@ -58,5 +58,8 @@ add_subdirectory(gui/testapp/native)
 # Test App web server: ncmp_web serves the browser UI and a JSON REST API over
 # the native app_* layer, for use from an external host.
 add_subdirectory(gui/testapp/webserver)
+# Debug App server: ncmp_dbg handshakes with the ncmpd conn thread and serves a
+# browser view of the shared memory per slot.
+add_subdirectory(gui/debugapp)
 
 message(STATUS "Token NCMP: ENABLE_MOCK_TOKEN=${ENABLE_MOCK_TOKEN}")

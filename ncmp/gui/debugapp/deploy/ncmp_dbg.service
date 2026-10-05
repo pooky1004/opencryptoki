@@ -1,0 +1,33 @@
+# systemd unit for the Token NCMP Debug App (ncmp_dbg).
+#
+# Install (as root):
+#   cp ncmp_dbg.service /etc/systemd/system/
+#   # edit the paths / token / NCMP_SOCK_PATH below, then:
+#   systemctl daemon-reload
+#   systemctl enable --now ncmp_dbg
+#   journalctl -u ncmp_dbg -f
+#
+# ncmpd must already be running; point NCMP_SOCK_PATH at the same control
+# socket it uses. Set NCMP_DBG_TOKEN to require an Authorization: Bearer header.
+
+[Unit]
+Description=Token NCMP Debug App (ncmp_dbg, SHM inspector)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=REPO=/home/pooky/workspace/opencryptoki
+Environment=NCMP_DBG_TOKEN=change-me-to-a-long-random-secret
+Environment=NCMP_SOCK_PATH=/tmp/ncmpd.sock
+WorkingDirectory=/home/pooky/workspace/opencryptoki/ncmp/gui/debugapp
+ExecStart=/home/pooky/workspace/opencryptoki/ncmp/gui/debugapp/build/ncmp_dbg \
+    --host 0.0.0.0 --port 8090 \
+    --webroot /home/pooky/workspace/opencryptoki/ncmp/gui/debugapp/web
+User=pooky
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

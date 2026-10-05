@@ -1,0 +1,1 @@
+{"name":"B03_슬롯열거","steps":[{"op":"load","params":{"module":""}},{"op":"initialize","params":{}},{"op":"slots","params":{}},{"op":"finalize","params":{}}]}

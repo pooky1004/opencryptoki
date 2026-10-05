@@ -1,0 +1,1 @@
+{"name":"A04_잘못된세션_로그인","steps":[{"op":"load","params":{"module":""}},{"op":"initialize","params":{}},{"op":"login","params":{"session":9999,"userType":1,"pin":"1234"},"expect":"fail"},{"op":"finalize","params":{}}]}

@@ -1,0 +1,1 @@
+{"name":"A07_잘못된사용자유형_로그인","steps":[{"op":"load","params":{"module":""}},{"op":"initialize","params":{}},{"op":"openSession","params":{"slot":0,"rw":1},"saveAs":"s"},{"op":"login","params":{"session":"${s}","userType":99,"pin":"1234"},"expect":"fail"},{"op":"closeSession","params":{"session":"${s}"}},{"op":"finalize","params":{}}]}

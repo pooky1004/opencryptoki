@@ -1,0 +1,1 @@
+{"name":"B11_AESGCM자가검증","steps":[{"op":"load","params":{"module":""}},{"op":"initialize","params":{}},{"op":"openSession","params":{"slot":0,"rw":1},"saveAs":"s"},{"op":"gcmSelftest","params":{"session":"${s}"}},{"op":"closeSession","params":{"session":"${s}"}},{"op":"finalize","params":{}}]}

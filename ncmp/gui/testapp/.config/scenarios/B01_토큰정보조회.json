@@ -1,0 +1,1 @@
+{"name":"B01_토큰정보조회","steps":[{"op":"load","params":{"module":""}},{"op":"initialize","params":{}},{"op":"slots","params":{}},{"op":"tokenInfo","params":{"slot":0}},{"op":"mechanisms","params":{"slot":0}},{"op":"finalize","params":{}}]}

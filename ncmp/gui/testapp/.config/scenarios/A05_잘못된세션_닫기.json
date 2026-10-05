@@ -1,0 +1,1 @@
+{"name":"A05_잘못된세션_닫기","steps":[{"op":"load","params":{"module":""}},{"op":"initialize","params":{}},{"op":"closeSession","params":{"session":9999},"expect":"fail"},{"op":"finalize","params":{}}]}

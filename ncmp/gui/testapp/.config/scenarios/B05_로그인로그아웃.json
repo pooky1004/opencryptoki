@@ -1,0 +1,1 @@
+{"name":"B05_로그인로그아웃","steps":[{"op":"load","params":{"module":""}},{"op":"initialize","params":{}},{"op":"openSession","params":{"slot":0,"rw":1},"saveAs":"s"},{"op":"login","params":{"session":"${s}","userType":1,"pin":"1234"}},{"op":"logout","params":{"session":"${s}"}},{"op":"closeSession","params":{"session":"${s}"}},{"op":"finalize","params":{}}]}

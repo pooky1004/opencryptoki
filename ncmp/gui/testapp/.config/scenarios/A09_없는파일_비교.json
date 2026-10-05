@@ -1,0 +1,1 @@
+{"name":"A09_없는파일_비교","steps":[{"op":"load","params":{"module":""}},{"op":"initialize","params":{}},{"op":"openSession","params":{"slot":0,"rw":1},"saveAs":"s"},{"op":"digestCompare","params":{"session":"${s}","mech":592,"name":"nonexistent.bin"},"expect":"fail"},{"op":"closeSession","params":{"session":"${s}"}},{"op":"finalize","params":{}}]}

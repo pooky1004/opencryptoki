@@ -1,0 +1,1 @@
+{"name":"B07_난수256","steps":[{"op":"load","params":{"module":""}},{"op":"initialize","params":{}},{"op":"openSession","params":{"slot":0,"rw":1},"saveAs":"s"},{"op":"random","params":{"session":"${s}","length":256}},{"op":"closeSession","params":{"session":"${s}"}},{"op":"finalize","params":{}}]}

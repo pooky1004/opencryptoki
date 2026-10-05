@@ -1,0 +1,1 @@
+{"name":"B02_라이브러리정보","steps":[{"op":"load","params":{"module":""}},{"op":"initialize","params":{}},{"op":"library","params":{}},{"op":"dlsym","params":{}},{"op":"finalize","params":{}}]}

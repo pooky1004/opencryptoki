@@ -1,0 +1,1 @@
+{"name":"A06_세션없이_난수","steps":[{"op":"load","params":{"module":""}},{"op":"initialize","params":{}},{"op":"random","params":{"session":9999,"length":16},"expect":"fail"},{"op":"finalize","params":{}}]}

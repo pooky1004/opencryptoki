@@ -1,0 +1,1 @@
+{"name":"A03_없는슬롯_토큰정보","steps":[{"op":"load","params":{"module":""}},{"op":"initialize","params":{}},{"op":"tokenInfo","params":{"slot":99},"expect":"fail"},{"op":"finalize","params":{}}]}

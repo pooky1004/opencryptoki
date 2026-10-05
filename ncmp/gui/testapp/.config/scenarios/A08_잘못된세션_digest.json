@@ -1,0 +1,1 @@
+{"name":"A08_잘못된세션_digest","steps":[{"op":"load","params":{"module":""}},{"op":"initialize","params":{}},{"op":"digest","params":{"session":9999,"mech":592,"input":"x"},"expect":"fail"},{"op":"finalize","params":{}}]}

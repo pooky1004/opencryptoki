@@ -1,0 +1,1 @@
+{"name":"B08_SHA256단발","steps":[{"op":"load","params":{"module":""}},{"op":"initialize","params":{}},{"op":"openSession","params":{"slot":0,"rw":1},"saveAs":"s"},{"op":"digest","params":{"session":"${s}","mech":592,"input":"abc"}},{"op":"closeSession","params":{"session":"${s}"}},{"op":"finalize","params":{}}]}

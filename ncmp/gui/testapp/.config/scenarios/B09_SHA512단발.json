@@ -1,0 +1,1 @@
+{"name":"B09_SHA512단발","steps":[{"op":"load","params":{"module":""}},{"op":"initialize","params":{}},{"op":"openSession","params":{"slot":0,"rw":1},"saveAs":"s"},{"op":"digest","params":{"session":"${s}","mech":624,"input":"hello"}},{"op":"closeSession","params":{"session":"${s}"}},{"op":"finalize","params":{}}]}

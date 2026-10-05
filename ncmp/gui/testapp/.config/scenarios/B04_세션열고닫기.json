@@ -1,0 +1,1 @@
+{"name":"B04_세션열고닫기","steps":[{"op":"load","params":{"module":""}},{"op":"initialize","params":{}},{"op":"openSession","params":{"slot":0,"rw":1},"saveAs":"s"},{"op":"sessionInfo","params":{"session":"${s}"}},{"op":"closeSession","params":{"session":"${s}"}},{"op":"finalize","params":{}}]}

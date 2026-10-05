@@ -1,0 +1,1 @@
+{"name":"A02_잘못된PIN_로그인","steps":[{"op":"load","params":{"module":""}},{"op":"initialize","params":{}},{"op":"openSession","params":{"slot":0,"rw":1},"saveAs":"s"},{"op":"login","params":{"session":"${s}","userType":1,"pin":"9999"},"expect":"fail"},{"op":"closeSession","params":{"session":"${s}"}},{"op":"finalize","params":{}}]}

@@ -26,6 +26,7 @@
 | [`testapp-web-manual.md`](testapp-web-manual.md) | **웹 Test App 사용자 매뉴얼(상세, 라이트 테마 기준)**. 화면 구성, 헤더·툴바·슬롯·탭의 모든 버튼이 무엇을 하는지·시험 목적·무엇을 어떻게 설정하는지, 자주 쓰는 시험 절차(요리책), 문제 해결, 용어. |
 | [`testapp-web-design.md`](testapp-web-design.md) | **웹 Test App 설계·개발 내역**. 브라우저 ─HTTP/JSON─ C 웹서버(`ncmp_web`, native app_* 포함) ─dlopen C_*─ facade ─ ncmpd ─ 실 FX3. REST API 표, 웹 UI(좌=활성 슬롯·우=토큰/세션/크립토/API 시험/시나리오 탭), 단위항목↔시나리오 엔진(변수·단정·저장/내보내기), 수반 수정, 검증 요지. |
 | [`testapp-web-deployment.md`](testapp-web-deployment.md) | **웹 Test App 배포·시스템 설정**. 빌드/실행 인자·env, 외부 접속을 위한 방화벽(ufw/firewalld/nft)·FX3 udev·systemd 유닛·베어러 토큰·HTTPS 리버스 프록시·SSH 터널, 트러블슈팅. 특권 변경은 미적용(명령 제공). |
+| [`testapp-web-scenario-results.md`](testapp-web-scenario-results.md) | **시나리오 시험 결과(기본 15 + 비정상 10, 실 타겟)**. 25개 시나리오를 생성·영구 저장(`ncmp/gui/testapp/.config/scenarios/`) 후 실 FX3로 실행 + mock 교차 검증. 실 보드가 부트로더(펌웨어 미적재)라 전송·메타 명령은 정상, C_OpenSession부터 타임아웃 실패 — 시나리오별 PASS/FAIL 표·스텝 rc·펌웨어 적재 후 재시험 방법. |
 | [`testapp-web-test-results.md`](testapp-web-test-results.md) | **웹 Test App 시험 결과**. 정적 서빙·전 REST API(mock)·음성 로그인(0xA0)·베어러 토큰 401/200·실 FX3(real) 실측 표, 시나리오별 PASS/FAIL, 미검증/제약. |
 
 ## 핵심 소스 진입점

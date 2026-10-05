@@ -1,0 +1,1 @@
+{"name":"A10_미초기화_세션열기","steps":[{"op":"openSession","params":{"slot":0,"rw":1},"expect":"fail"}]}

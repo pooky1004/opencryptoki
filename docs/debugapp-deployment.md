@@ -64,10 +64,16 @@ sudo firewall-cmd --permanent --add-port=8090/tcp && sudo firewall-cmd --reload 
 ```bash
 sudo cp ncmp/gui/debugapp/deploy/ncmp_dbg.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now ncmp_dbg
+sudo systemctl start ncmp_dbg           # 지금만 실행, 부팅 자동 실행 없음(권장)
+# sudo systemctl enable --now ncmp_dbg  # 부팅 자동 실행까지 원할 때만
 journalctl -u ncmp_dbg -f
 ```
 `WorkingDirectory`가 설정돼 있어 `./.config/config`가 그 디렉토리에서 로드된다.
+
+> **부팅 자동 실행을 원치 않으면 `enable` 대신 `start`만** 쓴다. 이미 `enable`한
+> 것을 해제: `sudo systemctl disable ncmp_dbg`(현재 실행 유지) 또는
+> `sudo systemctl disable --now ncmp_dbg`(지금 중지까지). `systemctl is-enabled
+> ncmp_dbg`가 `disabled`면 완료.
 
 ### 3.3 베어러 토큰 + (권장) HTTPS 리버스 프록시
 ```bash

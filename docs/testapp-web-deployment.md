@@ -134,10 +134,26 @@ sudo usermod -aG plugdev "$USER"   # 로그인 다시 필요
 ```bash
 sudo cp ncmp/gui/testapp/webserver/deploy/ncmp_web.service /etc/systemd/system/
 sudo systemctl daemon-reload
+
+# (A) 필요할 때만 수동 실행 — 부팅 자동 실행 없음 (권장 기본값)
+sudo systemctl start ncmp_web
+
+# (B) 부팅 시 자동 실행까지 원할 때만
 sudo systemctl enable --now ncmp_web
+
 systemctl status ncmp_web
 journalctl -u ncmp_web -f
 ```
+
+> **주의**: `enable`은 부팅 시 자동 실행을 등록한다. **자동 실행을 원치 않으면
+> `start`만** 쓴다. 이미 `enable`한 것을 **해제(자동 실행 끄기)**:
+> ```bash
+> sudo systemctl disable ncmp_web        # 부팅 자동 실행만 해제(현재 실행은 유지)
+> sudo systemctl disable --now ncmp_web  # 해제 + 지금 바로 중지
+> systemctl is-enabled ncmp_web          # -> disabled 이면 완료
+> ```
+> 이후에도 `sudo systemctl start ncmp_web`로 수동 실행은 가능하다. 디버그 앱
+> (`ncmp_dbg`)도 동일하게 `enable` 대신 `start`를 쓰면 자동 실행되지 않는다.
 
 ### 3.4 (권장) 베어러 토큰 + HTTPS 리버스 프록시
 

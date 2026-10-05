@@ -4,8 +4,11 @@
 #   cp ncmp_dbg.service /etc/systemd/system/
 #   # edit the paths / token / NCMP_SOCK_PATH below, then:
 #   systemctl daemon-reload
-#   systemctl enable --now ncmp_dbg
+#   systemctl start ncmp_dbg          # run now, NO auto-start at boot (recommended)
+#   # systemctl enable --now ncmp_dbg # ONLY if you also want boot auto-start
 #   journalctl -u ncmp_dbg -f
+# Turn OFF an already-enabled boot auto-start:
+#   systemctl disable ncmp_dbg        (add --now to also stop it now)
 #
 # ncmpd must already be running; point NCMP_SOCK_PATH at the same control
 # socket it uses. Set NCMP_DBG_TOKEN to require an Authorization: Bearer header.

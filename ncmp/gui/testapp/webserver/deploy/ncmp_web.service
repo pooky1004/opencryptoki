@@ -4,9 +4,15 @@
 #   cp ncmp_web.service /etc/systemd/system/
 #   # edit the paths / Environment below to match your checkout, then:
 #   systemctl daemon-reload
-#   systemctl enable --now ncmp_web
+#   systemctl start ncmp_web          # run now, NO auto-start at boot (recommended)
+#   # systemctl enable --now ncmp_web # ONLY if you also want boot auto-start
 #   systemctl status ncmp_web
-#   journalctl -u ncmp_web -f        # live log
+#   journalctl -u ncmp_web -f         # live log
+#
+# Do NOT want it to start at boot? Use `start` (not `enable`). To turn OFF an
+# already-enabled boot auto-start:
+#   systemctl disable ncmp_web        # stop auto-start (keeps it running now)
+#   systemctl disable --now ncmp_web  # also stop it now
 #
 # Security: set NCMP_WEB_TOKEN to a strong secret so the REST API requires an
 # Authorization: Bearer header. Prefer binding to a trusted interface and/or

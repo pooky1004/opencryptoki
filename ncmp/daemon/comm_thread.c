@@ -16,11 +16,33 @@
 #include "ncmp/ncmp_wire.h"
 #include "ncmp/ncmp_transport.h"
 #include "ncmp/ncmp_errno.h"
+#include "ncmp/ncmp_ckr.h"
 
 #include <sched.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
+
+/*
+ * How long a dispatched request may wait for its token response before the
+ * comm_thread gives up on it. Matches the per-transfer USB timeout
+ * (NCMP_USB_TIMEOUT_MS in usb_transport.c): a token that has not answered one
+ * USB read window is treated as non-responding. On expiry the comm_thread
+ * completes the entry with an error ACK (see comm_reap_timeouts), so the STDLL
+ * client returns in ~5 s instead of spinning out its full wait budget (~40 s).
+ */
+#define NCMP_CMD_TIMEOUT_MS 5000ull
+
+/** @brief Monotonic clock in milliseconds (never wall-clock; immune to steps). */
+static uint64_t comm_now_ms(void)
+{
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
+}
 
 #ifdef NCMP_HOST_MANAGED_CTX
 /*
@@ -317,11 +339,25 @@ static void comm_reserve_inflight(NCMP_Slot *slot)
     __atomic_add_fetch(&slot->stats.in_flight_cnt, 1, __ATOMIC_ACQ_REL);
 }
 
-/** Release the in-flight reservation when a response arrives (or send fails). */
+/** Release the in-flight reservation when a response arrives (or send fails).
+ *  Guarded so a stray release (e.g. a late token response for an entry already
+ *  reaped on timeout) can never wrap the unsigned counter and wedge dispatch. */
 static void comm_release_inflight(NCMP_Slot *slot)
 {
-    __atomic_sub_fetch(&slot->stats.in_flight_cnt, 1, __ATOMIC_ACQ_REL);
+    uint32_t cur = __atomic_load_n(&slot->stats.in_flight_cnt, __ATOMIC_ACQUIRE);
+
+    while (cur > 0) {
+        if (__atomic_compare_exchange_n(&slot->stats.in_flight_cnt, &cur,
+                                        cur - 1, 0 /* strong */,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            return;
+        /* cur reloaded by the CAS; retry. */
+    }
 }
+
+/* Complete an entry with a 0-parameter error response (defined below). */
+static void comm_complete_error(ncmpd_slot_ctx_t *ctx, NCMP_QEntry *e,
+                                uint32_t ack);
 
 /** Find a POSTED entry and claim it for sending (POSTED -> SENT). Returns idx. */
 static int comm_take_posted(NCMP_Slot *slot)
@@ -382,11 +418,20 @@ static int comm_dispatch(ncmpd_slot_ctx_t *ctx)
         comm_reserve_inflight(slot);
         rc = ncmp_transport_send(ctx->transport, send, send_len);
         if (rc != NCMP_OK) {
-            /* Undo the reservation and requeue for a later attempt. */
+            /* The transfer itself failed - typically the token did not drain
+             * the bulk-OUT endpoint within one USB timeout window (~5 s), e.g.
+             * an unprovisioned/stalled device. Do NOT bounce the entry back to
+             * POSTED to retry: each retry costs another full USB timeout, so
+             * the client would wait ~40 s before giving up. Complete it now with
+             * an error so the caller returns in ~5 s. */
+            uint32_t ack = (rc == NCMP_ERR_TIMEOUT) ? NCMP_CKR_FUNCTION_CANCELED
+                                                    : NCMP_CKR_DEVICE_ERROR;
             comm_release_inflight(slot);
-            ncmp_qentry_cas(e, NCMP_Q_SENT, NCMP_Q_POSTED);
+            comm_complete_error(ctx, e, ack);
             break;
         }
+        /* Stamp the send time so comm_reap_timeouts can bound the wait. */
+        ctx->sent_ms[idx] = comm_now_ms();
         ++dispatched;
     }
     return dispatched;
@@ -442,6 +487,87 @@ static int comm_drain(ncmpd_slot_ctx_t *ctx, uint8_t *rxbuf, size_t rxcap)
     return 1;
 }
 
+/**
+ * @brief Complete a request entry with a 0-parameter error response carrying
+ *        @p ack, so the waiting STDLL client returns immediately instead of
+ *        spinning. The request's session/sequence/command ids are echoed so the
+ *        frame is well-formed. The caller must have released the entry's
+ *        in-flight reservation first.
+ *
+ * Publishes SENT -> DONE; if the client abandoned the entry meanwhile, rolls
+ * ABANDONED -> FREE instead (the written response is then simply dropped).
+ */
+static void comm_complete_error(ncmpd_slot_ctx_t *ctx, NCMP_QEntry *e,
+                                uint32_t ack)
+{
+    const uint8_t *req = (const uint8_t *)ncmp_shm_ptr(ctx->shm_base, e->req_off);
+    uint8_t *rsp = (uint8_t *)ncmp_shm_ptr(ctx->shm_base, e->rsp_off);
+    NCMP_Header hdr;
+    NCMP_Message m;
+    size_t enc_len = 0;
+
+    if (ncmp_wire_decode_header(req, e->req_len, &hdr) != NCMP_OK) {
+        /* Fall back to the entry's own ids if the request won't decode. */
+        memset(&hdr, 0, sizeof(hdr));
+        hdr.session_id = e->owner_sess;
+        hdr.sequence_id = e->sequence_id;
+    }
+    hdr.ack = ack;
+
+    memset(&m, 0, sizeof(m));
+    m.header = hdr;                          /* all param_len[] are 0 */
+    if (ncmp_wire_encode(&m, rsp, NCMP_ENTRY_BUF_SIZE, &enc_len) == NCMP_OK)
+        e->rsp_len = (uint32_t)enc_len;
+
+    if (!ncmp_qentry_cas(e, NCMP_Q_SENT, NCMP_Q_DONE))
+        ncmp_qentry_cas(e, NCMP_Q_ABANDONED, NCMP_Q_FREE);
+}
+
+/**
+ * @brief Reap requests that have been outstanding past NCMP_CMD_TIMEOUT_MS.
+ *
+ * Covers the "sent but no response" failure mode: a token that accepts the
+ * request but never answers would otherwise leave the entry SENT forever, so
+ * the in-flight reservation leaks (eventually wedging dispatch at the ceiling)
+ * and the STDLL client only gives up after spinning its full budget (~40 s).
+ * Here the sole consumer completes such an entry with CKR_FUNCTION_CANCELED so
+ * the client returns in ~5 s, and releases the in-flight slot. ABANDONED
+ * entries (client already gave up) are simply freed.
+ *
+ * (The "send itself timed out" failure mode is handled inline in
+ * comm_dispatch, which completes the entry rather than retrying for 40 s.)
+ *
+ * @return Number of entries reaped this call.
+ */
+static int comm_reap_timeouts(ncmpd_slot_ctx_t *ctx)
+{
+    NCMP_Slot *slot = ctx->slot;
+    uint64_t now = 0;
+    int reaped = 0;
+
+    for (uint32_t i = 0; i < NCMP_QUEUE_DEPTH; ++i) {
+        NCMP_QEntry *e = &slot->ring[i];
+        uint32_t st = ncmp_qentry_state(e);
+
+        if (st != NCMP_Q_SENT && st != NCMP_Q_ABANDONED)
+            continue;
+        if (now == 0)
+            now = comm_now_ms();
+        if (now - ctx->sent_ms[i] < NCMP_CMD_TIMEOUT_MS)
+            continue;
+
+        if (st == NCMP_Q_SENT) {
+            comm_release_inflight(slot);
+            comm_complete_error(ctx, e, NCMP_CKR_FUNCTION_CANCELED);
+        } else { /* NCMP_Q_ABANDONED */
+            comm_release_inflight(slot);
+            ncmp_qentry_cas(e, NCMP_Q_ABANDONED, NCMP_Q_FREE);
+        }
+        ++reaped;
+    }
+    return reaped;
+}
+
 void *ncmpd_comm_thread(void *arg)
 {
     ncmpd_slot_ctx_t *ctx = (ncmpd_slot_ctx_t *)arg;
@@ -455,6 +581,7 @@ void *ncmpd_comm_thread(void *arg)
     while (!ncmpd_should_stop(&ctx->stop)) {
         int worked = comm_dispatch(ctx);
         worked += comm_drain(ctx, rxbuf, sizeof(rxbuf));
+        worked += comm_reap_timeouts(ctx);
         if (!worked)
             sched_yield();
     }

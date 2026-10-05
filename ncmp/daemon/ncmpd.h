@@ -52,6 +52,12 @@ typedef struct ncmpd_slot_ctx {
     ncmp_transport_t *transport; /**< Token transport (real USB or mock). */
     pthread_t         thread;    /**< comm_thread handle. */
     volatile sig_atomic_t stop;  /**< Set non-zero to stop the comm loop. */
+    /* Monotonic dispatch timestamp (ms) per ring entry, written when the entry
+     * is sent to the token. Owned solely by this slot's comm_thread (single
+     * consumer). Used to reap a request whose response never arrives, so a
+     * non-responding token surfaces as an error in ~NCMP_CMD_TIMEOUT_MS instead
+     * of leaving the client to spin out its full budget. */
+    uint64_t          sent_ms[NCMP_QUEUE_DEPTH];
     /* Host-managed multipart context store (NCMP_HOST_MANAGED_CTX builds only).
      * Owned solely by this slot's comm_thread, so it needs no lock. Allocated
      * lazily in ncmpd_comm_thread and freed on exit; NULL otherwise. */

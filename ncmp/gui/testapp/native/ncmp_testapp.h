@@ -59,6 +59,11 @@ int app_session_info(unsigned long session, char *json_out, int cap);
 /** Session + login. */
 int app_open_session(unsigned long slot, int rw, unsigned long *out_session);
 int app_close_session(unsigned long session);
+/** Open a session carrying a caller-supplied wire session_id (no token
+ *  OPEN_SESSION); for bring-up/debug or driving a specific id. Needs the NCMP
+ *  standalone facade (NCMP_OpenSessionWithId); returns APP_ERR_NO_FUNC otherwise. */
+int app_session_adopt(unsigned long slot, unsigned long wire_sid,
+                      unsigned long *out_session);
 int app_login(unsigned long session, int user_type, const char *pin);
 int app_logout(unsigned long session);
 

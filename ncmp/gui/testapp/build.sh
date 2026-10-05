@@ -55,15 +55,15 @@ done. Run the web server (serves the UI + REST API):
       --host 0.0.0.0 --port 8080 \\
       --webroot $here/web \\
       --module $facade \\
-      --ncmpd $ncmpd --transport mock
+      --ncmpd $ncmpd --transport real
 Then open  http://<this-host>:8080/  from any machine on the network.
 Edit $here/.config/config to set the port, bind host, auth token, etc.
-(For the real FX3 use --transport real; see docs/testapp-web-deployment.md for
- firewall/systemd/auth setup.)
+(Default transport is real (FX3 over USB); use --transport mock without
+ hardware. See docs/testapp-web-deployment.md for firewall/systemd/auth setup.)
 EOF
 
 if [[ "$do_run" == 1 ]]; then
-  echo "== running (0.0.0.0:8080, mock) =="
+  echo "== running (0.0.0.0:8080, real) =="
   exec "$out/ncmp_web" --host 0.0.0.0 --port 8080 --webroot "$here/web" \
-       --module "$facade" --ncmpd "$ncmpd" --transport mock
+       --module "$facade" --ncmpd "$ncmpd" --transport real
 fi

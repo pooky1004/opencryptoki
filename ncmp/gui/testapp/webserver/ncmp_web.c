@@ -54,7 +54,7 @@ static int g_port = 8080;
 static char g_webroot[1024] = "web";
 static char g_module[1024] = "";       /* default facade module path */
 static char g_ncmpd[1024] = "ncmpd";   /* ncmpd binary path */
-static char g_transport[16] = "mock";  /* default --transport */
+static char g_transport[16] = "real";  /* default --transport (real FX3) */
 static char g_sock_path[1024] = "";     /* NCMP_SOCK_PATH shared with facade */
 static char g_token[256] = "";          /* bearer token; empty = auth off */
 static char g_filedir[1024] = "/tmp/ncmp_web_files"; /* generated test files */
@@ -775,6 +775,15 @@ static int route_api(int fd, const char *method, const char *path, const char *b
         json_long(body, "rw", &rw);
         rc = app_open_session((unsigned long)slot, (int)rw, &h);
         if (rc == 0) snprintf(extra, sizeof(extra), "\"session\":%lu", h);
+    } else if (!strcmp(path, "/api/session/adopt") && !strcmp(method, "POST")) {
+        /* Open a session with a caller-supplied wire session_id (no token
+         * OPEN_SESSION); lets the UI drive a specific id, incl. 0. */
+        long slot = 0, sid = 0;
+        unsigned long h = 0;
+        json_long(body, "slot", &slot);
+        json_long(body, "session", &sid);
+        rc = app_session_adopt((unsigned long)slot, (unsigned long)sid, &h);
+        if (rc == 0) snprintf(extra, sizeof(extra), "\"session\":%lu,\"wireSid\":%ld", h, sid);
     } else if (!strcmp(path, "/api/session/close") && !strcmp(method, "POST")) {
         long h = 0;
         if (json_long(body, "session", &h))

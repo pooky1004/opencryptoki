@@ -21,7 +21,112 @@ const el = (tag, props = {}, ...kids) => {
 };
 
 let SELECTED_SLOT = null;
-let CUR_SESSION = null;
+let CUR_SESSION = null;          // local facade handle of the active session
+let SESSIONS = [];               // [{handle, label, sid}] opened/adopted sessions
+
+/* Command defaults panel (token-info tab): push PIN / user type / R/W / session
+ * id into the per-tab command inputs. Applied on edit, on "적용", and at
+ * C_Initialize. */
+function applyDefaults() {
+  const ut = $('#defUserType'), pin = $('#defPin'), soPin = $('#defSoPin');
+  const sid = $('#defSessionId'), rw = $('#defRw');
+  if (!ut) return;
+  if ($('#userType')) $('#userType').value = ut.value;
+  // SO(0) uses SO PIN; User(1)/ContextSpecific(2) use the user PIN.
+  if ($('#pin')) $('#pin').value = (ut.value === '0' ? soPin.value : pin.value);
+  if ($('#sessionId')) $('#sessionId').value = sid.value;
+  if ($('#rwSession')) $('#rwSession').checked = rw.checked;
+}
+
+function setSessionText() {
+  const t = $('#sessionText'); if (!t) return;
+  if (CUR_SESSION === null) { t.textContent = '세션 없음'; return; }
+  const s = SESSIONS.find((x) => x.handle === CUR_SESSION);
+  t.textContent = `현재 세션 ${s ? s.label : ('h' + CUR_SESSION)} · 활성 ${SESSIONS.length}개`;
+}
+// Fill every session picker (.sessionPicker) with the active sessions; all
+// per-session commands use the selected one (CUR_SESSION).
+function renderSessionPickers() {
+  document.querySelectorAll('.sessionPicker').forEach((sel) => {
+    sel.innerHTML = SESSIONS.length
+      ? SESSIONS.map((s) => `<option value="${s.handle}">${s.label} · handle ${s.handle}</option>`).join('')
+      : '<option value="">(열린 세션 없음)</option>';
+    if (CUR_SESSION !== null) sel.value = String(CUR_SESSION);
+    sel.onchange = () => {
+      CUR_SESSION = sel.value === '' ? null : Number(sel.value);
+      document.querySelectorAll('.sessionPicker').forEach((o) => { if (CUR_SESSION !== null) o.value = String(CUR_SESSION); });
+      setSessionText();
+      if (CUR_SESSION !== null) sessionInfo();
+    };
+  });
+}
+function addSession(handle, label, meta = {}) {
+  SESSIONS.push({
+    handle, label,
+    type: meta.type || '-', sid: (meta.sid === undefined ? null : meta.sid),
+    slot: (meta.slot === undefined ? null : meta.slot),
+    openedAt: Date.now(),
+    count: 0, lastCmd: '-', lastAt: null, lastOk: null, state: null,
+  });
+  CUR_SESSION = handle; renderSessionPickers(); setSessionText(); renderSessionsTab();
+}
+function removeSession(handle) {
+  SESSIONS = SESSIONS.filter((s) => s.handle !== handle);
+  CUR_SESSION = SESSIONS.length ? SESSIONS[SESSIONS.length - 1].handle : null;
+  renderSessionPickers(); setSessionText(); renderSessionsTab();
+}
+/* Record the last command issued on a session (updates the 활성 세션 tab). */
+function touchSession(handle, cmd, ok) {
+  const s = SESSIONS.find((x) => x.handle === handle);
+  if (!s) return;
+  s.count++; s.lastCmd = cmd; s.lastAt = Date.now(); s.lastOk = ok;
+  renderSessionsTab();
+}
+function fmtTime(ms) { return ms ? new Date(ms).toTimeString().slice(0, 8) : '-'; }
+function fmtAgo(ms) {
+  if (!ms) return '-';
+  const s = Math.floor((Date.now() - ms) / 1000);
+  if (s < 60) return s + '초';
+  const m = Math.floor(s / 60); if (m < 60) return m + '분 ' + (s % 60) + '초';
+  return Math.floor(m / 60) + '시간 ' + (m % 60) + '분';
+}
+function renderSessionsTab() {
+  const tb = document.querySelector('#sessTable tbody'); if (!tb) return;
+  tb.innerHTML = '';
+  for (const s of SESSIONS) {
+    const tr = el('tr', {});
+    const td = (v, cls) => el('td', cls ? { className: cls, textContent: String(v) } : { textContent: String(v) });
+    tr.append(td(s.handle === CUR_SESSION ? '●' : ''));
+    tr.append(td(s.handle));
+    tr.append(td(s.type));
+    tr.append(td(s.sid === null ? '-' : s.sid));
+    tr.append(td(s.slot === null ? '-' : s.slot));
+    tr.append(td(fmtTime(s.openedAt)));
+    tr.append(td(fmtAgo(s.openedAt)));
+    tr.append(td(s.count));
+    tr.append(td(s.lastCmd));
+    tr.append(td(s.lastOk === null ? '-' : (s.lastOk ? 'OK' : 'FAIL'), s.lastOk === null ? '' : (s.lastOk ? 'pass' : 'fail')));
+    tr.append(td(fmtTime(s.lastAt)));
+    tr.append(td(s.state === null ? '-' : s.state));
+    const act = el('td', {});
+    const bSel = el('button', { textContent: '선택' });
+    bSel.onclick = () => { CUR_SESSION = s.handle; renderSessionPickers(); setSessionText(); renderSessionsTab(); };
+    const bClose = el('button', { textContent: '닫기' });
+    bClose.onclick = async () => { const d = await api('/api/session/close', 'POST', { session: s.handle }); log(`세션(handle ${s.handle}) 닫기: ${describe(d)}`); removeSession(s.handle); };
+    act.append(bSel, ' ', bClose);
+    tr.append(act);
+    tb.append(tr);
+  }
+  const sum = $('#sessSummary');
+  if (sum) sum.textContent = `활성 세션 ${SESSIONS.length}개` + (CUR_SESSION !== null ? ` · 현재 handle ${CUR_SESSION}` : '');
+}
+async function refreshSessionStates() {
+  for (const s of SESSIONS) {
+    const d = await api('/api/session/info', 'POST', { session: s.handle });
+    s.state = d.ok ? `${d.session.state} (flags 0x${d.session.flags.toString(16)})` : `err rc=${d.rc}`;
+  }
+  renderSessionsTab();
+}
 
 function authToken() { return $('#authToken').value.trim(); }
 
@@ -121,11 +226,19 @@ async function initialize() {
   const d = await api('/api/initialize', 'POST', {});
   log('C_Initialize: ' + describe(d));
   if (d.ok) {
+    applyDefaults();   // seed command inputs from the 명령 기본값 panel
+    log('명령 기본값 적용: 사용자=' + $('#defUserType').value + ', 세션 ID=' + $('#defSessionId').value + ', R/W=' + $('#defRw').checked);
     const lib = await api('/api/library');
     if (lib.ok && lib.info)
       $('#libInfo').textContent =
         `Cryptoki ${lib.info.cryptokiVersion} · ${lib.info.manufacturer} · ${lib.info.libDescription} (v${lib.info.libVersion})`;
-    refreshSlots();
+    await refreshSlots();
+    // Always include session ID 0 (system session) so every tab's selector can
+    // pick it right away.
+    if (SELECTED_SLOT !== null && !SESSIONS.some((s) => s.type === 'adopt' && s.sid === 0)) {
+      const a = await adoptSid(0);
+      if (a.ok) log('세션 ID 0(시스템 세션) 자동 추가 — 활성 세션에서 선택 가능');
+    }
   }
 }
 async function finalize() {
@@ -163,9 +276,7 @@ async function refreshSlots() {
 
 function selectSlot(id, li) {
   SELECTED_SLOT = id;
-  CUR_SESSION = null;
-  $('#sessionText').textContent = '세션 없음';
-  $('#sessionInfo').textContent = '';
+  /* Sessions are facade-global; keep them across slot selection. */
   document.querySelectorAll('#slotList li').forEach((n) => n.classList.remove('sel'));
   li.classList.add('sel');
   // keep the API tester's slot field in sync
@@ -192,19 +303,49 @@ async function tokenInfo() {
 
 async function openSession() {
   if (SELECTED_SLOT === null) return log('먼저 슬롯을 선택하세요');
+  $('#sessionText').textContent = '세션 여는 중… (실 타겟 OPEN_SESSION은 수십 초 걸릴 수 있음)';
+  log(`슬롯 ${SELECTED_SLOT}: C_OpenSession 요청…`);
+  setSessionText();
+  log(`슬롯 ${SELECTED_SLOT}: C_OpenSession 요청…`);
   const d = await api('/api/session/open', 'POST', { slot: SELECTED_SLOT, rw: $('#rwSession').checked ? 1 : 0 });
-  if (!d.ok) return log('C_OpenSession 실패: ' + describe(d));
-  CUR_SESSION = d.session;
-  $('#sessionText').textContent = `세션 핸들 ${d.session}`;
+  if (!d.ok) return log('C_OpenSession 실패: ' + describe(d) + ' — 토큰 OPEN_SESSION 미응답이면 "ID로 세션 열기"를 사용하세요');
+  addSession(d.session, `열림(C_OpenSession)`, { type: 'open', slot: SELECTED_SLOT });
   await sessionInfo();
   log(`슬롯 ${SELECTED_SLOT}: 세션 ${d.session} 열림`);
 }
+
+// Adopt one wire session_id (core). Returns the API result; adds to the list on ok.
+async function adoptSid(sid) {
+  if (SELECTED_SLOT === null) return { ok: false, error: 'no slot' };
+  if (SESSIONS.some((s) => s.type === 'adopt' && s.sid === sid)) {
+    const ex = SESSIONS.find((s) => s.type === 'adopt' && s.sid === sid);
+    CUR_SESSION = ex.handle; renderSessionPickers(); setSessionText();
+    return { ok: true, session: ex.handle, dup: true };   // already present
+  }
+  const d = await api('/api/session/adopt', 'POST', { slot: SELECTED_SLOT, session: sid });
+  if (d.ok) addSession(d.session, `sid ${sid}`, { type: 'adopt', sid, slot: SELECTED_SLOT });
+  return d;
+}
+async function adoptSession() {
+  if (SELECTED_SLOT === null) return log('먼저 슬롯을 선택하세요');
+  let sid = Math.floor(Number($('#sessionId').value));
+  if (!Number.isFinite(sid) || sid < 0 || sid > 65535) return log('세션 ID는 0~65535 범위여야 합니다');
+  log(`슬롯 ${SELECTED_SLOT}: 세션 ID ${sid} 채택(adopt)…`);
+  const d = await adoptSid(sid);
+  if (!d.ok) {
+    if (d.error && d.error.includes('no such api'))
+      return log('세션 채택 실패: 서버(ncmp_web)에 adopt 엔드포인트가 없습니다 — ncmp_web을 재빌드·재시작하세요(정적 UI는 새로고침으로 반영되지만 서버 바이너리는 갱신 필요).');
+    return log('세션 채택 실패: ' + describe(d));
+  }
+  await sessionInfo();
+  log(`슬롯 ${SELECTED_SLOT}: 핸들 ${d.session} = wire session_id ${sid}${d.dup ? ' (이미 열림)' : ' 채택 완료'}`);
+}
 async function closeSession() {
-  if (CUR_SESSION === null) return;
-  const d = await api('/api/session/close', 'POST', { session: CUR_SESSION });
-  log(`세션 ${CUR_SESSION} 닫기: ${describe(d)}`);
-  CUR_SESSION = null;
-  $('#sessionText').textContent = '세션 없음';
+  if (CUR_SESSION === null) return log('닫을 세션이 없습니다');
+  const h = CUR_SESSION;
+  const d = await api('/api/session/close', 'POST', { session: h });
+  log(`세션(handle ${h}) 닫기: ${describe(d)}`);
+  removeSession(h);
   $('#sessionInfo').textContent = '';
 }
 async function sessionInfo() {
@@ -213,31 +354,48 @@ async function sessionInfo() {
   if (d.ok) $('#sessionInfo').textContent =
     `slot ${d.session.slot}, state ${d.session.state}, flags 0x${d.session.flags.toString(16)}, deviceError ${d.session.deviceError}`;
 }
+const NO_SESS = '먼저 세션을 여세요 — 세션/로그인 탭에서 "세션 열기" 또는 "ID로 세션 열기", 그리고 활성 세션을 선택하세요.';
 async function login() {
-  if (CUR_SESSION === null) return log('먼저 세션을 여세요');
-  const d = await api('/api/login', 'POST', { session: CUR_SESSION, userType: Number($('#userType').value), pin: $('#pin').value });
+  if (CUR_SESSION === null) { $('#sessionInfo').textContent = NO_SESS; return log('C_Login: ' + NO_SESS); }
+  const h = CUR_SESSION;
+  $('#sessionInfo').textContent = `C_Login 전송 중… (handle ${h}) — 실 타겟은 수십 초 걸릴 수 있습니다`;
+  log(`C_Login 전송(handle ${h})…`);
+  const d = await api('/api/login', 'POST', { session: h, userType: Number($('#userType').value), pin: $('#pin').value });
+  touchSession(h, 'C_Login', d.ok);
   log('C_Login: ' + describe(d));
-  if (d.ok) { $('#sessionText').textContent = `세션 핸들 ${CUR_SESSION} (로그인됨)`; sessionInfo(); }
+  if (d.ok) { setSessionText(); sessionInfo(); } else { $('#sessionInfo').textContent = 'C_Login 실패: ' + describe(d); }
 }
 async function logout() {
-  if (CUR_SESSION === null) return;
-  const d = await api('/api/logout', 'POST', { session: CUR_SESSION });
+  if (CUR_SESSION === null) { $('#sessionInfo').textContent = NO_SESS; return log('C_Logout: ' + NO_SESS); }
+  const h = CUR_SESSION;
+  $('#sessionInfo').textContent = `C_Logout 전송 중… (handle ${h})`;
+  const d = await api('/api/logout', 'POST', { session: h });
+  touchSession(h, 'C_Logout', d.ok);
   log('C_Logout: ' + describe(d));
-  if (d.ok) { $('#sessionText').textContent = `세션 핸들 ${CUR_SESSION}`; sessionInfo(); }
+  if (d.ok) { setSessionText(); sessionInfo(); } else { $('#sessionInfo').textContent = 'C_Logout 실패: ' + describe(d); }
 }
 async function genRandom() {
-  if (CUR_SESSION === null) return log('먼저 세션을 여세요');
-  const d = await api('/api/random', 'POST', { session: CUR_SESSION, length: Number($('#randLen').value) });
+  if (CUR_SESSION === null) { $('#cryptoOut').textContent = NO_SESS; return log('C_GenerateRandom: ' + NO_SESS); }
+  const h = CUR_SESSION;
+  $('#cryptoOut').textContent = `C_GenerateRandom 전송 중… (handle ${h})`;
+  const d = await api('/api/random', 'POST', { session: h, length: Number($('#randLen').value) });
+  touchSession(h, 'C_GenerateRandom', d.ok);
   $('#cryptoOut').textContent = d.ok ? `C_GenerateRandom(${d.length}) =\n${hexWrap(d.hex)}` : '오류: ' + describe(d);
 }
 async function doDigest() {
-  if (CUR_SESSION === null) return log('먼저 세션을 여세요');
-  const d = await api('/api/digest', 'POST', { session: CUR_SESSION, mech: Number($('#digestMech').value), input: $('#digestInput').value });
+  if (CUR_SESSION === null) { $('#cryptoOut').textContent = NO_SESS; return log('C_Digest: ' + NO_SESS); }
+  const h = CUR_SESSION;
+  $('#cryptoOut').textContent = `C_Digest 전송 중… (handle ${h})`;
+  const d = await api('/api/digest', 'POST', { session: h, mech: Number($('#digestMech').value), input: $('#digestInput').value });
+  touchSession(h, 'C_Digest', d.ok);
   $('#cryptoOut').textContent = d.ok ? `digest [${d.length}B] =\n${hexWrap(d.hex)}` : '오류: ' + describe(d);
 }
 async function gcmSelftest() {
-  if (CUR_SESSION === null) return log('먼저 세션을 여세요');
-  const d = await api('/api/gcm-selftest', 'POST', { session: CUR_SESSION });
+  if (CUR_SESSION === null) { $('#cryptoOut').textContent = NO_SESS; return log('AES-GCM: ' + NO_SESS); }
+  const h = CUR_SESSION;
+  $('#cryptoOut').textContent = `AES-GCM 자가검증 전송 중… (handle ${h})`;
+  const d = await api('/api/gcm-selftest', 'POST', { session: h });
+  touchSession(h, 'AES-GCM selftest', d.ok);
   $('#cryptoOut').textContent = (d.ok ? 'AES-GCM 자가검증 OK — ' : '실패 — ') + (d.detail || describe(d));
 }
 function hexWrap(hex) {
@@ -273,7 +431,9 @@ async function digestFileOnToken() {
   if (CUR_SESSION === null) return log('먼저 세션을 여세요(세션 탭)');
   const name = $('#verifyFile').value;
   if (!name) return log('파일을 먼저 생성/선택하세요');
-  const d = await api('/api/digest-file', 'POST', { session: CUR_SESSION, mech: Number($('#verifyMech').value), name });
+  const h = CUR_SESSION;
+  const d = await api('/api/digest-file', 'POST', { session: h, mech: Number($('#verifyMech').value), name });
+  touchSession(h, 'C_Digest(multipart)', d.ok);
   $('#compareVerdict').className = 'summary';
   $('#compareVerdict').textContent = '';
   $('#fileOut').textContent = d.ok
@@ -285,7 +445,9 @@ async function compareFile() {
   if (CUR_SESSION === null) return log('먼저 세션을 여세요(세션 탭)');
   const name = $('#verifyFile').value;
   if (!name) return log('파일을 먼저 생성/선택하세요');
-  const d = await api('/api/digest-compare', 'POST', { session: CUR_SESSION, mech: Number($('#verifyMech').value), name });
+  const h = CUR_SESSION;
+  const d = await api('/api/digest-compare', 'POST', { session: h, mech: Number($('#verifyMech').value), name });
+  touchSession(h, 'digest-compare', d.ok && d.match !== undefined);
   const v = $('#compareVerdict');
   if (!d.ok && d.match === undefined) {
     v.className = 'summary fail';
@@ -762,6 +924,7 @@ function wire() {
 
   $('#btnTokenInfo').onclick = tokenInfo;
   $('#btnOpenSession').onclick = openSession;
+  $('#btnAdoptSession').onclick = adoptSession;
   $('#btnCloseSession').onclick = closeSession;
   $('#btnLogin').onclick = login;
   $('#btnLogout').onclick = logout;
@@ -789,6 +952,27 @@ function wire() {
   $('#themeToggle').onclick = toggleTheme;
 
   initTheme();
+  // Command-defaults panel: live-sync into the per-tab inputs.
+  ['#defUserType', '#defPin', '#defSoPin', '#defSessionId', '#defRw'].forEach((sel) => {
+    const e = $(sel); if (e) e.onchange = applyDefaults;
+  });
+  $('#btnApplyDefaults').onclick = () => { applyDefaults(); log('명령 기본값을 각 탭 입력칸에 적용'); };
+  applyDefaults();
+  // Show/hide (eye) toggles for password inputs (PIN, server token).
+  document.querySelectorAll('.eye').forEach((b) => {
+    b.onclick = () => {
+      const t = document.getElementById(b.dataset.target);
+      if (!t) return;
+      const show = t.type === 'password';
+      t.type = show ? 'text' : 'password';
+      b.textContent = show ? '🙈' : '👁';
+      b.title = show ? '숨기기' : '표시/숨김';
+    };
+  });
+  renderSessionPickers();
+  renderSessionsTab();
+  $('#btnSessRefresh').onclick = renderSessionsTab;
+  $('#btnSessRefreshAll').onclick = refreshSessionStates;
   fillApiOpSelect();
   renderPalette();
   fillScenarioSelect();

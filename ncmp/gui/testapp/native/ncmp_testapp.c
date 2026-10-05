@@ -42,6 +42,10 @@ static CK_C_GetTokenInfo      p_GetTokenInfo;
 static CK_C_GetMechanismList  p_GetMechanismList;
 static CK_C_OpenSession       p_OpenSession;
 static CK_C_CloseSession      p_CloseSession;
+/* Non-standard facade helper (mode-2): open a session with a caller-supplied
+ * wire session_id, no token OPEN_SESSION. Optional (NULL if the facade lacks it). */
+static CK_RV (*p_OpenSessionWithId)(CK_SLOT_ID, CK_FLAGS, CK_ULONG,
+                                    CK_SESSION_HANDLE_PTR);
 static CK_C_Login             p_Login;
 static CK_C_Logout            p_Logout;
 static CK_C_GenerateRandom    p_GenerateRandom;
@@ -124,6 +128,8 @@ int app_load(const char *module_path)
     SYM(p_GetMechanismList, CK_C_GetMechanismList, "C_GetMechanismList");
     SYM(p_OpenSession,      CK_C_OpenSession,      "C_OpenSession");
     SYM(p_CloseSession,     CK_C_CloseSession,     "C_CloseSession");
+    /* Optional: present only in the NCMP standalone facade (mode-2). */
+    *(void **)(&p_OpenSessionWithId) = dlsym(g_lib, "NCMP_OpenSessionWithId");
     SYM(p_Login,            CK_C_Login,            "C_Login");
     SYM(p_Logout,           CK_C_Logout,           "C_Logout");
     SYM(p_GenerateRandom,   CK_C_GenerateRandom,   "C_GenerateRandom");
@@ -359,6 +365,24 @@ int app_close_session(unsigned long session)
 {
     NEED(p_CloseSession);
     return (int)p_CloseSession((CK_SESSION_HANDLE)session);
+}
+
+int app_session_adopt(unsigned long slot, unsigned long wire_sid,
+                      unsigned long *out_session)
+{
+    CK_SESSION_HANDLE h = 0;
+    CK_FLAGS flags = CKF_SERIAL_SESSION | CKF_RW_SESSION;
+    CK_RV rv;
+    if (!out_session)
+        return APP_ERR_ARGS;
+    if (!p_OpenSessionWithId) {
+        set_err("facade lacks NCMP_OpenSessionWithId (not the standalone facade?)");
+        return APP_ERR_NO_FUNC;
+    }
+    rv = p_OpenSessionWithId((CK_SLOT_ID)slot, flags, (CK_ULONG)wire_sid, &h);
+    if (rv == CKR_OK)
+        *out_session = (unsigned long)h;
+    return (int)rv;
 }
 
 int app_login(unsigned long session, int user_type, const char *pin)

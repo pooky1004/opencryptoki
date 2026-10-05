@@ -52,6 +52,12 @@ header {
 .group.grow input[type=text] { flex: 1; }
 #libInfo { width: 100%; font-family: var(--mono); font-size: 12px; }
 
+/* Command-defaults panel (collapsible, inside the token tab) */
+.defaults { margin: 10px 0; border: 1px solid var(--line); border-radius: 8px; background: var(--panel2); }
+.defaults > summary { cursor: pointer; padding: 8px 12px; font-weight: 600; user-select: none; }
+.defaults > summary:hover { color: var(--accent); }
+.defaults > .row { padding: 0 12px 12px; }
+
 main { display: flex; gap: 12px; padding: 12px 16px; align-items: stretch; }
 .slots { width: 230px; flex-shrink: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
 .slots ul { list-style: none; margin: 0; padding: 0; }
@@ -75,6 +81,7 @@ button {
 }
 button:hover { border-color: var(--accent); }
 button.primary { background: var(--accent); color: #04121f; border-color: var(--accent); font-weight: 600; }
+button.eye { padding: 4px 8px; line-height: 1; font-size: 15px; }
 button:disabled { opacity: .45; cursor: not-allowed; }
 input, select {
   background: var(--bg); color: var(--fg); border: 1px solid var(--line);

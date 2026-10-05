@@ -32,7 +32,7 @@ module = ../build-standalone/libpkcs11_ncmp_p11.so
 # ncmpd binary launched by the "데몬 시작" button.
 ncmpd = ../build-standalone/ncmpd
 # Default daemon transport: real | mock | socket.
-transport = mock
+transport = real
 # UNIX socket shared between the facade and ncmpd. Empty = auto (/tmp/..).
 sock =
 

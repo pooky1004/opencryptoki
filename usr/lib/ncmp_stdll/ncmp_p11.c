@@ -76,6 +76,7 @@ typedef struct p11_session {
     int          in_use;
     uint32_t     slot;
     uint32_t     dev_sid;   /* token-assigned session handle (OPEN_SESSION) */
+    uint8_t      adopted;   /* 1 = caller-supplied wire session id, no token open/close */
     CK_FLAGS     flags;
     /* digest */
     int          dig_active;
@@ -420,6 +421,43 @@ CK_RV C_OpenSession(CK_SLOT_ID slotID, CK_FLAGS flags, CK_VOID_PTR pApp,
     return CKR_SESSION_COUNT;
 }
 
+/*
+ * Non-standard helper for bring-up/debug: create a local session that carries a
+ * CALLER-SUPPLIED wire session_id, WITHOUT asking the token to open a session.
+ * Subsequent commands on the returned handle are sent to the token with
+ * session_id = @p wire_sid. Closing it does not send a token CLOSE. Use against
+ * firmware whose OPEN_SESSION is unavailable, or to drive a specific session id.
+ * Exported from the standalone facade (mode-2) for the Debug/Test tools.
+ */
+CK_RV NCMP_OpenSessionWithId(CK_SLOT_ID slotID, CK_FLAGS flags,
+                             CK_ULONG wire_sid, CK_SESSION_HANDLE_PTR phSession)
+{
+    if (!g_initialized)
+        return CKR_CRYPTOKI_NOT_INITIALIZED;
+    if (!phSession)
+        return CKR_ARGUMENTS_BAD;
+    if (slotID >= PKCS11_MAX_SLOT_COUNT ||
+        !NCMP_SLOT_IN_MASK(g_client.slot_mask, slotID))
+        return CKR_SLOT_ID_INVALID;
+
+    pthread_mutex_lock(&g_lock);
+    for (int i = 0; i < P11_MAX_SESSIONS; ++i) {
+        if (!g_sessions[i].in_use) {
+            memset(&g_sessions[i], 0, sizeof(g_sessions[i]));
+            g_sessions[i].in_use = 1;
+            g_sessions[i].slot = (uint32_t)slotID;
+            g_sessions[i].flags = flags;
+            g_sessions[i].dev_sid = (uint32_t)wire_sid;   /* wire session_id */
+            g_sessions[i].adopted = 1;                    /* no token open/close */
+            *phSession = (CK_SESSION_HANDLE)(i + 1);
+            pthread_mutex_unlock(&g_lock);
+            return CKR_OK;
+        }
+    }
+    pthread_mutex_unlock(&g_lock);
+    return CKR_SESSION_COUNT;
+}
+
 CK_RV C_CloseSession(CK_SESSION_HANDLE hSession)
 {
     pthread_mutex_lock(&g_lock);
@@ -433,7 +471,7 @@ CK_RV C_CloseSession(CK_SESSION_HANDLE hSession)
      * The local slot is freed regardless so the handle is never reused. In the
      * session0 fallback mode no token session was opened, so skip the token
      * CLOSE. */
-    if (!session0_fallback_enabled())
+    if (!session0_fallback_enabled() && !s->adopted)
         (void)ncmp_admin_close_session(&g_client, s->slot);
     memset(s, 0, sizeof(*s));
     g_client.active_session_id = 0;

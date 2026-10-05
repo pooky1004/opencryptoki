@@ -13,6 +13,7 @@
       <button id="themeToggle" class="themebtn" type="button" title="밝은/어두운 테마 전환">☀️ 라이트</button>
       <label>서버 토큰
         <input id="authToken" type="password" placeholder="NCMP_WEB_TOKEN (선택)" size="16">
+        <button type="button" class="eye" data-target="authToken" title="토큰 표시/숨김" aria-label="토큰 표시/숨김">👁</button>
       </label>
       <span id="daemonDot" class="dot off"></span>
       <span id="daemonText">상태 확인 중…</span>
@@ -25,8 +26,8 @@
     <div class="group">
       <strong>ncmpd</strong>
       <select id="transport">
+        <option value="real" selected>real</option>
         <option value="mock">mock</option>
-        <option value="real">real</option>
         <option value="socket">socket</option>
       </select>
       <button id="btnDaemonStart">데몬 시작</button>
@@ -36,8 +37,6 @@
       <strong>facade</strong>
       <input id="modulePath" type="text" placeholder="libpkcs11_ncmp.so 경로 (비우면 서버 기본값)">
       <button id="btnLoad">로드</button>
-      <button id="btnInit">C_Initialize</button>
-      <button id="btnFinal">C_Finalize</button>
       <button id="btnSlots">슬롯 새로고침</button>
       <button id="btnDlsym">dlsym 점검</button>
     </div>
@@ -56,6 +55,7 @@
     <section class="panel">
       <nav class="tabs">
         <button class="tab active" data-tab="token">토큰 정보</button>
+        <button class="tab" data-tab="sessions">활성 세션</button>
         <button class="tab" data-tab="session">세션 / 로그인</button>
         <button class="tab" data-tab="crypto">암복호화 / 해시</button>
         <button class="tab" data-tab="file">파일 / 검증</button>
@@ -66,6 +66,35 @@
       <div class="tabbody">
         <!-- Token -->
         <div class="tabpane active" data-pane="token">
+          <fieldset>
+            <legend>라이브러리 수명주기</legend>
+            <div class="row">
+              <button id="btnInit" class="primary">C_Initialize</button>
+              <button id="btnFinal">C_Finalize</button>
+              <span class="muted small">먼저 상단 "로드"로 facade를 올린 뒤 C_Initialize를 호출합니다. C_Initialize 시 아래 "명령 기본값"이 각 탭 입력칸에 반영됩니다.</span>
+            </div>
+          </fieldset>
+
+          <details id="cmdDefaults" class="defaults">
+            <summary title="여기서 지정한 값이 로그인·세션 명령의 기본값으로 쓰입니다(C_Initialize 시 적용). 각 탭에서 개별 수정 가능">명령 기본값 (PIN · 사용자 · 세션 ID)</summary>
+            <div class="row">
+              <label>사용자
+                <select id="defUserType">
+                  <option value="1">User</option>
+                  <option value="0">SO</option>
+                  <option value="2">ContextSpecific</option>
+                </select>
+              </label>
+              <label>User PIN <input type="password" id="defPin" value="1234" size="10"></label>
+              <button type="button" class="eye" data-target="defPin" title="표시/숨김">👁</button>
+              <label>SO PIN <input type="password" id="defSoPin" value="12345678" size="12"></label>
+              <button type="button" class="eye" data-target="defSoPin" title="표시/숨김">👁</button>
+              <label>세션 ID <input type="number" id="defSessionId" value="1" min="0" max="65535" style="width:84px"></label>
+              <label><input type="checkbox" id="defRw" checked> R/W</label>
+              <button id="btnApplyDefaults" type="button" title="지금 각 탭 입력칸에 반영">적용</button>
+            </div>
+          </details>
+
           <button id="btnTokenInfo">토큰 정보 조회 (C_GetTokenInfo + MechanismList)</button>
           <pre id="tokenInfo" class="out"></pre>
           <h3>지원 메커니즘</h3>
@@ -73,12 +102,43 @@
         </div>
 
         <!-- Session -->
+        <div class="tabpane" data-pane="sessions">
+          <div class="row">
+            <button id="btnSessRefresh">새로고침</button>
+            <button id="btnSessRefreshAll">토큰 상태 조회(C_GetSessionInfo 전체)</button>
+            <span id="sessSummary" class="muted small"></span>
+          </div>
+          <table id="sessTable" class="results">
+            <thead><tr>
+              <th>현재</th><th>handle</th><th>종류</th><th>wire sid</th><th>slot</th>
+              <th>열린 시각</th><th>경과</th><th>명령수</th>
+              <th>마지막 명령</th><th>결과</th><th>마지막 시각</th>
+              <th>토큰 state</th><th>동작</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+          <p class="muted small">
+            세션을 열거나(세션/로그인 탭) 명령을 보낼 때마다 이 표가 갱신됩니다.
+            "종류"=open(C_OpenSession)/adopt(세션 ID 지정). "토큰 state"는
+            C_GetSessionInfo 결과(2=R/W user 등)이며 "토큰 상태 조회"로 채웁니다.
+          </p>
+        </div>
+
         <div class="tabpane" data-pane="session">
           <div class="row">
             <label><input type="checkbox" id="rwSession" checked> R/W 세션</label>
-            <button id="btnOpenSession">세션 열기</button>
+            <button id="btnOpenSession">세션 열기 (C_OpenSession)</button>
             <button id="btnCloseSession">세션 닫기</button>
             <span id="sessionText" class="pill">세션 없음</span>
+          </div>
+          <div class="row">
+            <label>세션 ID <input type="number" id="sessionId" value="1" min="0" max="65535" style="width:110px"></label>
+            <button id="btnAdoptSession">ID로 세션 열기</button>
+            <span class="muted small">토큰 OPEN_SESSION 없이 입력한 세션 ID(0~65535, 0=시스템)를 와이어 헤더에 사용. 여러 개 열 수 있습니다.</span>
+          </div>
+          <div class="row">
+            <label><b>활성 세션</b> <select id="activeSession" class="sessionPicker"></select></label>
+            <span class="muted small">모든 명령(로그인·난수·해시·GCM·파일 검증)은 선택된 세션 ID로 전송됩니다.</span>
           </div>
           <fieldset>
             <legend>로그인 / 로그아웃</legend>
@@ -91,6 +151,7 @@
                 </select>
               </label>
               <label>PIN <input type="password" id="pin" value="1234" size="12"></label>
+              <button type="button" class="eye" data-target="pin" title="PIN 표시/숨김" aria-label="PIN 표시/숨김">👁</button>
               <button id="btnLogin">C_Login</button>
               <button id="btnLogout">C_Logout</button>
             </div>
@@ -101,6 +162,10 @@
 
         <!-- Crypto -->
         <div class="tabpane" data-pane="crypto">
+          <div class="row">
+            <label><b>활성 세션</b> <select class="sessionPicker"></select></label>
+            <span class="muted small">세션 탭에서 연 세션 중 선택. 명령은 이 세션으로 전송됩니다.</span>
+          </div>
           <div class="row">
             <label>난수 길이 <input type="number" id="randLen" value="16" min="1" max="1024"></label>
             <button id="btnRandom">C_GenerateRandom</button>
@@ -146,6 +211,9 @@
 
           <fieldset>
             <legend>실 타겟 ↔ SW 결과 비교 (토큰이 정확히 동작하는지 확인)</legend>
+            <div class="row">
+              <label><b>활성 세션</b> <select class="sessionPicker"></select></label>
+            </div>
             <div class="row">
               <label>파일
                 <select id="verifyFile"></select>

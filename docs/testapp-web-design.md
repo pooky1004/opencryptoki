@@ -84,6 +84,7 @@ IPC(UNIX socket) + SHM  ──▶ ncmpd ──comm thread──▶ 실 FX3(USB) 
 | `POST /api/random` | `{session,length}` | C_GenerateRandom | `hex,length` |
 | `POST /api/digest` | `{session,mech,input}` | C_DigestInit+Digest | `hex,length` |
 | `POST /api/gcm-selftest` | `{session}` | GenerateKey+Encrypt/Decrypt 왕복 | `detail` |
+| `POST /api/ci` | `{slot,command,session,p0..p7}` | **원시 CI 1건 송수신**(facade 미경유, 서버 전용 `ncmp_client`로 데몬 직결; g_api_lock 밖·독립 락) | `ok,rc,elapsedMs,request{hex,parsed…},response{…}` |
 | `POST /api/genfile` | `{size,name?,seed?}` | 테스트 파일 생성(PRNG 패턴) | `name,size,sha256`(SW 참조) |
 | `GET /api/files` | — | 생성된 파일 목록 | `files[],dir` |
 | `POST /api/digest-file` | `{session,mech,name}` | 파일 **multipart**(init/update/final) 해시 | `hex,length,bytes` |
@@ -122,7 +123,13 @@ SHA3-224/256/384/512.
      ↔ SW(OpenSSL) 비교**로 토큰이 정확히 동작하는지 MATCH/MISMATCH 판정.
   5. **PKCS#11 API 시험** — **단위 API 항목**을 골라 파라미터를 채워 1건 실행
      (요청/응답 JSON 표시). 각 항목이 시나리오의 단위 스텝이 된다.
-  6. **시나리오** — 단위 스텝을 조합해 시나리오를 만들고 실행(스텝별 PASS/FAIL).
+  6. **CI 송수신** — CI(Command Interface) 단위로 실 타겟에 프레임을 직접 보내고
+     받는다. CI opcode 선택 + CI별 입력 파라미터(p0~p7, Hex) + session_id, 전송 시
+     **디버깅 창**에 송신(TX)/수신(RX)을 각각 **raw(Hex)** 와 **parsed**(frame_len·
+     session_id·sequence_id·command_id(+CI 이름)·ack(+CKR 이름)·payload_len·
+     param[i])로 동시 출력. (Debug App에서 이관 — facade를 거치지 않고 서버의 별도
+     `ncmp_client`로 데몬에 직접 전송.)
+  7. **시나리오** — 단위 스텝을 조합해 시나리오를 만들고 실행(스텝별 PASS/FAIL).
 - **하단**: 로그.
 
 ### 단위 항목 ↔ 시나리오 엔진 (요구사항 매핑)

@@ -4,6 +4,11 @@ ncmpd의 **공유 메모리(SHM)를 슬롯별로 열람**하는 웹 기반 Debug
 facade를 거치지 않고 **ncmpd의 connection thread와 직접 핸드셰이크**한 뒤 SHM을
 읽는다. 외부 호스트에서 브라우저로 접속해 사용한다.
 
+> **USB 권한 불필요.** Debug App은 USB(FX3)를 직접 열지 않는다(libusb 미링크).
+> ncmpd가 USB를 소유하며, Debug App은 소켓 핸드셰이크 + SHM **읽기**만 한다.
+> 토큰에 명령을 보내는 CI 송수신 기능은 **Web Test App**으로 이관되었다 — 이
+> 앱은 순수 **읽기 전용 SHM 뷰어**다.
+
 관련: [`debugapp-manual.md`](debugapp-manual.md)(사용법),
 [`debugapp-deployment.md`](debugapp-deployment.md)(설정/배포),
 [`ncmpd-vs-pkcsslotd.md`](ncmpd-vs-pkcsslotd.md),
@@ -52,23 +57,11 @@ ncmpd (conn_thread + SHM 소유)  ──comm thread──▶ 실 FX3(USB)/mock/s
 | `GET /api/slots` | — | 실재(ABSENT 아님) 슬롯 요약 | `slots[],slotCount,shown` |
 | `POST /api/slot` | `{slot}` | 슬롯 1개 전체 SHM 덤프 | `state,boundCkSlot,curSessions,maxInflight,stats,token,bufPool,queue,busy[]` |
 | `POST /api/reconnect` | — | SHM detach 후 재attach | `connected` |
-| `POST /api/ci` | `{slot,command,session,p0..p7}` | **CI 1건을 실 타겟에 송신하고 수신** | `ok,rc,elapsedMs,request{...},response{...}` |
 
-### CI 송수신 (`/api/ci`)
-
-`Debug App GUI ⇄ ncmpd(conn thread) → comm thread → 실 target`. conn thread
-핸드셰이크로 얻은 command path(`ncmp_client`)로 지정한 **CI opcode**와 파라미터
-(hex)를 실 토큰에 보내고 응답을 받는다.
-
-- 요청 조립: `NCMP_Message`(header.command_id=opcode, session_id, param_len[],
-  payload=hex 디코드) → `ncmp_client_exec`로 슬롯 링에 enqueue → comm thread가
-  USB로 전송 → 응답을 `ncmp_wire_decode`로 복원.
-- **송신/수신 프레임을 각각 Hex와 파싱 형식으로 동시 반환**한다:
-  `ncmp_wire_encode`로 raw 바이트(hex), 그리고 헤더(session_id·sequence_id·
-  command_id·ack·payload_len)와 param_len/param hex를 파싱 필드로. 응답의 `ack`은
-  `CKR_*`로 프런트에서 이름 매핑.
-- 긴 교환(무응답 CI는 comm thread USB 타임아웃까지 대기)은 SHM-읽기 엔드포인트를
-  막지 않도록 g_lock을 짧게만 잡고 exec는 잠금 밖에서 수행한다.
+> Debug App은 **읽기 전용 SHM 인스펙터**다. 토큰에 명령을 보내는 경로는 없다
+> (이전의 `POST /api/ci` CI 송수신 기능은 제거됨 — 실 타겟 명령 송신은 Web Test
+> App을 사용). conn thread 핸드셰이크(`ncmp_client_init`)로 SHM을 **read-only**로
+> attach해 슬롯 메타데이터만 조회한다.
 
 ### 슬롯 덤프에 포함되는 SHM 필드(`NCMP_Slot`)
 
@@ -88,18 +81,18 @@ ncmpd (conn_thread + SHM 소유)  ──comm thread──▶ 실 FX3(USB)/mock/s
 
 ## 3. 웹 UI (`web/`)
 
-바닐라 HTML/CSS/JS. 라이트/다크 테마(토글, localStorage 저장). **탭 2개**:
-**공유메모리 뷰어**와 **CI 송수신**. 구성:
-- 헤더: 테마 토글, 서버 토큰, 자동 새로고침(2초) 토글, 재연결, 연결 램프.
+바닐라 HTML/CSS/JS. 라이트/다크 테마(토글, localStorage 저장). **단일 화면**:
+**공유메모리 뷰어**(슬롯 상태 전용). 구성:
+- 헤더: 테마 토글, 서버 토큰, **자동 새로고침 토글 + 주기(초, 기본 1초)**, 재연결,
+  연결 램프.
 - 상태 바: SHM 이름·magic·version·slotCount·totalSize·slotMask·sock.
 - 좌측: 실재 슬롯 목록(상태 뱃지·토큰 라벨·in-flight·누적 전송). 클릭 선택.
-- (공유메모리 뷰어) 좌: 실재 슬롯 목록 / 우: 선택 슬롯 상세(상태·통계·토큰 신원
-  카드, 명령 링 히스토그램 + 비-FREE 엔트리 표).
-- (CI 송수신) 상단 바: 슬롯·CI 선택(opcode+이름)·session_id·전송·창 지우기, CI별
-  파라미터 힌트. 파라미터: p0~p7 hex 입력. **디버깅 창**: 교환마다 TX/RX를 각각
-  **Hex(바이트 정렬) + 파싱 표**(frame_len·session_id·sequence_id·command_id(+CI
-  이름)·ack(+CKR 이름)·payload_len·param[i])로 동시 출력, 최신이 위로 누적.
+- 우측: 선택 슬롯 상세(상태·통계·토큰 신원 카드, 명령 링 히스토그램 + 비-FREE
+  엔트리 표).
 - 하단: 로그.
+- **주기적 자동 갱신**: 기본 1초마다 `/api/status`+`/api/slots`+`/api/slot`을 다시
+  읽어 화면을 갱신한다(이전 갱신이 진행 중이면 건너뛰어 중첩 방지). 주기는 헤더의
+  "주기(초)"로 조절(1~60), 토글로 끄면 수동.
 
 ## 4. 빌드 & 검증
 
@@ -115,12 +108,9 @@ cd ncmp && cmake -S . -B build -DENABLE_MOCK_TOKEN=ON && cmake --build build -j
   표시.
 - 실 FX3(`--transport real`): 슬롯 0 ONLINE·`slotMask 0x1`·링 FREE 32 표시 —
   SHM 상태를 있는 그대로 반영함을 확인.
-- **CI 송수신(mock)**: VD_PING·GETMECHLIST·RNG(p0=16B) 등에서 TX/RX 프레임이
-  Hex + 파싱으로 정확히 표시(예 RNG RX param0=16바이트).
-- **CI 송수신(실 FX3)**: VD_PING은 **0.7ms에 실제 응답 수신**(ack=0xB3
-  CKR_SESSION_HANDLE_INVALID — session 0이라 거부하나 펌웨어가 프레임 반환),
-  VD_FW_INFO/VD_TOKEN_INFO는 ~42s 타임아웃(RX 없음). 실 타겟 송수신·hex/파싱
-  표시가 정상 동작함을 확인. 상세는 [`debugapp-manual.md`](debugapp-manual.md).
+- 자동 새로고침(기본 1초): status/slots/slot가 주기적으로 갱신되고, CI 송수신
+  엔드포인트(`/api/ci`)는 제거되어 `{"error":"no such api"}`를 반환함을 확인.
+  상세는 [`debugapp-manual.md`](debugapp-manual.md).
 
 ## 5. 남은 과제
 - 명령 링 엔트리의 요청/응답 바이트 덤프(현재는 길이·세션·seq만). 필요 시

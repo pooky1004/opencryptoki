@@ -28,9 +28,9 @@ C. (이전의 C#/Avalonia 안은 요청에 따라 폐기)
    브라우저 ─HTTP/JSON─ ncmp_web(C) ─app_*─ dlopen C_* ─ libpkcs11_ncmp.so
         ─ ncmp_client ─ IPC+SHM ─ ncmpd ─ comm thread ─▶ 실 FX3(USB)/mock
 
-② Debug App (공유메모리 열람 + CI 송수신 — conn thread 직결, facade 미경유)
+② Debug App (공유메모리 열람 전용 — conn thread 직결, facade 미경유)
    브라우저 ─HTTP/JSON─ ncmp_dbg(C) ─ncmp_ipc 핸드셰이크─ ncmpd conn thread
-        ─ SHM 직접 attach(읽기) / ncmp_client로 CI 전송 ─▶ 실 FX3(USB)/mock
+        ─ SHM 직접 attach(읽기 전용, 주기 1초 자동 갱신) ─▶ 실 FX3(USB)/mock
 ```
 
 위치: `ncmp/gui/testapp/`(Test App), `ncmp/gui/debugapp/`(Debug App).
@@ -44,14 +44,17 @@ C. (이전의 C#/Avalonia 안은 요청에 따라 폐기)
 - **C 웹서버**(`webserver/ncmp_web.c`): 의존성 없는 HTTP/JSON 서버(native 포함
   단일 바이너리). REST ~26종. ncmpd 실행/정지, CORS, **Bearer 토큰 인증**,
   **설정 파일** 로더, 깨끗한 SIGTERM 종료. OpenSSL(SW 해시) 링크.
-- **웹 UI**(`web/`): 좌=활성 슬롯, 우=탭 6종 — 토큰 정보 / 세션·로그인 /
-  암복호화·해시 / **파일·검증** / **PKCS#11 API 시험** / **시나리오**.
+- **웹 UI**(`web/`): 좌=활성 슬롯, 우=탭 7종 — 토큰 정보 / 세션·로그인 /
+  암복호화·해시 / **파일·검증** / **PKCS#11 API 시험** / **CI 송수신** / **시나리오**.
   **라이트/다크 테마** 토글.
 - **기능 요점**
   - 토큰/슬롯/세션/로그인, 난수·SHA-256/512·SHA3·AES-GCM 자가검증.
   - **파일/검증**: 크기 입력→테스트 파일 생성(init/update/final 시험용 ≥64KB),
     토큰 multipart 해시, **실 타겟 ↔ SW(OpenSSL) 비교(MATCH/MISMATCH)**.
   - **PKCS#11 API 시험**: 단위 API 1건 실행(요청/응답 JSON).
+  - **CI 송수신**: CI(opcode)별 입력 파라미터(p0~p7 Hex)+session_id로 실 타겟에
+    원시 프레임 직접 전송, 디버깅 창에 **송신(TX)/수신(RX)을 raw(Hex)+parsed 동시
+    출력**. 서버의 전용 `ncmp_client`로 데몬 직결(facade 미경유). (Debug App에서 이관.)
   - **시나리오**: 단위 항목 팔레트를 **순서대로 클릭**해 구성(스텝 파라미터·저장
     변수 `${s}`·`성공/실패/일치/불일치` 단정 인라인 편집), 실행 시 스텝별
     PASS/FAIL, **서버 영구 저장**(`scendir` JSON) + 내보내기/가져오기.
@@ -64,15 +67,13 @@ C. (이전의 C#/Avalonia 안은 요청에 따라 폐기)
 
 - **C 서버**(`server/ncmp_dbg.c`): `ncmp_stdll_client` 링크. ncmpd **conn thread와
   핸드셰이크**(ncmp_ipc) 후 **SHM을 읽기 전용 attach**. REST:
-  `status/slots/slot/reconnect` + **`ci`**. **ncmpd 수정 불필요**.
-- **웹 UI**(`web/`): 탭 2종.
-  - **공유메모리 뷰어**: 실재 슬롯 목록 + 슬롯별 상세(state·bound_ck_slot·
-    세션수·max_inflight·통계 in_flight/max/total_sent·토큰 신원·bufPool·
-    **명령 링(MPSC) 상태 히스토그램 + 비-FREE 엔트리**). 2초 자동 새로고침.
-  - **CI 송수신**: CI(opcode+이름) 선택·session_id·파라미터(p0~p7 Hex) 입력→전송.
-    **디버깅 창에 송신(TX)/수신(RX)을 각각 Hex + 파싱 표로 동시 출력**
-    (frame_len·session_id·sequence_id·command_id(+CI 이름)·ack(+CKR 이름)·
-    payload_len·param[i]).
+  `status/slots/slot/reconnect`. **ncmpd 수정 불필요**. (CI 송수신 `/api/ci`는
+  제거됨 — 순수 읽기 전용 인스펙터.)
+- **웹 UI**(`web/`): 단일 **공유메모리 뷰어**(슬롯 상태 전용).
+  - 실재 슬롯 목록 + 슬롯별 상세(state·bound_ck_slot·세션수·max_inflight·
+    통계 in_flight/max/total_sent·토큰 신원·bufPool·**명령 링(MPSC) 상태
+    히스토그램 + 비-FREE 엔트리**).
+  - **주기적 자동 갱신 기본 1초**(헤더에서 주기 조절 1~60초·끄기).
   - 라이트/다크 테마, 설정 파일, Bearer 토큰.
 
 ---
@@ -113,9 +114,8 @@ C. (이전의 C#/Avalonia 안은 요청에 따라 폐기)
     폴백으로 통과하나 **크립토는 session 0을 `CKR_SESSION_HANDLE_INVALID`로 거부**.
   - 결론: 펌웨어가 **유효한 OPEN_SESSION 핸들을 요구**하며, OPEN_SESSION 자체는
     현재 보드에서 타임아웃 → 세션 크립토 완결 불가. provisioned 펌웨어 필요.
-- **Debug App(실 FX3)**: SHM 뷰어 — 슬롯0 ONLINE·slotMask 0x1·링 FREE 32 표시.
-  CI 송수신 — VD_PING은 **0.7ms에 실제 응답**(ack=0xB3, session 0 거부지만 프레임
-  반환) Hex+파싱 확인, FW_INFO/TOKEN_INFO는 타임아웃(RX 없음).
+- **Debug App(실 FX3)**: SHM 뷰어 — 슬롯0 ONLINE·slotMask 0x1·링 FREE 32 표시,
+  기본 1초 자동 갱신 동작. (읽기 전용 인스펙터로 정리 — CI 송수신 기능 제거.)
 
 > 실 보드는 시험 중 부트로더 → `MPF300TS Development`/`UNPROVISIONED`(펌웨어 적재)
 > 상태로 관측됨. 세션/크립토의 완전한 검증은 provisioned 펌웨어에서 재시험 필요.

@@ -355,7 +355,10 @@ static int daemon_start(const char *transport)
         return 0;
     }
     pthread_mutex_lock(&g_daemon_lock);
-    if (transport && *transport)
+    /* Guard the self-overlap: callers may pass g_transport itself (when the
+     * request carried no transport), and snprintf() with overlapping src/dst
+     * is undefined behaviour (observed to yield ""). Only copy a distinct src. */
+    if (transport && *transport && transport != g_transport)
         snprintf(g_transport, sizeof(g_transport), "%s", transport);
     unlink(g_sock_path);
 

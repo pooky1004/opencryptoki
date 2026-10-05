@@ -13,8 +13,9 @@ if(ENABLE_DEBUGAPP)
     target_include_directories(ncmp_dbg PRIVATE ${CMAKE_SOURCE_DIR}/include)
     target_compile_definitions(ncmp_dbg PRIVATE _GNU_SOURCE)
     set_target_properties(ncmp_dbg PROPERTIES C_STANDARD 11)
-    # ncmp_stdll_client provides the command path (ncmp_client_*, enqueue ring)
-    # used by the CI send/receive tab; it links ncmp_common (IPC + SHM) too.
+    # ncmp_stdll_client provides ncmp_client_init(): the conn-thread HELLO
+    # handshake plus the read-only SHM attach the inspector reads. It links
+    # ncmp_common (IPC + SHM) too.
     target_link_libraries(ncmp_dbg PRIVATE ncmp_stdll_client Threads::Threads)
 
     message(STATUS "Token NCMP: building Debug App server (ncmp_dbg, SHM inspector)")

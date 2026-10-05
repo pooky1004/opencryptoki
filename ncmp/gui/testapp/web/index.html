@@ -60,6 +60,7 @@
         <button class="tab" data-tab="crypto">암복호화 / 해시</button>
         <button class="tab" data-tab="file">파일 / 검증</button>
         <button class="tab" data-tab="api">PKCS#11 API 시험</button>
+        <button class="tab" data-tab="ci">CI 송수신</button>
         <button class="tab" data-tab="scenario">시나리오</button>
       </nav>
 
@@ -256,6 +257,25 @@
           <div id="apiParams" class="params"></div>
           <h3>응답</h3>
           <pre id="apiOut" class="out"></pre>
+        </div>
+
+        <!-- Raw CI send/receive -->
+        <div class="tabpane" data-pane="ci">
+          <p class="muted">CI(Command Interface) 단위로 실 타겟에 프레임을 직접 보내고 받습니다. 송신/수신 메시지를 <b>raw(Hex)</b>와 <b>parsed</b> 형태로 디버깅 창에 동시 출력합니다.</p>
+          <div class="row cibar">
+            <label>슬롯 <input type="number" id="ciSlot" value="0" min="0" style="width:70px"></label>
+            <label>CI <select id="ciCmd"></select></label>
+            <label>session_id <input type="number" id="ciSession" value="0" min="0" style="width:100px"></label>
+            <button id="ciSend" class="primary">▶ 전송</button>
+            <button id="ciClear">디버깅 창 지우기</button>
+            <span id="ciHint" class="muted small"></span>
+          </div>
+          <div class="ciparams">
+            <div class="muted small">CI별 입력 파라미터(Hex, 공백 허용, 비우면 생략). 예: <code>10000000</code> = little-endian u32 값 16</div>
+            <div id="ciParamRows"></div>
+          </div>
+          <h3>디버깅 창 — 송신(TX)/수신(RX)을 raw(Hex) + parsed 동시 출력</h3>
+          <div id="ciDebug" class="cidebug"></div>
         </div>
 
         <!-- Scenarios -->

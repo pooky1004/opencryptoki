@@ -25,6 +25,13 @@
 #endif
 #include "ncmp_testapp.h"
 
+/* Raw CI (Command Interface) send path: a second ncmp_client straight to the
+ * daemon, independent of the dlopen'd facade, used by the "CI 송수신" tab. */
+#include "ncmp/ncmp_client.h"
+#include "ncmp/ncmp_wire.h"
+#include "ncmp/ncmp_errno.h"
+#include "ncmp/ncmp_limits.h"
+
 #include <openssl/evp.h>
 
 #include <arpa/inet.h>
@@ -71,6 +78,16 @@ static pthread_mutex_t g_api_lock = PTHREAD_MUTEX_INITIALIZER;
 /* ncmpd child lifecycle. */
 static pid_t g_ncmpd_pid = 0;
 static pthread_mutex_t g_daemon_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Raw-CI client: a dedicated ncmp_client to the same daemon socket, separate
+ * from the facade's. Lazily connected; its own lock serialises CI exchanges
+ * (which can take up to the daemon's ~5 s no-response timeout) without blocking
+ * the facade/status routes. */
+static ncmp_client_t g_ci_cli;
+static int g_ci_ok = 0;
+static pthread_mutex_t g_ci_lock = PTHREAD_MUTEX_INITIALIZER;
+/* Generous backstop; the daemon reaps a non-responding command at ~5 s. */
+#define WEB_CI_SPIN_BUDGET 200000000ull
 
 static volatile sig_atomic_t g_running = 1;
 static void on_signal(int sig) { (void)sig; g_running = 0; }
@@ -551,6 +568,165 @@ static int scenario_delete(const char *name)
 }
 
 /* ------------------------------------------------------------------ */
+/* Raw CI (Command Interface) send/receive                            */
+/* ------------------------------------------------------------------ */
+
+#define CI_BUF (256 * 1024)   /* room for req+rsp hex + parsed fields */
+
+/* Ensure the dedicated raw-CI client is connected to the daemon socket.
+ * Caller holds g_ci_lock. Returns 1 if connected. */
+static int ci_ensure(void)
+{
+    if (g_ci_ok)
+        return 1;
+    if (ncmp_client_init(&g_ci_cli, g_sock_path[0] ? g_sock_path : NULL) == NCMP_OK)
+        g_ci_ok = 1;
+    return g_ci_ok;
+}
+
+/* Decode a hex string (spaces/colons ignored) into bytes. Returns length or -1. */
+static int ci_hex2bytes(const char *s, uint8_t *out, int cap)
+{
+    int n = 0, hi = -1;
+    for (; *s; s++) {
+        int v;
+        if (*s == ' ' || *s == ':' || *s == '\t' || *s == '\n' || *s == '\r') continue;
+        if (*s >= '0' && *s <= '9') v = *s - '0';
+        else if (*s >= 'a' && *s <= 'f') v = *s - 'a' + 10;
+        else if (*s >= 'A' && *s <= 'F') v = *s - 'A' + 10;
+        else return -1;
+        if (hi < 0) hi = v;
+        else { if (n >= cap) return -1; out[n++] = (uint8_t)((hi << 4) | v); hi = -1; }
+    }
+    return hi < 0 ? n : -1;   /* odd number of nibbles => error */
+}
+
+/* Emit a frame object: raw hex + parsed header/params. Returns new offset. */
+static int ci_emit_frame(char *buf, int cap, int o, const char *key,
+                         const uint8_t *raw, size_t rawlen, const NCMP_Message *m)
+{
+    o += snprintf(buf + o, cap - o, "\"%s\":{\"hex\":\"", key);
+    for (size_t i = 0; i < rawlen && o < cap - 4; i++)
+        o += snprintf(buf + o, cap - o, "%02x", raw[i]);
+    /* payload_len = param-length array (32B) + sum of parameter bytes. */
+    uint32_t paylen = 4u * NCMP_MAX_PARAM_COUNT;
+    for (int i = 0; i < NCMP_MAX_PARAM_COUNT; i++) paylen += m->param_len[i];
+    o += snprintf(buf + o, cap - o,
+        "\",\"frameLen\":%zu,\"sessionId\":%u,\"sequenceId\":%u,\"commandId\":%u,"
+        "\"ack\":%u,\"payloadLen\":%u,\"params\":[",
+        rawlen >= 4 ? rawlen - 4 : 0, m->header.session_id, m->header.sequence_id,
+        m->header.command_id, m->header.ack, paylen);
+    size_t off = 0;
+    int first = 1;
+    for (int i = 0; i < NCMP_MAX_PARAM_COUNT; i++) {
+        uint32_t pl = m->param_len[i];
+        if (pl == 0) continue;
+        if (o < cap - 80) {
+            o += snprintf(buf + o, cap - o, "%s{\"idx\":%d,\"len\":%u,\"hex\":\"",
+                          first ? "" : ",", i, pl);
+            for (uint32_t k = 0; k < pl && off + k < m->payload_cap && o < cap - 4; k++)
+                o += snprintf(buf + o, cap - o, "%02x", m->payload[off + k]);
+            o += snprintf(buf + o, cap - o, "\"}");
+            first = 0;
+        }
+        off += pl;
+    }
+    o += snprintf(buf + o, cap - o, "]}");
+    return o;
+}
+
+/* POST /api/ci : send one raw CI to the token and return request + response as
+ * raw hex AND parsed fields. Uses the dedicated g_ci_cli (own lock), so it does
+ * NOT take g_api_lock and never blocks status/SHM polling. */
+static void handle_ci(int fd, const char *body)
+{
+    long slot = 0, command = 0, session = 0;
+    json_long(body, "slot", &slot);
+    json_long(body, "command", &command);
+    json_long(body, "session", &session);
+
+    uint8_t *payload = malloc(NCMP_MAX_PAYLOAD_SIZE);
+    uint8_t *rpayload = malloc(NCMP_MAX_PAYLOAD_SIZE);
+    uint8_t *reqframe = malloc(NCMP_MAX_FRAME_SIZE);
+    uint8_t *rspframe = malloc(NCMP_MAX_FRAME_SIZE);
+    char *out = malloc(CI_BUF);
+    if (!payload || !rpayload || !reqframe || !rspframe || !out) {
+        free(payload); free(rpayload); free(reqframe); free(rspframe); free(out);
+        send_json(fd, 500, "{\"ok\":false,\"error\":\"oom\"}");
+        return;
+    }
+
+    uint32_t plen[NCMP_MAX_PARAM_COUNT] = {0};
+    size_t poff = 0;
+    int bad = 0;
+    for (int i = 0; i < NCMP_MAX_PARAM_COUNT; i++) {
+        char key[4]; snprintf(key, sizeof(key), "p%d", i);
+        char hv[8192];
+        if (json_str(body, key, hv, sizeof(hv)) && hv[0]) {
+            int n = ci_hex2bytes(hv, payload + poff, (int)(NCMP_MAX_PAYLOAD_SIZE - poff));
+            if (n < 0) { bad = 1; break; }
+            plen[i] = (uint32_t)n; poff += (size_t)n;
+        }
+    }
+    if (bad) {
+        free(payload); free(rpayload); free(reqframe); free(rspframe); free(out);
+        send_json(fd, 200, "{\"ok\":false,\"error\":\"bad hex parameter\"}");
+        return;
+    }
+
+    pthread_mutex_lock(&g_ci_lock);
+    if (!ci_ensure()) {
+        pthread_mutex_unlock(&g_ci_lock);
+        free(payload); free(rpayload); free(reqframe); free(rspframe); free(out);
+        send_json(fd, 200, "{\"ok\":false,\"error\":\"ncmpd not connected (데몬 시작 후 재시도)\"}");
+        return;
+    }
+    uint32_t mask = g_ci_cli.slot_mask;
+    if (slot < 0 || !NCMP_SLOT_IN_MASK(mask, (uint32_t)slot)) {
+        pthread_mutex_unlock(&g_ci_lock);
+        free(payload); free(rpayload); free(reqframe); free(rspframe); free(out);
+        send_json(fd, 200, "{\"ok\":false,\"error\":\"slot not online\"}");
+        return;
+    }
+
+    NCMP_Message req; memset(&req, 0, sizeof(req));
+    req.header.session_id = (uint32_t)session;
+    req.header.command_id = (uint32_t)command;
+    req.header.sequence_id = __atomic_add_fetch(&g_ci_cli.seq, 1, __ATOMIC_RELAXED);
+    for (int i = 0; i < NCMP_MAX_PARAM_COUNT; i++) req.param_len[i] = plen[i];
+    req.payload = payload; req.payload_cap = poff;
+
+    size_t reqlen = 0;
+    ncmp_wire_encode(&req, reqframe, NCMP_MAX_FRAME_SIZE, &reqlen);
+
+    NCMP_Message rsp; memset(&rsp, 0, sizeof(rsp));
+    rsp.payload = rpayload; rsp.payload_cap = NCMP_MAX_PAYLOAD_SIZE;
+
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    int rc = ncmp_client_exec(&g_ci_cli, (uint32_t)slot, &req, &rsp, WEB_CI_SPIN_BUDGET);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    pthread_mutex_unlock(&g_ci_lock);
+    double ms = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+
+    int o = snprintf(out, CI_BUF, "{\"ok\":%s,\"rc\":%d,\"elapsedMs\":%.1f,",
+                     rc == NCMP_OK ? "true" : "false", rc, ms);
+    o = ci_emit_frame(out, CI_BUF, o, "request", reqframe, reqlen, &req);
+    o += snprintf(out + o, CI_BUF - o, ",");
+    if (rc == NCMP_OK) {
+        size_t rsplen = 0;
+        ncmp_wire_encode(&rsp, rspframe, NCMP_MAX_FRAME_SIZE, &rsplen);
+        o = ci_emit_frame(out, CI_BUF, o, "response", rspframe, rsplen, &rsp);
+    } else {
+        o += snprintf(out + o, CI_BUF - o, "\"response\":null");
+    }
+    snprintf(out + o, CI_BUF - o, "}");
+    send_json(fd, 200, out);
+
+    free(payload); free(rpayload); free(reqframe); free(rspframe); free(out);
+}
+
+/* ------------------------------------------------------------------ */
 /* API routes (all under the API lock)                               */
 /* ------------------------------------------------------------------ */
 
@@ -720,6 +896,12 @@ static int route_api(int fd, const char *method, const char *path, const char *b
         if (!safe_name(name)) { send_result(fd, -4, "\"detail\":\"bad name\""); return 0; }
         scenario_delete(name);
         send_result(fd, 0, "");
+        return 0;
+    }
+
+    /* ---- raw CI send/receive (own client + lock, not g_api_lock) ---- */
+    if (!strcmp(path, "/api/ci") && !strcmp(method, "POST")) {
+        handle_ci(fd, body);
         return 0;
     }
 

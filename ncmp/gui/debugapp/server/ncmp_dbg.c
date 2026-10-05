@@ -27,9 +27,7 @@
 #include "ncmp/ncmp_shm.h"
 #include "ncmp/ncmp_queue.h"
 #include "ncmp/ncmp_limits.h"
-#include "ncmp/ncmp_cmd.h"
 #include "ncmp/ncmp_errno.h"
-#include "ncmp/ncmp_wire.h"
 #include "ncmp/ncmp_client.h"
 
 #include <arpa/inet.h>
@@ -57,15 +55,12 @@ static char g_sock_path[1024] = "";   /* NCMP_SOCK_PATH for the handshake */
 static char g_token[256] = "";        /* bearer token; empty = auth off */
 static char g_config[1024] = "";
 
-static ncmp_client_t g_cli;            /* handshake + SHM attach + command path */
+static ncmp_client_t g_cli;            /* conn-thread handshake + SHM attach */
 static int g_cli_ok = 0;
 static void *g_shm = NULL;             /* = g_cli.shm_base (read-only SHM view) */
 static uint32_t g_slot_mask = 0;       /* online mask from the handshake */
 static int g_connected = 0;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
-
-/* Spin budget for a CI exchange (covers the comm_thread USB timeout). */
-#define DBG_SPIN_BUDGET 200000000ull
 
 static volatile sig_atomic_t g_running = 1;
 static void on_signal(int s) { (void)s; g_running = 0; }
@@ -271,188 +266,6 @@ static int emit_slot_summary(char *buf, int cap, int o, NCMP_Slot *s)
 
 #define BUF (64 * 1024)
 
-/* Flat JSON string value extractor: body must contain "key":"value". */
-static int json_str(const char *body, const char *key, char *out, size_t cap)
-{
-    char pat[64];
-    snprintf(pat, sizeof(pat), "\"%s\"", key);
-    const char *p = body ? strstr(body, pat) : NULL;
-    if (!p) return 0;
-    p = strchr(p + strlen(pat), ':');
-    if (!p) return 0;
-    p++;
-    while (*p == ' ' || *p == '\t') p++;
-    if (*p != '"') return 0;
-    p++;
-    size_t o = 0;
-    while (*p && *p != '"' && o + 1 < cap) {
-        if (*p == '\\' && p[1]) p++;
-        out[o++] = *p++;
-    }
-    out[o] = '\0';
-    return 1;
-}
-static int json_long(const char *body, const char *key, long *out)
-{
-    char pat[64];
-    snprintf(pat, sizeof(pat), "\"%s\"", key);
-    const char *p = body ? strstr(body, pat) : NULL;
-    if (!p) return 0;
-    p = strchr(p + strlen(pat), ':');
-    if (!p) return 0;
-    p++;
-    while (*p == ' ' || *p == '\t' || *p == '"') p++;
-    char *end = NULL;
-    long v = strtol(p, &end, 0);
-    if (end == p) return 0;
-    *out = v;
-    return 1;
-}
-/* Decode a hex string (spaces ignored) into bytes. Returns length or -1. */
-static int hex2bytes(const char *s, uint8_t *out, int cap)
-{
-    int n = 0, hi = -1;
-    for (; *s; s++) {
-        int v;
-        if (*s == ' ' || *s == ':' || *s == '\t' || *s == '\n' || *s == '\r') continue;
-        if (*s >= '0' && *s <= '9') v = *s - '0';
-        else if (*s >= 'a' && *s <= 'f') v = *s - 'a' + 10;
-        else if (*s >= 'A' && *s <= 'F') v = *s - 'A' + 10;
-        else return -1;
-        if (hi < 0) hi = v;
-        else { if (n >= cap) return -1; out[n++] = (uint8_t)((hi << 4) | v); hi = -1; }
-    }
-    return hi < 0 ? n : -1;   /* odd number of nibbles => error */
-}
-
-/* Emit a frame object: raw hex + parsed header/params. Returns new offset. */
-static int emit_frame(char *buf, int cap, int o, const char *key,
-                      const uint8_t *raw, size_t rawlen, const NCMP_Message *m)
-{
-    o += snprintf(buf + o, cap - o, "\"%s\":{\"hex\":\"", key);
-    for (size_t i = 0; i < rawlen && o < cap - 4; i++)
-        o += snprintf(buf + o, cap - o, "%02x", raw[i]);
-    /* Wire payload_len = param-length array (32B) + sum of parameter bytes.
-     * Compute it here rather than trusting m->header.payload_len, which the
-     * encoder does not write back into a const request message. */
-    uint32_t paylen = 4u * NCMP_MAX_PARAM_COUNT;
-    for (int i = 0; i < NCMP_MAX_PARAM_COUNT; i++) paylen += m->param_len[i];
-    o += snprintf(buf + o, cap - o,
-        "\",\"frameLen\":%zu,\"sessionId\":%u,\"sequenceId\":%u,\"commandId\":%u,"
-        "\"ack\":%u,\"payloadLen\":%u,\"params\":[",
-        rawlen >= 4 ? rawlen - 4 : 0, m->header.session_id, m->header.sequence_id,
-        m->header.command_id, m->header.ack, paylen);
-    size_t off = 0;
-    int first = 1;
-    for (int i = 0; i < NCMP_MAX_PARAM_COUNT; i++) {
-        uint32_t pl = m->param_len[i];
-        if (pl == 0) continue;
-        if (o < cap - 80) {
-            o += snprintf(buf + o, cap - o, "%s{\"idx\":%d,\"len\":%u,\"hex\":\"",
-                          first ? "" : ",", i, pl);
-            for (uint32_t k = 0; k < pl && off + k < m->payload_cap && o < cap - 4; k++)
-                o += snprintf(buf + o, cap - o, "%02x", m->payload[off + k]);
-            o += snprintf(buf + o, cap - o, "\"}");
-            first = 0;
-        }
-        off += pl;
-    }
-    o += snprintf(buf + o, cap - o, "]}");
-    return o;
-}
-
-/* POST /api/ci : send one CI command to the token and return request +
- * response as raw hex AND parsed fields. Does its own locking (brief) so the
- * potentially long exchange does not block SHM-read endpoints. */
-static void handle_ci(int fd, const char *body)
-{
-    long slot = 0, command = 0, session = 0;
-    json_long(body, "slot", &slot);
-    json_long(body, "command", &command);
-    json_long(body, "session", &session);
-
-    uint8_t *payload = malloc(NCMP_MAX_PAYLOAD_SIZE);
-    uint8_t *rpayload = malloc(NCMP_MAX_PAYLOAD_SIZE);
-    uint8_t *reqframe = malloc(NCMP_MAX_FRAME_SIZE);
-    uint8_t *rspframe = malloc(NCMP_MAX_FRAME_SIZE);
-    char *out = malloc(BUF);
-    if (!payload || !rpayload || !reqframe || !rspframe || !out) {
-        free(payload); free(rpayload); free(reqframe); free(rspframe); free(out);
-        send_json(fd, 500, "{\"ok\":false,\"error\":\"oom\"}");
-        return;
-    }
-
-    uint32_t plen[NCMP_MAX_PARAM_COUNT] = {0};
-    size_t poff = 0;
-    int bad = 0;
-    for (int i = 0; i < NCMP_MAX_PARAM_COUNT; i++) {
-        char key[4]; snprintf(key, sizeof(key), "p%d", i);
-        char hv[8192];
-        if (json_str(body, key, hv, sizeof(hv)) && hv[0]) {
-            int n = hex2bytes(hv, payload + poff, (int)(NCMP_MAX_PAYLOAD_SIZE - poff));
-            if (n < 0) { bad = 1; break; }
-            plen[i] = (uint32_t)n; poff += (size_t)n;
-        }
-    }
-    if (bad) {
-        free(payload); free(rpayload); free(reqframe); free(rspframe); free(out);
-        send_json(fd, 200, "{\"ok\":false,\"error\":\"bad hex parameter\"}");
-        return;
-    }
-
-    pthread_mutex_lock(&g_lock);
-    shm_ensure();
-    int ok = g_connected;
-    uint32_t mask = g_slot_mask;
-    pthread_mutex_unlock(&g_lock);
-
-    if (!ok) {
-        free(payload); free(rpayload); free(reqframe); free(rspframe); free(out);
-        send_json(fd, 200, "{\"ok\":false,\"error\":\"ncmpd not connected\"}");
-        return;
-    }
-    if (slot < 0 || !NCMP_SLOT_IN_MASK(mask, (uint32_t)slot)) {
-        free(payload); free(rpayload); free(reqframe); free(rspframe); free(out);
-        send_json(fd, 200, "{\"ok\":false,\"error\":\"slot not online\"}");
-        return;
-    }
-
-    NCMP_Message req; memset(&req, 0, sizeof(req));
-    req.header.session_id = (uint32_t)session;
-    req.header.command_id = (uint32_t)command;
-    req.header.sequence_id = __atomic_add_fetch(&g_cli.seq, 1, __ATOMIC_RELAXED);
-    for (int i = 0; i < NCMP_MAX_PARAM_COUNT; i++) req.param_len[i] = plen[i];
-    req.payload = payload; req.payload_cap = poff;
-
-    size_t reqlen = 0;
-    ncmp_wire_encode(&req, reqframe, NCMP_MAX_FRAME_SIZE, &reqlen);
-
-    NCMP_Message rsp; memset(&rsp, 0, sizeof(rsp));
-    rsp.payload = rpayload; rsp.payload_cap = NCMP_MAX_PAYLOAD_SIZE;
-
-    struct timespec t0, t1;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
-    int rc = ncmp_client_exec(&g_cli, (uint32_t)slot, &req, &rsp, DBG_SPIN_BUDGET);
-    clock_gettime(CLOCK_MONOTONIC, &t1);
-    double ms = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
-
-    int o = snprintf(out, BUF, "{\"ok\":%s,\"rc\":%d,\"elapsedMs\":%.1f,",
-                     rc == NCMP_OK ? "true" : "false", rc, ms);
-    o = emit_frame(out, BUF, o, "request", reqframe, reqlen, &req);
-    o += snprintf(out + o, BUF - o, ",");
-    if (rc == NCMP_OK) {
-        size_t rsplen = 0;
-        ncmp_wire_encode(&rsp, rspframe, NCMP_MAX_FRAME_SIZE, &rsplen);
-        o = emit_frame(out, BUF, o, "response", rspframe, rsplen, &rsp);
-    } else {
-        o += snprintf(out + o, BUF - o, "\"response\":null");
-    }
-    snprintf(out + o, BUF - o, "}");
-    send_json(fd, 200, out);
-
-    free(payload); free(rpayload); free(reqframe); free(rspframe); free(out);
-}
-
 /* ------------------------------------------------------------------ */
 /* API routes                                                         */
 /* ------------------------------------------------------------------ */
@@ -460,7 +273,6 @@ static void handle_ci(int fd, const char *body)
 static void route_api(int fd, const char *method, const char *path, const char *body)
 {
     (void)method;
-    if (!strcmp(path, "/api/ci")) { handle_ci(fd, body); return; }
     char *buf = malloc(BUF);
     if (!buf) { send_json(fd, 500, "{\"error\":\"oom\"}"); return; }
 

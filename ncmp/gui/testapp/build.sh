@@ -37,9 +37,10 @@ fi
 
 echo "== building ncmp_web =="
 gcc -std=gnu11 -D_GNU_SOURCE -O2 -Wall -Wextra \
-    -I "$here/native" -I "$repo/usr/include" \
+    -I "$here/native" -I "$repo/usr/include" -I "$repo/ncmp/include" \
     "$here/webserver/ncmp_web.c" "$here/native/ncmp_testapp.c" \
-    -lpthread -ldl -lcrypto -o "$out/ncmp_web"
+    "$repo/ncmp/stdll/ncmp_client.c" "$repo"/ncmp/common/*.c \
+    -lpthread -ldl -lcrypto -lrt -o "$out/ncmp_web"
 echo "   -> $out/ncmp_web"
 
 facade="$repo/ncmp/gui/build-standalone/libpkcs11_ncmp_p11.so"

@@ -119,118 +119,22 @@ async function refreshDetail() {
 
 async function refreshAll() { await refreshStatus(); await refreshSlots(); await refreshDetail(); }
 
-/* ================= CI send / receive tab ========================== */
-const CI_LIST = [
-  [0x0000,'NOP(loopback)'],[0x0001,'RNG'],[0x0002,'DIGEST'],[0x0003,'GETMECHLIST'],
-  [0x0004,'DIGEST_INIT'],[0x0005,'DIGEST_UPDATE'],[0x0006,'DIGEST_FINAL'],[0x0009,'SHAKE_DERIVE'],
-  [0x0012,'AES_GCM'],[0x0013,'AES_CTR'],[0x0014,'AES_GCM_INIT'],[0x0015,'AES_GCM_UPDATE'],
-  [0x0016,'AES_GCM_FINAL'],[0x0017,'CTX_FREE'],[0x0020,'OPEN_SESSION'],[0x0021,'CLOSE_SESSION'],
-  [0x0030,'LOGIN'],[0x0031,'LOGOUT'],[0x0032,'INIT_PIN'],[0x0033,'SET_PIN'],[0x0034,'INIT_TOKEN'],
-  [0x0035,'GET_UTC_TIME'],[0x0036,'GET_TOKEN_PARAMS'],[0x0037,'SET_UTC_TIME'],
-  [0x0038,'OBJECT_ADD'],[0x0039,'OBJECT_SET_ATTR'],
-  [0x0050,'MLDSA_KEYGEN'],[0x0051,'MLDSA_SIGN'],[0x0052,'MLDSA_VERIFY'],
-  [0x0053,'MLKEM_KEYGEN'],[0x0054,'MLKEM_ENCAPS'],[0x0055,'MLKEM_DECAPS'],
-  [0x0101,'VD_MEM_WRITE'],[0x0102,'VD_MEM_READ'],[0x0103,'VD_PING'],[0x0104,'VD_SELFTEST'],
-  [0x0105,'VD_FW_INFO'],[0x0106,'VD_MEM_FILL'],[0x0107,'VD_MEM_CRC'],[0x0108,'VD_TOKEN_INFO'],
-];
-const CI_NAME = Object.fromEntries(CI_LIST.map(([c, n]) => [c, n]));
-// hints: typical parameters for a few CIs
-const CI_HINT = {
-  0x0001: 'p0 = LE u32 길이 (예 10000000 = 16바이트)',
-  0x0103: '파라미터 없음 (epoch 반환)',
-  0x0104: '파라미터 없음 (status 반환)', 0x0105: '파라미터 없음 (fw 버전)',
-  0x0108: '파라미터 없음 (토큰 신원 블롭)', 0x0035: '파라미터 없음', 0x0036: '파라미터 없음',
-  0x0020: 'p0 = LE u32 flags (헤더 session_id=0)',
-  0x0030: 'p0=userType, p1=flags, p2=PIN (예 01000000 00000000 31323334)',
-  0x0102: 'p0=addr(LE u32), p1=len(LE u32)',
-};
-const CKR = {0:'CKR_OK',6:'FUNCTION_FAILED',7:'ARGUMENTS_BAD',0x30:'DEVICE_ERROR',0x50:'DATA_LEN_RANGE',
-  0x54:'FUNCTION_NOT_SUPPORTED',0x60:'KEY_HANDLE_INVALID',0xA0:'PIN_INCORRECT',0xA1:'PIN_INVALID',
-  0xB0:'SESSION_CLOSED',0xB1:'SESSION_COUNT',0xB3:'SESSION_HANDLE_INVALID',0xB5:'SESSION_READ_ONLY',
-  0x90:'OPERATION_NOT_INITIALIZED',0x100:'USER_ALREADY_LOGGED_IN',0x101:'USER_NOT_LOGGED_IN',
-  0x103:'USER_TYPE_INVALID',0x190:'CRYPTOKI_NOT_INITIALIZED'};
-const ckrName = (v) => CKR[v] ? `CKR_${CKR[v]}` : `CKR_0x${(v>>>0).toString(16).toUpperCase()}`;
-const hx = (n, w) => '0x' + (n >>> 0).toString(16).toUpperCase().padStart(w || 0, '0');
-
-function fillCiSelect() {
-  const sel = $('#ciCmd'); sel.innerHTML = '';
-  for (const [c, n] of CI_LIST) sel.append(el('option', { value: c, textContent: `${hx(c,4)}  ${n}` }));
-  sel.onchange = () => { const c = Number(sel.value); $('#ciHint').textContent = CI_HINT[c] || ''; };
-  sel.onchange();
+/* Periodic auto-refresh of the SHM view. Interval comes from #refreshSec
+ * (seconds, default 1). A refresh in flight is skipped so a slow poll never
+ * stacks up. */
+let refreshing = false;
+async function tick() {
+  if (refreshing) return;
+  refreshing = true;
+  try { await refreshAll(); } finally { refreshing = false; }
 }
-function fillCiParamRows() {
-  const box = $('#ciParamRows'); box.innerHTML = '';
-  for (let i = 0; i < 8; i++) {
-    box.append(el('label', { textContent: 'p' + i }));
-    box.append(el('input', { type: 'text', id: 'ciP' + i, placeholder: '(Hex, 비움=생략)' }));
-  }
+function refreshMs() {
+  const s = Number($('#refreshSec').value);
+  return (isFinite(s) && s >= 1 ? s : 1) * 1000;
 }
-function fmtHex(hexStr) {   // group into bytes, 16 per line
-  const b = (hexStr.match(/.{1,2}/g) || []);
-  let out = '';
-  for (let i = 0; i < b.length; i++) out += b[i] + ((i % 16 === 15) ? '\n' : ' ');
-  return out.trim() || '(empty)';
-}
-function frameTable(f, isResp) {
-  const t = el('table', { className: 'pf' });
-  const row = (k, v) => t.append(el('tr', {}, el('td', { className: 'k', textContent: k }), el('td', { textContent: v })));
-  row('frame_len', `${f.frameLen} (${hx(f.frameLen)})`);
-  row('session_id', `${f.sessionId} (${hx(f.sessionId)})`);
-  row('sequence_id', `${f.sequenceId} (${hx(f.sequenceId)})`);
-  row('command_id', `${hx(f.commandId,4)}  ${CI_NAME[f.commandId] || '?'}`);
-  row('ack', `${hx(f.ack)}  ${ckrName(f.ack)}`);
-  row('payload_len', `${f.payloadLen}`);
-  for (const p of f.params) row(`param[${p.idx}]`, `len ${p.len} : ${p.hex || '(0)'}`);
-  if (!f.params.length) row('params', '(없음)');
-  return t;
-}
-function frameBlock(label, f, isResp) {
-  const d = el('div', { className: 'frame' });
-  d.append(el('div', { className: 'lbl', textContent: label + ' — Hex' }));
-  d.append(el('pre', { className: 'hex', textContent: fmtHex(f.hex) }));
-  d.append(el('div', { className: 'lbl', textContent: label + ' — 파싱' }));
-  d.append(frameTable(f, isResp));
-  return d;
-}
-function ciAppend(node) { const dbg = $('#ciDebug'); dbg.insertBefore(node, dbg.firstChild); }
-
-async function ciSend() {
-  const slot = Number($('#ciSlot').value);
-  const command = Number($('#ciCmd').value);
-  const session = Number($('#ciSession').value);
-  const body = { slot, command, session };
-  for (let i = 0; i < 8; i++) { const v = $('#ciP' + i).value.trim(); if (v) body['p' + i] = v; }
-  const name = CI_NAME[command] || hx(command, 4);
-  log(`CI 전송: ${name} slot=${slot} sid=${session}`);
-  const box = el('div', { className: 'xchg' });
-  const head = el('div', { className: 'xh' });
-  head.append(el('span', {}, el('span', { className: 'dir tx', textContent: '▶ TX ' }), `${hx(command,4)} ${name}`),
-              el('span', { className: 'ts', textContent: new Date().toTimeString().slice(0,8) }));
-  box.append(head);
-  ciAppend(box);
-  let d;
-  try { d = await api('/api/ci', body); }
-  catch (e) { box.append(el('div', { className: 'dir err', textContent: '요청 실패: ' + e.message })); return; }
-  if (d.request) box.append(frameBlock('송신(TX)', d.request, false));
-  if (!d.ok) {
-    const why = d.error || (d.rc === -7 ? 'timeout (토큰 무응답)' : 'rc=' + d.rc);
-    box.append(el('div', { className: 'xh' }, el('span', { className: 'dir err', textContent: '✘ RX 없음: ' + why })));
-    log(`  수신 실패: ${why}`);
-  } else {
-    head.append(el('span', { className: 'dir rx', textContent: `  ◀ RX ack=${ckrName(d.response.ack)} (${d.elapsedMs}ms)` }));
-    box.append(frameBlock('수신(RX)', d.response, true));
-    log(`  수신: ack=${ckrName(d.response.ack)} (${d.elapsedMs}ms)`);
-  }
-}
-
-function switchTab(name) {
-  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
-  document.querySelectorAll('.pane').forEach(p => p.classList.toggle('active', p.dataset.pane === name));
-}
-
 function setAuto(on) {
   if (timer) { clearInterval(timer); timer = null; }
-  if (on) timer = setInterval(refreshAll, 2000);
+  if (on) timer = setInterval(tick, refreshMs());
 }
 
 function wire() {
@@ -238,14 +142,10 @@ function wire() {
   $('#themeToggle').onclick = () => applyTheme(document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light');
   $('#btnClearLog').onclick = () => { $('#log').textContent = ''; };
   $('#autoRefresh').onchange = (e) => setAuto(e.target.checked);
+  $('#refreshSec').onchange = () => { if ($('#autoRefresh').checked) setAuto(true); };
   $('#btnReconnect').onclick = async () => { const d = await api('/api/reconnect'); log('재연결: ' + (d.connected ? 'OK' : '실패')); refreshAll(); };
-  document.querySelectorAll('.tab').forEach(t => t.onclick = () => switchTab(t.dataset.tab));
-  fillCiSelect();
-  fillCiParamRows();
-  $('#ciSend').onclick = ciSend;
-  $('#ciClear').onclick = () => { $('#ciDebug').innerHTML = ''; };
   refreshAll();
   setAuto($('#autoRefresh').checked);
-  log('Debug App 준비 완료. ncmpd가 실행 중이어야 SHM이 보입니다.');
+  log('Debug App 준비 완료. ncmpd가 실행 중이어야 SHM이 보입니다. 자동 새로고침 기본 1초.');
 }
 document.addEventListener('DOMContentLoaded', wire);

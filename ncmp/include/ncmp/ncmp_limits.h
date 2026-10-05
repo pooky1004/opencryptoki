@@ -14,14 +14,31 @@
  * ------------------------------------------------------------------------- */
 
 /** Maximum number of slots / tokens exposed by the NCMP subsystem. */
-#define PKCS11_MAX_SLOT_COUNT 4
+#define PKCS11_MAX_SLOT_COUNT 256
+
+/*
+ * The online-slot presence is still carried as a 32-bit bitmask (ncmp_ipc HELLO
+ * reply, ncmp_client.slot_mask, the probe out_slot_mask). So only slot ids in
+ * [0, NCMP_SLOT_MASK_BITS) are representable there; `1u << s` for s >= 32 is
+ * undefined behaviour and MUST be avoided. Scan mask bits with
+ * NCMP_SLOT_SCAN_MAX and test membership with NCMP_SLOT_IN_MASK(). Representing
+ * all 256 slot ids needs a presence bitset (see docs/slot-scaling-design.md);
+ * until then the online set is capped to the first 32 slots.
+ */
+#define NCMP_SLOT_MASK_BITS 32u
+#define NCMP_SLOT_SCAN_MAX                                                     \
+    ((PKCS11_MAX_SLOT_COUNT) < (NCMP_SLOT_MASK_BITS)                           \
+         ? (PKCS11_MAX_SLOT_COUNT) : (NCMP_SLOT_MASK_BITS))
+/** Non-UB membership test for a uint32 online mask (0 when s >= 32). */
+#define NCMP_SLOT_IN_MASK(mask, s)                                            \
+    ((unsigned)(s) < NCMP_SLOT_MASK_BITS ? ((mask) & (1u << (unsigned)(s))) : 0u)
 
 /** Maximum concurrent sessions allowed per slot. */
 #define PKCS11_MAX_SESSION_PER_SLOT 8
 
 /** Total system-wide concurrent session ceiling (slots * sessions/slot). */
-#define PKCS11_MAX_TOTAL_SESSIONS \
-    (PKCS11_MAX_SLOT_COUNT * PKCS11_MAX_SESSION_PER_SLOT)
+#define PKCS11_MAX_TOTAL_SESSIONS                                              \
+  (PKCS11_MAX_SLOT_COUNT * PKCS11_MAX_SESSION_PER_SLOT)
 
 /* -------------------------------------------------------------------------
  * Wire protocol / payload limits.
@@ -32,9 +49,10 @@
 
 /**
  * On-wire framing that precedes the payload: the 4-byte frame-length prefix
- * plus the fixed 20-byte NCMP_Header. Kept as a literal here because ncmp_wire.h
- * (which defines NCMP_FRAME_PREFIX_SIZE / NCMP_HEADER_WIRE_SIZE) includes this
- * header, not the reverse; ncmp_wire.c static-asserts that this matches.
+ * plus the fixed 20-byte NCMP_Header. Kept as a literal here because
+ * ncmp_wire.h (which defines NCMP_FRAME_PREFIX_SIZE / NCMP_HEADER_WIRE_SIZE)
+ * includes this header, not the reverse; ncmp_wire.c static-asserts that this
+ * matches.
  */
 #define NCMP_WIRE_FRAME_OVERHEAD (4 + 20)
 
@@ -52,7 +70,8 @@
  * so an encoded frame fits exactly one device container
  * (NCMP_MAX_FRAME_SIZE == NCMP_DEV_CONTAINER_SIZE).
  */
-#define NCMP_MAX_PAYLOAD_SIZE (NCMP_DEV_CONTAINER_SIZE - NCMP_WIRE_FRAME_OVERHEAD)
+#define NCMP_MAX_PAYLOAD_SIZE                                                  \
+  (NCMP_DEV_CONTAINER_SIZE - NCMP_WIRE_FRAME_OVERHEAD)
 
 /** All wire fields are aligned to this many bytes. */
 #define NCMP_WIRE_ALIGN 4

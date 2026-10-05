@@ -1,0 +1,931 @@
+/*
+ * Token NCMP - Test App web server.
+ *
+ * A small, dependency-free HTTP/1.1 server (thread-per-connection) that turns
+ * the C application layer (ncmp_testapp.c, the app_* ABI) into a JSON REST API
+ * and serves the static web UI. A browser anywhere on the network can then
+ * drive the token:
+ *
+ *   Browser --HTTP/JSON--> ncmp_web (this) --app_*--> libncmp_testapp
+ *       --dlopen/dlsym C_*--> libpkcs11_ncmp.so(facade) --> ncmpd --> FX3(USB)
+ *
+ * It also launches/stops ncmpd for the "run the daemon" controls, sharing
+ * NCMP_SOCK_PATH with the facade.
+ *
+ * SECURITY: this exposes module load + PKCS#11 + daemon spawn over the network
+ * and has NO transport encryption. When NCMP_WEB_TOKEN is set, every API
+ * request must carry "Authorization: Bearer <token>". Bind to a trusted
+ * interface / use an SSH tunnel for anything beyond a lab. See
+ * docs/testapp-web-deployment.md.
+ *
+ * Style: Google C Style. A developer tool, not part of the shipped token.
+ */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#include "ncmp_testapp.h"
+
+#include <openssl/evp.h>
+
+#include <arpa/inet.h>
+#include <dirent.h>
+#include <errno.h>
+#include <netinet/in.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdarg.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+/* ------------------------------------------------------------------ */
+/* Config + global state                                              */
+/* ------------------------------------------------------------------ */
+
+static char g_host[64] = "0.0.0.0";
+static int g_port = 8080;
+static char g_webroot[1024] = "web";
+static char g_module[1024] = "";       /* default facade module path */
+static char g_ncmpd[1024] = "ncmpd";   /* ncmpd binary path */
+static char g_transport[16] = "mock";  /* default --transport */
+static char g_sock_path[1024] = "";     /* NCMP_SOCK_PATH shared with facade */
+static char g_token[256] = "";          /* bearer token; empty = auth off */
+static char g_filedir[1024] = "/tmp/ncmp_web_files"; /* generated test files */
+static char g_config[1024] = "";        /* loaded config file path (for status) */
+
+/* Upper bound for a generated/verified test file held in memory at once. */
+#define NCMP_WEB_MAX_FILE (64L * 1024 * 1024)
+
+/* All PKCS#11 state in ncmp_testapp.c is process-global, so serialise every
+ * API call: one token, one facade, many browser tabs. */
+static pthread_mutex_t g_api_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* ncmpd child lifecycle. */
+static pid_t g_ncmpd_pid = 0;
+static pthread_mutex_t g_daemon_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static volatile sig_atomic_t g_running = 1;
+static void on_signal(int sig) { (void)sig; g_running = 0; }
+
+/* ------------------------------------------------------------------ */
+/* Tiny JSON field extraction (flat objects only)                     */
+/* ------------------------------------------------------------------ */
+
+/* Find "key" in a flat JSON object body; copy its string value (unescaped for
+ * simple cases) into out. Returns 1 on success. */
+static int json_str(const char *body, const char *key, char *out, size_t cap)
+{
+    char pat[96];
+    snprintf(pat, sizeof(pat), "\"%s\"", key);
+    const char *p = body ? strstr(body, pat) : NULL;
+    if (!p)
+        return 0;
+    p = strchr(p + strlen(pat), ':');
+    if (!p)
+        return 0;
+    p++;
+    while (*p == ' ' || *p == '\t')
+        p++;
+    if (*p != '"')
+        return 0;
+    p++;
+    size_t o = 0;
+    while (*p && *p != '"' && o + 1 < cap) {
+        if (*p == '\\' && p[1])
+            p++;            /* copy the escaped char literally (good enough) */
+        out[o++] = *p++;
+    }
+    out[o] = '\0';
+    return 1;
+}
+
+/* Find "key" and parse an integer value. Returns 1 on success. */
+static int json_long(const char *body, const char *key, long *out)
+{
+    char pat[96];
+    snprintf(pat, sizeof(pat), "\"%s\"", key);
+    const char *p = body ? strstr(body, pat) : NULL;
+    if (!p)
+        return 0;
+    p = strchr(p + strlen(pat), ':');
+    if (!p)
+        return 0;
+    p++;
+    while (*p == ' ' || *p == '\t' || *p == '"')
+        p++;
+    char *end = NULL;
+    long v = strtol(p, &end, 0);
+    if (end == p)
+        return 0;
+    *out = v;
+    return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* Config file (.config/config): key = value, '#' comments            */
+/* ------------------------------------------------------------------ */
+
+/* Assign one config/CLI key to the matching global. Unknown keys ignored. */
+static void set_cfg(const char *k, const char *v)
+{
+    if      (!strcmp(k, "host"))      snprintf(g_host, sizeof(g_host), "%s", v);
+    else if (!strcmp(k, "port"))      g_port = atoi(v);
+    else if (!strcmp(k, "webroot"))   snprintf(g_webroot, sizeof(g_webroot), "%s", v);
+    else if (!strcmp(k, "module"))    snprintf(g_module, sizeof(g_module), "%s", v);
+    else if (!strcmp(k, "ncmpd"))     snprintf(g_ncmpd, sizeof(g_ncmpd), "%s", v);
+    else if (!strcmp(k, "transport")) snprintf(g_transport, sizeof(g_transport), "%s", v);
+    else if (!strcmp(k, "sock"))      snprintf(g_sock_path, sizeof(g_sock_path), "%s", v);
+    else if (!strcmp(k, "filedir"))   snprintf(g_filedir, sizeof(g_filedir), "%s", v);
+    else if (!strcmp(k, "token"))     snprintf(g_token, sizeof(g_token), "%s", v);
+}
+
+/* Load a "key = value" config file. Returns 0 if read, -1 if absent. */
+static int load_config(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return -1;
+    char line[2048];
+    while (fgets(line, sizeof(line), f)) {
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '#' || *p == ';' || *p == '\n' || *p == '\r' || *p == '\0')
+            continue;
+        char *eq = strchr(p, '=');
+        if (!eq)
+            continue;
+        *eq = '\0';
+        char *key = p, *val = eq + 1;
+        /* trim key trailing ws */
+        char *ke = key + strlen(key);
+        while (ke > key && (ke[-1] == ' ' || ke[-1] == '\t')) *--ke = '\0';
+        /* trim val leading ws */
+        while (*val == ' ' || *val == '\t') val++;
+        /* strip optional surrounding quotes, then trailing ws/newline */
+        size_t vl = strlen(val);
+        while (vl && (val[vl - 1] == '\n' || val[vl - 1] == '\r' ||
+                      val[vl - 1] == ' '  || val[vl - 1] == '\t')) val[--vl] = '\0';
+        if (vl >= 2 && ((val[0] == '"' && val[vl - 1] == '"') ||
+                        (val[0] == '\'' && val[vl - 1] == '\''))) {
+            val[vl - 1] = '\0';
+            val++;
+        }
+        set_cfg(key, val);
+    }
+    fclose(f);
+    snprintf(g_config, sizeof(g_config), "%s", path);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* HTTP response helpers                                              */
+/* ------------------------------------------------------------------ */
+
+static void write_all(int fd, const char *buf, size_t len)
+{
+    size_t off = 0;
+    while (off < len) {
+        ssize_t n = write(fd, buf + off, len - off);
+        if (n <= 0) {
+            if (n < 0 && errno == EINTR)
+                continue;
+            break;
+        }
+        off += (size_t)n;
+    }
+}
+
+static void send_raw(int fd, int status, const char *status_text,
+                     const char *ctype, const char *body, size_t body_len)
+{
+    char hdr[512];
+    int n = snprintf(hdr, sizeof(hdr),
+                     "HTTP/1.1 %d %s\r\n"
+                     "Content-Type: %s\r\n"
+                     "Content-Length: %zu\r\n"
+                     "Access-Control-Allow-Origin: *\r\n"
+                     "Access-Control-Allow-Headers: Authorization, Content-Type\r\n"
+                     "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+                     "Connection: close\r\n"
+                     "\r\n",
+                     status, status_text, ctype, body_len);
+    write_all(fd, hdr, (size_t)n);
+    if (body && body_len)
+        write_all(fd, body, body_len);
+}
+
+static void send_json(int fd, int status, const char *json)
+{
+    const char *txt = status == 200 ? "OK" : (status == 400 ? "Bad Request"
+             : status == 401 ? "Unauthorized" : status == 404 ? "Not Found"
+             : "Internal Server Error");
+    send_raw(fd, status, txt, "application/json; charset=utf-8", json, strlen(json));
+}
+
+/* Emit {"rc":N,"status":"...","...":...}. rc 0 => ok. */
+static void send_result(int fd, int rc, const char *extra_json)
+{
+    char buf[18 * 1024];
+    const char *err = app_last_error();
+    char errbuf[1024];
+    size_t o = 0;
+    for (size_t i = 0; err[i] && o + 2 < sizeof(errbuf); i++) {
+        if (err[i] == '"' || err[i] == '\\')
+            errbuf[o++] = '\\';
+        errbuf[o++] = err[i];
+    }
+    errbuf[o] = '\0';
+    snprintf(buf, sizeof(buf),
+             "{\"rc\":%d,\"ok\":%s,\"error\":\"%s\"%s%s}",
+             rc, rc == 0 ? "true" : "false", errbuf,
+             (extra_json && *extra_json) ? "," : "",
+             (extra_json && *extra_json) ? extra_json : "");
+    send_json(fd, 200, buf);
+}
+
+/* ------------------------------------------------------------------ */
+/* Static file serving                                               */
+/* ------------------------------------------------------------------ */
+
+static const char *mime_of(const char *path)
+{
+    const char *dot = strrchr(path, '.');
+    if (!dot)
+        return "application/octet-stream";
+    if (!strcmp(dot, ".html")) return "text/html; charset=utf-8";
+    if (!strcmp(dot, ".js"))   return "application/javascript; charset=utf-8";
+    if (!strcmp(dot, ".css"))  return "text/css; charset=utf-8";
+    if (!strcmp(dot, ".json")) return "application/json; charset=utf-8";
+    if (!strcmp(dot, ".svg"))  return "image/svg+xml";
+    if (!strcmp(dot, ".ico"))  return "image/x-icon";
+    return "text/plain; charset=utf-8";
+}
+
+/* Serve a file under g_webroot. Rejects any path containing "..". */
+static void serve_static(int fd, const char *url_path)
+{
+    char rel[1024];
+    if (!strcmp(url_path, "/"))
+        snprintf(rel, sizeof(rel), "index.html");
+    else
+        snprintf(rel, sizeof(rel), "%s", url_path[0] == '/' ? url_path + 1 : url_path);
+
+    if (strstr(rel, "..")) {
+        send_json(fd, 400, "{\"error\":\"bad path\"}");
+        return;
+    }
+    char full[2200];
+    snprintf(full, sizeof(full), "%s/%s", g_webroot, rel);
+
+    FILE *f = fopen(full, "rb");
+    if (!f) {
+        send_json(fd, 404, "{\"error\":\"not found\"}");
+        return;
+    }
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz < 0) sz = 0;
+    char *body = malloc((size_t)sz + 1);
+    if (!body) { fclose(f); send_json(fd, 500, "{\"error\":\"oom\"}"); return; }
+    size_t rd = fread(body, 1, (size_t)sz, f);
+    fclose(f);
+    send_raw(fd, 200, "OK", mime_of(full), body, rd);
+    free(body);
+}
+
+/* ------------------------------------------------------------------ */
+/* ncmpd daemon control                                              */
+/* ------------------------------------------------------------------ */
+
+static int daemon_running(void)
+{
+    if (g_ncmpd_pid <= 0)
+        return 0;
+    int status;
+    pid_t r = waitpid(g_ncmpd_pid, &status, WNOHANG);
+    if (r == 0)
+        return 1;           /* still alive */
+    g_ncmpd_pid = 0;        /* reaped */
+    return 0;
+}
+
+static int daemon_start(const char *transport)
+{
+    pthread_mutex_lock(&g_daemon_lock);
+    if (daemon_running()) {
+        pthread_mutex_unlock(&g_daemon_lock);
+        return 0;
+    }
+    if (transport && *transport)
+        snprintf(g_transport, sizeof(g_transport), "%s", transport);
+    unlink(g_sock_path);
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        pthread_mutex_unlock(&g_daemon_lock);
+        return -1;
+    }
+    if (pid == 0) {
+        /* child: run ncmpd with our socket path + transport */
+        setenv("NCMP_SOCK_PATH", g_sock_path, 1);
+        execlp(g_ncmpd, g_ncmpd, "--transport", g_transport, (char *)NULL);
+        _exit(127);
+    }
+    g_ncmpd_pid = pid;
+    pthread_mutex_unlock(&g_daemon_lock);
+
+    /* Give it a moment to bind its socket before the UI loads the facade. */
+    usleep(400 * 1000);
+    return 0;
+}
+
+static void daemon_stop(void)
+{
+    pthread_mutex_lock(&g_daemon_lock);
+    if (g_ncmpd_pid > 0) {
+        kill(g_ncmpd_pid, SIGTERM);
+        for (int i = 0; i < 30; i++) {
+            if (waitpid(g_ncmpd_pid, NULL, WNOHANG) != 0)
+                break;
+            usleep(100 * 1000);
+        }
+        kill(g_ncmpd_pid, SIGKILL);
+        waitpid(g_ncmpd_pid, NULL, 0);
+        g_ncmpd_pid = 0;
+    }
+    pthread_mutex_unlock(&g_daemon_lock);
+}
+
+/* ------------------------------------------------------------------ */
+/* Test files + software (OpenSSL) reference digest                   */
+/* ------------------------------------------------------------------ */
+
+/* Map our CKM_* code to the matching OpenSSL EVP_MD. */
+static const EVP_MD *md_of(long mech)
+{
+    switch (mech) {
+    case 0x250: return EVP_sha256();     /* CKM_SHA256   */
+    case 0x270: return EVP_sha512();     /* CKM_SHA512   */
+    case 0x2B5: return EVP_sha3_224();   /* CKM_SHA3_224 */
+    case 0x2B0: return EVP_sha3_256();   /* CKM_SHA3_256 */
+    case 0x2C0: return EVP_sha3_384();   /* CKM_SHA3_384 */
+    case 0x2D0: return EVP_sha3_512();   /* CKM_SHA3_512 */
+    default:    return NULL;
+    }
+}
+
+/* Software reference digest of a buffer. Returns digest length, or -1. */
+static int sw_digest(long mech, const unsigned char *data, size_t len,
+                     unsigned char *out, unsigned int *out_len)
+{
+    const EVP_MD *md = md_of(mech);
+    if (!md)
+        return -1;
+    EVP_MD_CTX *c = EVP_MD_CTX_new();
+    if (!c)
+        return -1;
+    int ok = EVP_DigestInit_ex(c, md, NULL) == 1 &&
+             EVP_DigestUpdate(c, data, len) == 1 &&
+             EVP_DigestFinal_ex(c, out, out_len) == 1;
+    EVP_MD_CTX_free(c);
+    return ok ? (int)*out_len : -1;
+}
+
+/* Reject anything but a plain basename (no path separators / "..") so files
+ * only ever resolve inside g_filedir. */
+static int safe_name(const char *name)
+{
+    if (!name || !*name || strlen(name) > 128)
+        return 0;
+    if (strchr(name, '/') || strstr(name, ".."))
+        return 0;
+    return 1;
+}
+
+static void hex_of(const unsigned char *b, int n, char *out)
+{
+    static const char *H = "0123456789abcdef";
+    for (int i = 0; i < n; i++) { out[2 * i] = H[b[i] >> 4]; out[2 * i + 1] = H[b[i] & 0xF]; }
+    out[2 * n] = '\0';
+}
+
+/* Create g_filedir if missing. */
+static void ensure_filedir(void) { mkdir(g_filedir, 0755); }
+
+/* Generate a size-byte test file filled with a reproducible LCG pattern. */
+static int gen_test_file(const char *name, long size, unsigned seed)
+{
+    char full[2200];
+    snprintf(full, sizeof(full), "%s/%s", g_filedir, name);
+    FILE *f = fopen(full, "wb");
+    if (!f)
+        return -1;
+    unsigned char buf[65536];
+    uint32_t x = seed ? seed : 0x1234567u;
+    long written = 0;
+    while (written < size) {
+        size_t n = (size_t)((size - written) < (long)sizeof(buf) ? (size - written) : (long)sizeof(buf));
+        for (size_t i = 0; i < n; i++) { x = x * 1103515245u + 12345u; buf[i] = (unsigned char)(x >> 24); }
+        if (fwrite(buf, 1, n, f) != n) { fclose(f); return -1; }
+        written += (long)n;
+    }
+    fclose(f);
+    return 0;
+}
+
+/* Read a whole test file into a malloc'd buffer (<= NCMP_WEB_MAX_FILE). */
+static unsigned char *read_test_file(const char *name, long *out_len)
+{
+    char full[2200];
+    snprintf(full, sizeof(full), "%s/%s", g_filedir, name);
+    FILE *f = fopen(full, "rb");
+    if (!f)
+        return NULL;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz < 0 || sz > NCMP_WEB_MAX_FILE) { fclose(f); return NULL; }
+    unsigned char *buf = malloc((size_t)sz ? (size_t)sz : 1);
+    if (!buf) { fclose(f); return NULL; }
+    long rd = (long)fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    if (rd != sz) { free(buf); return NULL; }
+    *out_len = sz;
+    return buf;
+}
+
+/* ------------------------------------------------------------------ */
+/* API routes (all under the API lock)                               */
+/* ------------------------------------------------------------------ */
+
+#define BUF (16 * 1024)
+
+/* Append a JSON key:rawvalue pair into a growing buffer; returns new offset. */
+static int route_api(int fd, const char *method, const char *path, const char *body)
+{
+    char extra[BUF];
+
+    /* ---- status / daemon (no API lock needed for status) ---- */
+    if (!strcmp(path, "/api/status") && !strcmp(method, "GET")) {
+        int dr;
+        pthread_mutex_lock(&g_daemon_lock);
+        dr = daemon_running();
+        pthread_mutex_unlock(&g_daemon_lock);
+        snprintf(extra, sizeof(extra),
+                 "\"daemonRunning\":%s,\"transport\":\"%s\",\"sockPath\":\"%s\","
+                 "\"defaultModule\":\"%s\",\"ncmpd\":\"%s\",\"configPath\":\"%s\","
+                 "\"host\":\"%s\",\"port\":%d,\"filedir\":\"%s\",\"authRequired\":%s",
+                 dr ? "true" : "false", g_transport, g_sock_path, g_module, g_ncmpd,
+                 g_config, g_host, g_port, g_filedir, g_token[0] ? "true" : "false");
+        send_result(fd, 0, extra);
+        return 0;
+    }
+    if (!strcmp(path, "/api/daemon/start") && !strcmp(method, "POST")) {
+        char t[16] = "";
+        json_str(body, "transport", t, sizeof(t));
+        int rc = daemon_start(t[0] ? t : g_transport);
+        snprintf(extra, sizeof(extra), "\"pid\":%d", (int)g_ncmpd_pid);
+        if (rc != 0) { app_last_error(); send_result(fd, rc, "\"detail\":\"fork/exec failed\""); }
+        else send_result(fd, 0, extra);
+        return 0;
+    }
+    if (!strcmp(path, "/api/daemon/stop") && !strcmp(method, "POST")) {
+        daemon_stop();
+        send_result(fd, 0, "");
+        return 0;
+    }
+
+    /* ---- test files (no token access: outside the API lock) ---- */
+    if (!strcmp(path, "/api/genfile") && !strcmp(method, "POST")) {
+        long size = 0, seed = 0;
+        char name[160] = "";
+        json_long(body, "size", &size);
+        json_long(body, "seed", &seed);
+        json_str(body, "name", name, sizeof(name));
+        if (!name[0])
+            snprintf(name, sizeof(name), "test_%ld.bin", size);
+        if (!safe_name(name)) { send_result(fd, -4, "\"detail\":\"bad name\""); return 0; }
+        if (size < 0 || size > NCMP_WEB_MAX_FILE) {
+            snprintf(extra, sizeof(extra), "\"detail\":\"size out of range (0..%ld)\"", NCMP_WEB_MAX_FILE);
+            send_result(fd, -4, extra);
+            return 0;
+        }
+        ensure_filedir();
+        if (gen_test_file(name, size, (unsigned)seed) != 0) {
+            send_result(fd, -4, "\"detail\":\"write failed\"");
+            return 0;
+        }
+        /* report a SHA-256 (software) of the new file as a reference tag */
+        long flen = 0;
+        unsigned char *buf = read_test_file(name, &flen);
+        char sha[65] = "";
+        if (buf) {
+            unsigned char dg[32]; unsigned int dl = 0;
+            if (sw_digest(0x250, buf, (size_t)flen, dg, &dl) > 0) hex_of(dg, (int)dl, sha);
+            free(buf);
+        }
+        snprintf(extra, sizeof(extra),
+                 "\"name\":\"%s\",\"size\":%ld,\"sha256\":\"%s\"", name, size, sha);
+        send_result(fd, 0, extra);
+        return 0;
+    }
+    if (!strcmp(path, "/api/files") && !strcmp(method, "GET")) {
+        ensure_filedir();
+        DIR *d = opendir(g_filedir);
+        int o = snprintf(extra, sizeof(extra), "\"files\":[");
+        int first = 1;
+        if (d) {
+            struct dirent *de;
+            while ((de = readdir(d)) != NULL) {
+                if (de->d_name[0] == '.') continue;
+                char full[2200];
+                snprintf(full, sizeof(full), "%s/%s", g_filedir, de->d_name);
+                struct stat st;
+                if (stat(full, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+                if (o < (int)sizeof(extra) - 200)
+                    o += snprintf(extra + o, sizeof(extra) - o, "%s{\"name\":\"%s\",\"size\":%ld}",
+                                  first ? "" : ",", de->d_name, (long)st.st_size);
+                first = 0;
+            }
+            closedir(d);
+        }
+        snprintf(extra + o, sizeof(extra) - o, "],\"dir\":\"%s\"", g_filedir);
+        send_result(fd, 0, extra);
+        return 0;
+    }
+
+    /* ---- everything below drives the token: serialise ---- */
+    pthread_mutex_lock(&g_api_lock);
+    int rc = -4;        /* APP_ERR_ARGS by default */
+    extra[0] = '\0';
+
+    if (!strcmp(path, "/api/load") && !strcmp(method, "POST")) {
+        char mod[1024] = "";
+        if (!json_str(body, "module", mod, sizeof(mod)) || !mod[0])
+            snprintf(mod, sizeof(mod), "%s", g_module);
+        rc = app_load(mod);
+    } else if (!strcmp(path, "/api/initialize") && !strcmp(method, "POST")) {
+        rc = app_initialize();
+    } else if (!strcmp(path, "/api/finalize") && !strcmp(method, "POST")) {
+        rc = app_finalize();
+    } else if (!strcmp(path, "/api/unload") && !strcmp(method, "POST")) {
+        rc = app_unload();
+    } else if (!strcmp(path, "/api/dlsym") && !strcmp(method, "GET")) {
+        char js[4096];      /* 70 entries ~ 1.7 KB; fits with margin in extra[] */
+        rc = app_dlsym_report(js, sizeof(js));
+        if (rc == 0) snprintf(extra, sizeof(extra), "\"report\":%s", js);
+    } else if (!strcmp(path, "/api/library") && !strcmp(method, "GET")) {
+        char js[2048];
+        rc = app_library_info(js, sizeof(js));
+        if (rc == 0) snprintf(extra, sizeof(extra), "\"info\":%s", js);
+    } else if (!strcmp(path, "/api/slots") && !strcmp(method, "GET")) {
+        unsigned long ids[512];
+        int n = 0;
+        rc = app_get_slots(ids, 512, &n);
+        if (rc == 0) {
+            int o = snprintf(extra, sizeof(extra), "\"slots\":[");
+            for (int i = 0; i < n; i++)
+                o += snprintf(extra + o, sizeof(extra) - o, "%s%lu", i ? "," : "", ids[i]);
+            snprintf(extra + o, sizeof(extra) - o, "]");
+        }
+    } else if (!strcmp(path, "/api/token") && !strcmp(method, "POST")) {
+        long slot = 0;
+        char js[4096];
+        if (json_long(body, "slot", &slot)) {
+            rc = app_token_info((unsigned long)slot, js, sizeof(js));
+            if (rc == 0) snprintf(extra, sizeof(extra), "\"token\":%s", js);
+        }
+    } else if (!strcmp(path, "/api/mechanisms") && !strcmp(method, "POST")) {
+        long slot = 0;
+        char js[8192];
+        if (json_long(body, "slot", &slot)) {
+            rc = app_mechanism_list((unsigned long)slot, js, sizeof(js));
+            if (rc == 0) snprintf(extra, sizeof(extra), "\"mechanisms\":%s", js);
+        }
+    } else if (!strcmp(path, "/api/session/open") && !strcmp(method, "POST")) {
+        long slot = 0, rw = 1;
+        unsigned long h = 0;
+        json_long(body, "slot", &slot);
+        json_long(body, "rw", &rw);
+        rc = app_open_session((unsigned long)slot, (int)rw, &h);
+        if (rc == 0) snprintf(extra, sizeof(extra), "\"session\":%lu", h);
+    } else if (!strcmp(path, "/api/session/close") && !strcmp(method, "POST")) {
+        long h = 0;
+        if (json_long(body, "session", &h))
+            rc = app_close_session((unsigned long)h);
+    } else if (!strcmp(path, "/api/session/info") && !strcmp(method, "POST")) {
+        long h = 0;
+        char js[1024];
+        if (json_long(body, "session", &h)) {
+            rc = app_session_info((unsigned long)h, js, sizeof(js));
+            if (rc == 0) snprintf(extra, sizeof(extra), "\"session\":%s", js);
+        }
+    } else if (!strcmp(path, "/api/login") && !strcmp(method, "POST")) {
+        long h = 0, ut = 1;
+        char pin[128] = "";
+        json_long(body, "session", &h);
+        json_long(body, "userType", &ut);
+        json_str(body, "pin", pin, sizeof(pin));
+        rc = app_login((unsigned long)h, (int)ut, pin);
+    } else if (!strcmp(path, "/api/logout") && !strcmp(method, "POST")) {
+        long h = 0;
+        if (json_long(body, "session", &h))
+            rc = app_logout((unsigned long)h);
+    } else if (!strcmp(path, "/api/random") && !strcmp(method, "POST")) {
+        long h = 0, n = 16;
+        json_long(body, "session", &h);
+        json_long(body, "length", &n);
+        if (n < 1) n = 1;
+        if (n > 1024) n = 1024;
+        unsigned char *rb = malloc((size_t)n);
+        if (rb) {
+            rc = app_generate_random((unsigned long)h, rb, (int)n);
+            if (rc == 0) {
+                int o = snprintf(extra, sizeof(extra), "\"hex\":\"");
+                for (long i = 0; i < n; i++)
+                    o += snprintf(extra + o, sizeof(extra) - o, "%02x", rb[i]);
+                snprintf(extra + o, sizeof(extra) - o, "\",\"length\":%ld", n);
+            }
+            free(rb);
+        } else rc = -4;
+    } else if (!strcmp(path, "/api/digest") && !strcmp(method, "POST")) {
+        long h = 0, mech = 0x250;    /* CKM_SHA256 */
+        char in[4096] = "";
+        json_long(body, "session", &h);
+        json_long(body, "mech", &mech);
+        json_str(body, "input", in, sizeof(in));
+        unsigned char out[128];
+        int outlen = 0;
+        rc = app_digest((unsigned long)h, (unsigned long)mech,
+                        (unsigned char *)in, (int)strlen(in), out, sizeof(out), &outlen);
+        if (rc == 0) {
+            int o = snprintf(extra, sizeof(extra), "\"hex\":\"");
+            for (int i = 0; i < outlen; i++)
+                o += snprintf(extra + o, sizeof(extra) - o, "%02x", out[i]);
+            snprintf(extra + o, sizeof(extra) - o, "\",\"length\":%d", outlen);
+        }
+    } else if (!strcmp(path, "/api/gcm-selftest") && !strcmp(method, "POST")) {
+        long h = 0;
+        char detail[256];
+        json_long(body, "session", &h);
+        rc = app_aes_gcm_selftest((unsigned long)h, detail, sizeof(detail));
+        /* escape detail quickly (no quotes expected) */
+        snprintf(extra, sizeof(extra), "\"detail\":\"%s\"", detail);
+    } else if (!strcmp(path, "/api/digest-file") && !strcmp(method, "POST")) {
+        /* Multipart (init/update/final) digest of a test file on the token. */
+        long h = 0, mech = 0x250;
+        char name[160] = "";
+        json_long(body, "session", &h);
+        json_long(body, "mech", &mech);
+        json_str(body, "name", name, sizeof(name));
+        long flen = 0;
+        unsigned char *buf = safe_name(name) ? read_test_file(name, &flen) : NULL;
+        if (!buf) { rc = -4; snprintf(extra, sizeof(extra), "\"detail\":\"file read failed\""); }
+        else {
+            unsigned char out[128]; int olen = 0;
+            rc = app_digest_multipart((unsigned long)h, (unsigned long)mech, buf, flen, 0, out, sizeof(out), &olen);
+            if (rc == 0) {
+                char hex[260]; hex_of(out, olen, hex);
+                snprintf(extra, sizeof(extra), "\"hex\":\"%s\",\"length\":%d,\"bytes\":%ld", hex, olen, flen);
+            }
+            free(buf);
+        }
+    } else if (!strcmp(path, "/api/digest-compare") && !strcmp(method, "POST")) {
+        /* Token multipart digest vs. software (OpenSSL) digest of the same file. */
+        long h = 0, mech = 0x250;
+        char name[160] = "";
+        json_long(body, "session", &h);
+        json_long(body, "mech", &mech);
+        json_str(body, "name", name, sizeof(name));
+        long flen = 0;
+        unsigned char *buf = safe_name(name) ? read_test_file(name, &flen) : NULL;
+        if (!buf) { rc = -4; snprintf(extra, sizeof(extra), "\"detail\":\"file read failed\""); }
+        else if (!md_of(mech)) { rc = -4; snprintf(extra, sizeof(extra), "\"detail\":\"mechanism has no SW reference\""); free(buf); }
+        else {
+            unsigned char tok[128]; int tlen = 0;
+            unsigned char sw[64]; unsigned int slen = 0;
+            rc = app_digest_multipart((unsigned long)h, (unsigned long)mech, buf, flen, 0, tok, sizeof(tok), &tlen);
+            int sr = sw_digest(mech, buf, (size_t)flen, sw, &slen);
+            free(buf);
+            char thex[260] = "", shex[260] = "";
+            if (rc == 0) hex_of(tok, tlen, thex);
+            if (sr > 0) hex_of(sw, (int)slen, shex);
+            int match = (rc == 0 && sr > 0 && tlen == (int)slen && memcmp(tok, sw, (size_t)slen) == 0);
+            snprintf(extra, sizeof(extra),
+                     "\"bytes\":%ld,\"tokenHex\":\"%s\",\"swHex\":\"%s\",\"match\":%s",
+                     flen, thex, shex, match ? "true" : "false");
+            /* rc reflects the token call; the comparison verdict is in "match". */
+        }
+    } else {
+        pthread_mutex_unlock(&g_api_lock);
+        send_json(fd, 404, "{\"error\":\"no such api\"}");
+        return 0;
+    }
+
+    send_result(fd, rc, extra);
+    pthread_mutex_unlock(&g_api_lock);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Request read + dispatch                                           */
+/* ------------------------------------------------------------------ */
+
+static int header_has_bearer(const char *headers)
+{
+    if (!g_token[0])
+        return 1;      /* auth disabled */
+    const char *a = strcasestr(headers, "authorization:");
+    if (!a)
+        return 0;
+    const char *b = strcasestr(a, "bearer ");
+    if (!b)
+        return 0;
+    b += 7;
+    size_t tl = strlen(g_token);
+    return strncmp(b, g_token, tl) == 0 &&
+           (b[tl] == '\r' || b[tl] == '\n' || b[tl] == '\0' || b[tl] == ' ');
+}
+
+static void *handle_client(void *arg)
+{
+    int fd = (int)(intptr_t)arg;
+    char *req = malloc(1 << 20);        /* 1 MiB cap */
+    if (!req) { close(fd); return NULL; }
+    size_t len = 0, cap = 1 << 20;
+    size_t header_end = 0;
+
+    /* Read until headers complete. */
+    while (len + 1 < cap) {
+        ssize_t n = read(fd, req + len, cap - len - 1);
+        if (n <= 0)
+            break;
+        len += (size_t)n;
+        req[len] = '\0';
+        char *he = strstr(req, "\r\n\r\n");
+        if (he) { header_end = (size_t)(he - req) + 4; break; }
+    }
+    if (header_end == 0) { free(req); close(fd); return NULL; }
+
+    /* Parse request line. */
+    char method[8] = "", path[1024] = "";
+    sscanf(req, "%7s %1023s", method, path);
+
+    /* Strip query string. */
+    char *q = strchr(path, '?');
+    if (q) *q = '\0';
+
+    /* CORS preflight. */
+    if (!strcmp(method, "OPTIONS")) {
+        send_raw(fd, 204, "No Content", "text/plain", "", 0);
+        free(req); close(fd); return NULL;
+    }
+
+    /* For API paths read the full body per Content-Length. */
+    const char *body = req + header_end;
+    if (!strncmp(path, "/api/", 5)) {
+        if (!header_has_bearer(req)) {
+            send_json(fd, 401, "{\"error\":\"unauthorized (set Authorization: Bearer <NCMP_WEB_TOKEN>)\"}");
+            free(req); close(fd); return NULL;
+        }
+        const char *cl = strcasestr(req, "content-length:");
+        long want = 0;
+        if (cl) want = strtol(cl + 15, NULL, 10);
+        while ((long)(len - header_end) < want && len + 1 < cap) {
+            ssize_t n = read(fd, req + len, cap - len - 1);
+            if (n <= 0) break;
+            len += (size_t)n;
+            req[len] = '\0';
+        }
+        route_api(fd, method, path, body);
+    } else if (!strcmp(method, "GET")) {
+        serve_static(fd, path);
+    } else {
+        send_json(fd, 404, "{\"error\":\"not found\"}");
+    }
+
+    free(req);
+    close(fd);
+    return NULL;
+}
+
+/* ------------------------------------------------------------------ */
+/* main                                                              */
+/* ------------------------------------------------------------------ */
+
+static void usage(const char *p)
+{
+    fprintf(stderr,
+      "usage: %s [--config PATH] [--host H] [--port N] [--webroot DIR]\n"
+      "          [--module PATH] [--ncmpd PATH] [--transport real|mock|socket]\n"
+      "          [--sock PATH] [--filedir DIR]\n"
+      "config: --config, else $NCMP_WEB_CONFIG, else ./.config/config\n"
+      "        (key = value; keys: host port webroot module ncmpd transport\n"
+      "         sock filedir token). Precedence: defaults < file < env < CLI.\n"
+      "env: NCMP_WEB_HOST NCMP_WEB_PORT NCMP_WEB_ROOT NCMP_WEB_TOKEN\n"
+      "     NCMP_PKCS11_MODULE NCMP_SOCK_PATH NCMP_WEB_FILEDIR NCMP_WEB_CONFIG\n", p);
+}
+
+int main(int argc, char **argv)
+{
+    /* Precedence (low -> high): built-in defaults < config file < env < CLI.
+     * 1) config file: --config, else $NCMP_WEB_CONFIG, else ./.config/config. */
+    char cfgpath[1024] = "";
+    for (int i = 1; i < argc - 1; i++)
+        if (!strcmp(argv[i], "--config")) snprintf(cfgpath, sizeof(cfgpath), "%s", argv[i + 1]);
+    if (!cfgpath[0]) {
+        const char *c = getenv("NCMP_WEB_CONFIG");
+        if (c && *c) snprintf(cfgpath, sizeof(cfgpath), "%s", c);
+    }
+    if (!cfgpath[0])
+        snprintf(cfgpath, sizeof(cfgpath), ".config/config");
+    load_config(cfgpath);   /* -1 (absent) is fine */
+
+    /* 2) environment overrides the config file. */
+    const char *e;
+    if ((e = getenv("NCMP_WEB_HOST"))) snprintf(g_host, sizeof(g_host), "%s", e);
+    if ((e = getenv("NCMP_WEB_PORT"))) g_port = atoi(e);
+    if ((e = getenv("NCMP_WEB_ROOT"))) snprintf(g_webroot, sizeof(g_webroot), "%s", e);
+    if ((e = getenv("NCMP_PKCS11_MODULE"))) snprintf(g_module, sizeof(g_module), "%s", e);
+    if ((e = getenv("NCMP_WEB_TOKEN"))) snprintf(g_token, sizeof(g_token), "%s", e);
+    if ((e = getenv("NCMP_SOCK_PATH"))) snprintf(g_sock_path, sizeof(g_sock_path), "%s", e);
+    if ((e = getenv("NCMP_WEB_FILEDIR"))) snprintf(g_filedir, sizeof(g_filedir), "%s", e);
+
+    /* 3) CLI arguments override everything. */
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--config") && i + 1 < argc) { ++i; continue; } /* handled above */
+        if (!strcmp(argv[i], "--host") && i + 1 < argc) snprintf(g_host, sizeof(g_host), "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--port") && i + 1 < argc) g_port = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--webroot") && i + 1 < argc) snprintf(g_webroot, sizeof(g_webroot), "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--module") && i + 1 < argc) snprintf(g_module, sizeof(g_module), "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--ncmpd") && i + 1 < argc) snprintf(g_ncmpd, sizeof(g_ncmpd), "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--transport") && i + 1 < argc) snprintf(g_transport, sizeof(g_transport), "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--sock") && i + 1 < argc) snprintf(g_sock_path, sizeof(g_sock_path), "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--filedir") && i + 1 < argc) snprintf(g_filedir, sizeof(g_filedir), "%s", argv[++i]);
+        else { usage(argv[0]); return 2; }
+    }
+    if (!g_sock_path[0]) {
+        snprintf(g_sock_path, sizeof(g_sock_path), "/tmp/ncmpd_web_%d.sock", (int)getpid());
+    }
+    /* The facade (loaded in-process) must see the same socket path. */
+    setenv("NCMP_SOCK_PATH", g_sock_path, 1);
+    ensure_filedir();
+
+    /* Install SIGINT/SIGTERM WITHOUT SA_RESTART so a signal interrupts the
+     * blocking accept() (EINTR) and the loop can observe g_running == 0.
+     * SIGCHLD is left at its default so waitpid()/WNOHANG works for ncmpd. */
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_signal;        /* sa_flags = 0: no SA_RESTART */
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+    signal(SIGPIPE, SIG_IGN);
+
+    int srv = socket(AF_INET, SOCK_STREAM, 0);
+    if (srv < 0) { perror("socket"); return 1; }
+    int one = 1;
+    setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((uint16_t)g_port);
+    if (inet_pton(AF_INET, g_host, &addr.sin_addr) != 1)
+        addr.sin_addr.s_addr = INADDR_ANY;
+    if (bind(srv, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        perror("bind"); return 1;
+    }
+    if (listen(srv, 32) != 0) { perror("listen"); return 1; }
+
+    fprintf(stderr,
+        "ncmp_web: http://%s:%d  (config=%s, webroot=%s, module=%s, sock=%s,\n"
+        "          filedir=%s, auth=%s)\n",
+        g_host, g_port, g_config[0] ? g_config : "(none)", g_webroot,
+        g_module[0] ? g_module : "(none)", g_sock_path, g_filedir,
+        g_token[0] ? "bearer-token" : "OFF");
+
+    while (g_running) {
+        int c = accept(srv, NULL, NULL);
+        if (c < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        pthread_t th;
+        if (pthread_create(&th, NULL, handle_client, (void *)(intptr_t)c) == 0)
+            pthread_detach(th);
+        else
+            close(c);
+    }
+
+    daemon_stop();
+    close(srv);
+    fprintf(stderr, "ncmp_web: stopped\n");
+    return 0;
+}

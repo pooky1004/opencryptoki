@@ -102,7 +102,9 @@ static int usb_probe(uint32_t *out_slot_mask)
 
     if (total > PKCS11_MAX_SLOT_COUNT)
         total = PKCS11_MAX_SLOT_COUNT;
-    for (uint32_t s = 0; s < total; ++s)
+    /* The online mask is a uint32; only the first NCMP_SLOT_MASK_BITS slots are
+     * representable (see ncmp_limits.h / docs/slot-scaling-design.md). */
+    for (uint32_t s = 0; s < total && s < NCMP_SLOT_SCAN_MAX; ++s)
         *out_slot_mask |= (1u << s);
     return NCMP_OK;
 }

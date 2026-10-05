@@ -170,10 +170,10 @@ int main(int argc, char **argv)
     if (ncmp_transport_probe(&slot_mask) != NCMP_OK)
         slot_mask = 0;
 
-    for (uint32_t s = 0; s < PKCS11_MAX_SLOT_COUNT; ++s) {
+    for (uint32_t s = 0; s < NCMP_SLOT_SCAN_MAX; ++s) {
         NCMP_Slot *slot;
 
-        if ((slot_mask & (1u << s)) == 0)
+        if (NCMP_SLOT_IN_MASK(slot_mask, s) == 0)
             continue;
         slot = ncmp_shm_slot(shm_base, s);
 
@@ -227,8 +227,8 @@ int main(int argc, char **argv)
     ncmpd_request_stop(&conn.stop);
     pthread_join(conn.thread, NULL);
 
-    for (uint32_t s = 0; s < PKCS11_MAX_SLOT_COUNT; ++s) {
-        if ((started & (1u << s)) == 0)
+    for (uint32_t s = 0; s < NCMP_SLOT_SCAN_MAX; ++s) {
+        if (NCMP_SLOT_IN_MASK(started, s) == 0)
             continue;
         ncmpd_request_stop(&slots[s].stop);
         pthread_join(slots[s].thread, NULL);

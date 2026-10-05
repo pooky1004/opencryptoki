@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Token NCMP — Web Test App</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Token NCMP — Web Test App</h1>
+    <div class="conn">
+      <label>서버 토큰
+        <input id="authToken" type="password" placeholder="NCMP_WEB_TOKEN (선택)" size="16">
+      </label>
+      <span id="daemonDot" class="dot off"></span>
+      <span id="daemonText">상태 확인 중…</span>
+      <span id="cfgInfo" class="muted small"></span>
+    </div>
+  </header>
+
+  <!-- Top toolbar: daemon + facade lifecycle -->
+  <section class="toolbar">
+    <div class="group">
+      <strong>ncmpd</strong>
+      <select id="transport">
+        <option value="mock">mock</option>
+        <option value="real">real</option>
+        <option value="socket">socket</option>
+      </select>
+      <button id="btnDaemonStart">데몬 시작</button>
+      <button id="btnDaemonStop">데몬 정지</button>
+    </div>
+    <div class="group grow">
+      <strong>facade</strong>
+      <input id="modulePath" type="text" placeholder="libpkcs11_ncmp.so 경로 (비우면 서버 기본값)">
+      <button id="btnLoad">로드</button>
+      <button id="btnInit">C_Initialize</button>
+      <button id="btnFinal">C_Finalize</button>
+      <button id="btnSlots">슬롯 새로고침</button>
+      <button id="btnDlsym">dlsym 점검</button>
+    </div>
+    <div id="libInfo" class="muted"></div>
+  </section>
+
+  <main>
+    <!-- Left: active slots -->
+    <aside class="slots">
+      <h2>활성 슬롯</h2>
+      <ul id="slotList"></ul>
+      <p class="muted small">슬롯을 선택하면 오른쪽에 해당 토큰 메뉴가 표시됩니다.</p>
+    </aside>
+
+    <!-- Right: tabs -->
+    <section class="panel">
+      <nav class="tabs">
+        <button class="tab active" data-tab="token">토큰 정보</button>
+        <button class="tab" data-tab="session">세션 / 로그인</button>
+        <button class="tab" data-tab="crypto">암복호화 / 해시</button>
+        <button class="tab" data-tab="file">파일 / 검증</button>
+        <button class="tab" data-tab="api">PKCS#11 API 시험</button>
+        <button class="tab" data-tab="scenario">시나리오</button>
+      </nav>
+
+      <div class="tabbody">
+        <!-- Token -->
+        <div class="tabpane active" data-pane="token">
+          <button id="btnTokenInfo">토큰 정보 조회 (C_GetTokenInfo + MechanismList)</button>
+          <pre id="tokenInfo" class="out"></pre>
+          <h3>지원 메커니즘</h3>
+          <ul id="mechList" class="mechs"></ul>
+        </div>
+
+        <!-- Session -->
+        <div class="tabpane" data-pane="session">
+          <div class="row">
+            <label><input type="checkbox" id="rwSession" checked> R/W 세션</label>
+            <button id="btnOpenSession">세션 열기</button>
+            <button id="btnCloseSession">세션 닫기</button>
+            <span id="sessionText" class="pill">세션 없음</span>
+          </div>
+          <fieldset>
+            <legend>로그인 / 로그아웃</legend>
+            <div class="row">
+              <label>사용자
+                <select id="userType">
+                  <option value="1">User</option>
+                  <option value="0">SO</option>
+                  <option value="2">ContextSpecific</option>
+                </select>
+              </label>
+              <label>PIN <input type="password" id="pin" value="1234" size="12"></label>
+              <button id="btnLogin">C_Login</button>
+              <button id="btnLogout">C_Logout</button>
+            </div>
+          </fieldset>
+          <h3>세션 정보 (C_GetSessionInfo)</h3>
+          <pre id="sessionInfo" class="out"></pre>
+        </div>
+
+        <!-- Crypto -->
+        <div class="tabpane" data-pane="crypto">
+          <div class="row">
+            <label>난수 길이 <input type="number" id="randLen" value="16" min="1" max="1024"></label>
+            <button id="btnRandom">C_GenerateRandom</button>
+          </div>
+          <div class="row">
+            <label>해시
+              <select id="digestMech">
+                <option value="592">SHA-256</option>
+                <option value="624">SHA-512</option>
+                <option value="693">SHA3-224</option>
+                <option value="688">SHA3-256</option>
+                <option value="704">SHA3-384</option>
+                <option value="720">SHA3-512</option>
+              </select>
+            </label>
+            <input type="text" id="digestInput" value="abc" placeholder="입력 문자열(UTF-8)">
+            <button id="btnDigest">C_Digest</button>
+          </div>
+          <div class="row">
+            <button id="btnGcm">AES-GCM 자가검증 (GenerateKey + Encrypt/Decrypt)</button>
+          </div>
+          <h3>결과</h3>
+          <pre id="cryptoOut" class="out"></pre>
+        </div>
+
+        <!-- File generation + real-vs-SW verification -->
+        <div class="tabpane" data-pane="file">
+          <fieldset>
+            <legend>테스트 파일 생성 (init/update/final 시험은 데이터 ≥ 64KB 필요)</legend>
+            <div class="row">
+              <label>크기 <input type="number" id="fileSize" value="100000" min="0"></label>
+              <select id="fileUnit">
+                <option value="1">바이트</option>
+                <option value="1024">KB</option>
+                <option value="1048576">MB</option>
+              </select>
+              <label>이름 <input type="text" id="fileName" placeholder="(자동)" size="14"></label>
+              <button id="btnGenFile">파일 생성</button>
+              <span id="genFileInfo" class="muted"></span>
+            </div>
+            <p class="muted small">반복 가능한 PRNG 패턴으로 채웁니다. 생성 시 SW SHA-256(참조)을 함께 표시합니다.</p>
+          </fieldset>
+
+          <fieldset>
+            <legend>실 타겟 ↔ SW 결과 비교 (토큰이 정확히 동작하는지 확인)</legend>
+            <div class="row">
+              <label>파일
+                <select id="verifyFile"></select>
+              </label>
+              <button id="btnRefreshFiles">목록 새로고침</button>
+              <label>해시
+                <select id="verifyMech">
+                  <option value="592">SHA-256</option>
+                  <option value="624">SHA-512</option>
+                  <option value="693">SHA3-224</option>
+                  <option value="688">SHA3-256</option>
+                  <option value="704">SHA3-384</option>
+                  <option value="720">SHA3-512</option>
+                </select>
+              </label>
+              <button id="btnDigestFile">토큰 multipart 해시</button>
+              <button id="btnCompare" class="primary">▶ 실타겟 vs SW 비교</button>
+            </div>
+            <p class="muted small">
+              비교는 세션이 필요합니다(세션 탭에서 열기). 토큰(실 FX3)의 multipart
+              (init/update/final) 결과와 호스트의 OpenSSL 계산 결과를 대조해
+              <b>일치(MATCH)</b> 여부로 정확성을 판정합니다. mock 토큰은 실제 해시가
+              아니므로 MISMATCH가 정상입니다.
+            </p>
+            <div id="compareVerdict" class="summary"></div>
+            <pre id="fileOut" class="out"></pre>
+          </fieldset>
+        </div>
+
+        <!-- API tester -->
+        <div class="tabpane" data-pane="api">
+          <p class="muted">단위 API 항목을 골라 파라미터를 채우고 실행합니다. 각 항목이 시나리오의 "단위 스텝"이 됩니다.</p>
+          <div class="row">
+            <label>API 항목
+              <select id="apiOp"></select>
+            </label>
+            <button id="btnApiRun">실행</button>
+            <button id="btnApiAddStep">▶ 시나리오에 스텝 추가</button>
+          </div>
+          <div id="apiParams" class="params"></div>
+          <h3>응답</h3>
+          <pre id="apiOut" class="out"></pre>
+        </div>
+
+        <!-- Scenarios -->
+        <div class="tabpane" data-pane="scenario">
+          <div class="row">
+            <label>시나리오
+              <select id="scenarioSelect"></select>
+            </label>
+            <button id="btnScenarioLoad">불러오기</button>
+            <button id="btnScenarioNew">새로 만들기</button>
+            <button id="btnScenarioRun" class="primary">▶ 실행</button>
+            <button id="btnScenarioSave">저장</button>
+            <button id="btnScenarioDelete">삭제</button>
+          </div>
+          <div class="row">
+            <label>이름 <input type="text" id="scenarioName" placeholder="시나리오 이름"></label>
+            <button id="btnScenarioExport">내보내기(JSON)</button>
+            <label class="filebtn">가져오기(JSON)<input type="file" id="scenarioImport" accept=".json"></label>
+          </div>
+          <p class="muted small">
+            스텝은 "PKCS#11 API 시험" 탭에서 추가하거나 아래에서 직접 편집합니다.
+            출력값은 <code>$세션</code> 처럼 변수로 저장해 다음 스텝에서
+            <code>${세션}</code> 로 참조할 수 있습니다(예: openSession → 저장변수 <code>s</code>,
+            login의 session에 <code>${s}</code>).
+          </p>
+          <ol id="stepList" class="steps"></ol>
+          <h3>실행 결과</h3>
+          <table id="resultTable" class="results">
+            <thead><tr><th>#</th><th>스텝</th><th>결과</th><th>상세</th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <div id="resultSummary" class="summary"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="row">
+      <strong>로그</strong>
+      <button id="btnClearLog">지우기</button>
+    </div>
+    <pre id="log" class="log"></pre>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

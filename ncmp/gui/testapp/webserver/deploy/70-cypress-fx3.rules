@@ -1,0 +1,10 @@
+# udev rule: let the 'plugdev' group open the Cypress EZ-USB FX3 (CYUSB3KIT-003)
+# so ncmpd can drive it over libusb without root.
+#
+# Install (as root):
+#   cp 70-cypress-fx3.rules /etc/udev/rules.d/
+#   udevadm control --reload-rules && udevadm trigger
+#   # make sure the service user is in 'plugdev':  usermod -aG plugdev <user>
+#
+# VID/PID match ncmp/daemon/usb_transport.c (0x04B4 / 0x00F1).
+SUBSYSTEM=="usb", ATTR{idVendor}=="04b4", ATTR{idProduct}=="00f1", MODE="0660", GROUP="plugdev"

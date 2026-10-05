@@ -119,7 +119,7 @@ int ncmp_slot_bind(void *base, uint32_t online_mask, int32_t ck_slot_id,
 
     /* 1. Idempotent: this CK slot already owns a physical slot. */
     for (uint32_t s = 0; s < h->slot_count; ++s) {
-        if ((online_mask & (1u << s)) == 0)
+        if (NCMP_SLOT_IN_MASK(online_mask, s) == 0)
             continue;
         if (h->slots[s].bound_ck_slot == ck_slot_id) {
             chosen = (int)s;
@@ -132,7 +132,7 @@ int ncmp_slot_bind(void *base, uint32_t online_mask, int32_t ck_slot_id,
         for (uint32_t s = 0; s < h->slot_count; ++s) {
             NCMP_Slot *slot = &h->slots[s];
 
-            if ((online_mask & (1u << s)) == 0 ||
+            if (NCMP_SLOT_IN_MASK(online_mask, s) == 0 ||
                 slot->bound_ck_slot != NCMP_SLOT_UNBOUND || !slot->token.valid)
                 continue;
             if (ident_field_eq(slot->token.serial, NCMP_TI_SERIAL_LEN,
@@ -148,7 +148,7 @@ int ncmp_slot_bind(void *base, uint32_t online_mask, int32_t ck_slot_id,
         for (uint32_t s = 0; s < h->slot_count; ++s) {
             NCMP_Slot *slot = &h->slots[s];
 
-            if ((online_mask & (1u << s)) == 0 ||
+            if (NCMP_SLOT_IN_MASK(online_mask, s) == 0 ||
                 slot->bound_ck_slot != NCMP_SLOT_UNBOUND || !slot->token.valid)
                 continue;
             if (ident_field_eq(slot->token.label, NCMP_TI_LABEL_LEN,
@@ -161,7 +161,7 @@ int ncmp_slot_bind(void *base, uint32_t online_mask, int32_t ck_slot_id,
 
     /* 4. Fall back to the first unclaimed online slot. */
     for (uint32_t s = 0; s < h->slot_count; ++s) {
-        if ((online_mask & (1u << s)) == 0 ||
+        if (NCMP_SLOT_IN_MASK(online_mask, s) == 0 ||
             h->slots[s].bound_ck_slot != NCMP_SLOT_UNBOUND)
             continue;
         chosen = (int)s;

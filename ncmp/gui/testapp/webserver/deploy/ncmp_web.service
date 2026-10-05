@@ -1,0 +1,49 @@
+# systemd unit for the Token NCMP Web Test App.
+#
+# Install (as root):
+#   cp ncmp_web.service /etc/systemd/system/
+#   # edit the paths / Environment below to match your checkout, then:
+#   systemctl daemon-reload
+#   systemctl enable --now ncmp_web
+#   systemctl status ncmp_web
+#   journalctl -u ncmp_web -f        # live log
+#
+# Security: set NCMP_WEB_TOKEN to a strong secret so the REST API requires an
+# Authorization: Bearer header. Prefer binding to a trusted interface and/or
+# fronting with an HTTPS reverse proxy (see docs/testapp-web-deployment.md).
+
+[Unit]
+Description=Token NCMP Web Test App (ncmp_web)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# --- EDIT THESE for your environment ---------------------------------
+Environment=REPO=/home/pooky/workspace/opencryptoki
+Environment=NCMP_WEB_TOKEN=change-me-to-a-long-random-secret
+# Serve to the LAN. Use 127.0.0.1 if you only reach it via an SSH tunnel /
+# a reverse proxy on the same host. Point the first path at your built ncmp_web.
+ExecStart=/home/pooky/workspace/opencryptoki/ncmp/gui/testapp/build/ncmp_web \
+    --host 0.0.0.0 --port 8080 \
+    --webroot ${REPO}/ncmp/gui/testapp/web \
+    --module ${REPO}/ncmp/gui/build-standalone/libpkcs11_ncmp_p11.so \
+    --ncmpd ${REPO}/ncmp/gui/build-standalone/ncmpd \
+    --transport mock
+# ----------------------------------------------------------------------
+
+# Run as an unprivileged user that can reach the USB device (plugdev) and the
+# ncmpd socket. The real FX3 node is accessible to the 'plugdev' group via the
+# udev rule in this directory.
+User=pooky
+SupplementaryGroups=plugdev
+
+Restart=on-failure
+RestartSec=2
+# Hardening (loosen if it blocks USB / socket access in your setup).
+NoNewPrivileges=true
+PrivateTmp=false
+
+[Install]
+WantedBy=multi-user.target

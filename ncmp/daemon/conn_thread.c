@@ -24,7 +24,11 @@ static uint32_t ncmpd_online_mask(void *shm_base)
     NCMP_ShmHeader *h = (NCMP_ShmHeader *)shm_base;
     uint32_t mask = 0;
 
-    for (uint32_t s = 0; s < h->slot_count; ++s) {
+    /* The reply mask is a uint32; only the first NCMP_SLOT_MASK_BITS slots are
+     * representable (see ncmp_limits.h / docs/slot-scaling-design.md). */
+    uint32_t nbits = h->slot_count < NCMP_SLOT_MASK_BITS ? h->slot_count
+                                                         : NCMP_SLOT_MASK_BITS;
+    for (uint32_t s = 0; s < nbits; ++s) {
         if (h->slots[s].state == NCMP_SLOT_ONLINE)
             mask |= (1u << s);
     }

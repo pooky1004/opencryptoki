@@ -52,5 +52,11 @@ add_subdirectory(stdll)
 add_subdirectory(tests)
 # Developer GUIs: the mock HSM socket server (C) that the PySide6 apps drive.
 add_subdirectory(gui/server)
+# Test App native layer: libncmp_testapp.so (C application layer). It dlopen's
+# the facade STDLL at runtime, so it has no build-time dependency on it.
+add_subdirectory(gui/testapp/native)
+# Test App web server: ncmp_web serves the browser UI and a JSON REST API over
+# the native app_* layer, for use from an external host.
+add_subdirectory(gui/testapp/webserver)
 
 message(STATUS "Token NCMP: ENABLE_MOCK_TOKEN=${ENABLE_MOCK_TOKEN}")

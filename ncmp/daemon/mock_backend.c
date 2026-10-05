@@ -36,7 +36,7 @@ static int mock_be_probe(uint32_t *out_slot_mask)
         return NCMP_ERR_INVAL;
     *out_slot_mask = 0;
     for (uint32_t s = 0; s < NCMP_MOCK_SLOT_COUNT &&
-                         s < PKCS11_MAX_SLOT_COUNT; ++s)
+                         s < NCMP_SLOT_SCAN_MAX; ++s)
         *out_slot_mask |= (1u << s);
     return NCMP_OK;
 }

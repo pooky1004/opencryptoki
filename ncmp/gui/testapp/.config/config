@@ -1,0 +1,41 @@
+# Token NCMP - Web Test App configuration (.config/config).
+#
+# ncmp_web loads this file first (lowest precedence), then environment
+# variables, then CLI arguments override it:
+#     built-in defaults  <  this file  <  env  <  CLI flags
+#
+# Search order for the file: --config PATH, else $NCMP_WEB_CONFIG, else
+# ./.config/config (relative to the working directory). So running ncmp_web
+# from ncmp/gui/testapp/ picks this up automatically; otherwise pass
+# --config /path/to/.config/config.
+#
+# Format: "key = value", '#'/';' comment lines, optional surrounding quotes.
+
+# --- HTTP server ---------------------------------------------------------
+# Address to bind. 0.0.0.0 = reachable from other hosts on the network;
+# 127.0.0.1 = local only (use with an SSH tunnel / reverse proxy).
+host = 0.0.0.0
+# TCP port browsers connect to.
+port = 8080
+
+# Static web UI directory (relative to the working directory or absolute).
+webroot = web
+
+# Bearer token for the REST API. Empty = no authentication. Set a long random
+# secret when serving to a network, and enter the same value in the UI's
+# "서버 토큰" box.
+token =
+
+# --- Token backend -------------------------------------------------------
+# Default facade STDLL loaded by the "로드" button when the UI field is blank.
+module = ../build-standalone/libpkcs11_ncmp_p11.so
+# ncmpd binary launched by the "데몬 시작" button.
+ncmpd = ../build-standalone/ncmpd
+# Default daemon transport: real | mock | socket.
+transport = mock
+# UNIX socket shared between the facade and ncmpd. Empty = auto (/tmp/..).
+sock =
+
+# --- Test files ----------------------------------------------------------
+# Where generated test files (for init/update/final + SW compare) are kept.
+filedir = /tmp/ncmp_web_files

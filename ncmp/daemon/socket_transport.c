@@ -136,7 +136,7 @@ static int sock_probe(uint32_t *out_slot_mask)
         return NCMP_ERR_INVAL;
     *out_slot_mask = 0;
     /* A slot is "present" if its data port accepts a connection right now. */
-    for (uint32_t s = 0; s < n && s < PKCS11_MAX_SLOT_COUNT; ++s) {
+    for (uint32_t s = 0; s < n && s < NCMP_SLOT_SCAN_MAX; ++s) {
         int fd = connect_tcp(host, base + (int)s);
         if (fd >= 0) {
             *out_slot_mask |= (1u << s);

@@ -1,0 +1,690 @@
+/*
+ * Token NCMP - Web Test App frontend.
+ *
+ * Talks to the C web server (ncmp_web) over JSON. Three testing surfaces:
+ *   - the per-slot tabs (token / session / crypto) for ad-hoc use,
+ *   - "PKCS#11 API 시험": run a single unit API item with chosen params,
+ *   - "시나리오": compose unit items into a scenario (with variables + pass/fail
+ *     assertions), run it, and see per-step results; save/load/export.
+ */
+'use strict';
+
+/* ------------------------------------------------------------------ */
+/* Core: fetch wrapper + helpers                                      */
+/* ------------------------------------------------------------------ */
+
+const $ = (sel) => document.querySelector(sel);
+const el = (tag, props = {}, ...kids) => {
+  const e = Object.assign(document.createElement(tag), props);
+  for (const k of kids) e.append(k);
+  return e;
+};
+
+let SELECTED_SLOT = null;
+let CUR_SESSION = null;
+
+function authToken() { return $('#authToken').value.trim(); }
+
+async function api(path, method = 'GET', body = null) {
+  const headers = {};
+  if (body) headers['Content-Type'] = 'application/json';
+  const t = authToken();
+  if (t) headers['Authorization'] = 'Bearer ' + t;
+  const res = await fetch(path, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  let data;
+  try { data = await res.json(); }
+  catch { data = { rc: -99, ok: false, error: 'invalid JSON (HTTP ' + res.status + ')' }; }
+  return data;
+}
+
+function log(msg) {
+  const now = new Date().toTimeString().slice(0, 8);
+  const node = $('#log');
+  node.textContent += `[${now}] ${msg}\n`;
+  node.scrollTop = node.scrollHeight;
+}
+
+function describe(d) {
+  if (!d) return '(no response)';
+  if (d.ok) return 'OK';
+  return `rc=${d.rc} ${d.error || ''}`.trim();
+}
+
+/* ------------------------------------------------------------------ */
+/* Status polling + daemon / facade lifecycle                         */
+/* ------------------------------------------------------------------ */
+
+async function refreshStatus() {
+  try {
+    const s = await api('/api/status');
+    const on = s.daemonRunning;
+    $('#daemonDot').className = 'dot ' + (on ? 'on' : 'off');
+    $('#daemonText').textContent = on
+      ? `ncmpd 실행 중 (${s.transport})`
+      : 'ncmpd 정지됨';
+    if (s.configPath !== undefined)
+      $('#cfgInfo').textContent =
+        `· cfg: ${s.configPath || '(none)'} · :${s.port}${s.authRequired ? ' · 🔒' : ''}`;
+    if (s.defaultModule && !$('#modulePath').value)
+      $('#modulePath').placeholder = s.defaultModule + ' (서버 기본값)';
+  } catch {
+    $('#daemonDot').className = 'dot off';
+    $('#daemonText').textContent = '서버 연결 안 됨';
+  }
+}
+
+async function daemonStart() {
+  const d = await api('/api/daemon/start', 'POST', { transport: $('#transport').value });
+  log('데몬 시작: ' + describe(d) + (d.pid ? ` (pid ${d.pid})` : ''));
+  refreshStatus();
+}
+async function daemonStop() {
+  await api('/api/daemon/stop', 'POST', {});
+  log('데몬 정지 요청');
+  refreshStatus();
+}
+async function loadModule() {
+  const d = await api('/api/load', 'POST', { module: $('#modulePath').value.trim() });
+  log('facade 로드: ' + describe(d));
+}
+async function initialize() {
+  const d = await api('/api/initialize', 'POST', {});
+  log('C_Initialize: ' + describe(d));
+  if (d.ok) {
+    const lib = await api('/api/library');
+    if (lib.ok && lib.info)
+      $('#libInfo').textContent =
+        `Cryptoki ${lib.info.cryptokiVersion} · ${lib.info.manufacturer} · ${lib.info.libDescription} (v${lib.info.libVersion})`;
+    refreshSlots();
+  }
+}
+async function finalize() {
+  const d = await api('/api/finalize', 'POST', {});
+  log('C_Finalize: ' + describe(d));
+  $('#libInfo').textContent = '';
+  $('#slotList').innerHTML = '';
+  SELECTED_SLOT = null;
+}
+async function dlsymReport() {
+  const d = await api('/api/dlsym');
+  if (d.ok && d.report) {
+    const found = Object.values(d.report).filter(Boolean).length;
+    log(`dlsym 점검: ${found}/${Object.keys(d.report).length} 함수 확인`);
+  } else log('dlsym 점검 실패: ' + describe(d));
+}
+
+/* ------------------------------------------------------------------ */
+/* Slots + per-slot tabs                                              */
+/* ------------------------------------------------------------------ */
+
+async function refreshSlots() {
+  const d = await api('/api/slots');
+  const ul = $('#slotList');
+  ul.innerHTML = '';
+  if (!d.ok) { log('슬롯 조회 실패: ' + describe(d)); return; }
+  log(`활성 슬롯 ${d.slots.length}개: [${d.slots.join(', ')}]`);
+  for (const id of d.slots) {
+    const li = el('li', { textContent: `Slot ${id}` });
+    li.onclick = () => selectSlot(id, li);
+    ul.append(li);
+  }
+  if (d.slots.length) ul.firstChild.click();
+}
+
+function selectSlot(id, li) {
+  SELECTED_SLOT = id;
+  CUR_SESSION = null;
+  $('#sessionText').textContent = '세션 없음';
+  $('#sessionInfo').textContent = '';
+  document.querySelectorAll('#slotList li').forEach((n) => n.classList.remove('sel'));
+  li.classList.add('sel');
+  // keep the API tester's slot field in sync
+  const sf = document.querySelector('#apiParams [data-pk="slot"]');
+  if (sf) sf.value = id;
+}
+
+async function tokenInfo() {
+  if (SELECTED_SLOT === null) return log('먼저 슬롯을 선택하세요');
+  const t = await api('/api/token', 'POST', { slot: SELECTED_SLOT });
+  if (!t.ok) return log('C_GetTokenInfo 실패: ' + describe(t));
+  const ti = t.token;
+  $('#tokenInfo').textContent =
+    `label        : ${ti.label}\nmanufacturer : ${ti.manufacturer}\nmodel        : ${ti.model}\n` +
+    `serial       : ${ti.serial}\nflags        : 0x${ti.flags.toString(16)}\n` +
+    `PIN len      : ${ti.minPin}..${ti.maxPin}\nmax sessions : ${ti.maxSession}\n` +
+    `HW / FW ver  : ${ti.hwVersion} / ${ti.fwVersion}`;
+  const m = await api('/api/mechanisms', 'POST', { slot: SELECTED_SLOT });
+  const ul = $('#mechList'); ul.innerHTML = '';
+  if (m.ok) for (const me of m.mechanisms)
+    ul.append(el('li', { textContent: `${me.name}  (code ${me.code})` }));
+  log(`슬롯 ${SELECTED_SLOT}: 토큰 정보 + ${m.ok ? m.mechanisms.length : 0} 메커니즘`);
+}
+
+async function openSession() {
+  if (SELECTED_SLOT === null) return log('먼저 슬롯을 선택하세요');
+  const d = await api('/api/session/open', 'POST', { slot: SELECTED_SLOT, rw: $('#rwSession').checked ? 1 : 0 });
+  if (!d.ok) return log('C_OpenSession 실패: ' + describe(d));
+  CUR_SESSION = d.session;
+  $('#sessionText').textContent = `세션 핸들 ${d.session}`;
+  await sessionInfo();
+  log(`슬롯 ${SELECTED_SLOT}: 세션 ${d.session} 열림`);
+}
+async function closeSession() {
+  if (CUR_SESSION === null) return;
+  const d = await api('/api/session/close', 'POST', { session: CUR_SESSION });
+  log(`세션 ${CUR_SESSION} 닫기: ${describe(d)}`);
+  CUR_SESSION = null;
+  $('#sessionText').textContent = '세션 없음';
+  $('#sessionInfo').textContent = '';
+}
+async function sessionInfo() {
+  if (CUR_SESSION === null) return;
+  const d = await api('/api/session/info', 'POST', { session: CUR_SESSION });
+  if (d.ok) $('#sessionInfo').textContent =
+    `slot ${d.session.slot}, state ${d.session.state}, flags 0x${d.session.flags.toString(16)}, deviceError ${d.session.deviceError}`;
+}
+async function login() {
+  if (CUR_SESSION === null) return log('먼저 세션을 여세요');
+  const d = await api('/api/login', 'POST', { session: CUR_SESSION, userType: Number($('#userType').value), pin: $('#pin').value });
+  log('C_Login: ' + describe(d));
+  if (d.ok) { $('#sessionText').textContent = `세션 핸들 ${CUR_SESSION} (로그인됨)`; sessionInfo(); }
+}
+async function logout() {
+  if (CUR_SESSION === null) return;
+  const d = await api('/api/logout', 'POST', { session: CUR_SESSION });
+  log('C_Logout: ' + describe(d));
+  if (d.ok) { $('#sessionText').textContent = `세션 핸들 ${CUR_SESSION}`; sessionInfo(); }
+}
+async function genRandom() {
+  if (CUR_SESSION === null) return log('먼저 세션을 여세요');
+  const d = await api('/api/random', 'POST', { session: CUR_SESSION, length: Number($('#randLen').value) });
+  $('#cryptoOut').textContent = d.ok ? `C_GenerateRandom(${d.length}) =\n${hexWrap(d.hex)}` : '오류: ' + describe(d);
+}
+async function doDigest() {
+  if (CUR_SESSION === null) return log('먼저 세션을 여세요');
+  const d = await api('/api/digest', 'POST', { session: CUR_SESSION, mech: Number($('#digestMech').value), input: $('#digestInput').value });
+  $('#cryptoOut').textContent = d.ok ? `digest [${d.length}B] =\n${hexWrap(d.hex)}` : '오류: ' + describe(d);
+}
+async function gcmSelftest() {
+  if (CUR_SESSION === null) return log('먼저 세션을 여세요');
+  const d = await api('/api/gcm-selftest', 'POST', { session: CUR_SESSION });
+  $('#cryptoOut').textContent = (d.ok ? 'AES-GCM 자가검증 OK — ' : '실패 — ') + (d.detail || describe(d));
+}
+function hexWrap(hex) {
+  return (hex.match(/.{1,32}/g) || []).map((r) => r.match(/.{1,2}/g).join(' ')).join('\n');
+}
+
+/* ------------------------------------------------------------------ */
+/* File generation + real-target vs software verification             */
+/* ------------------------------------------------------------------ */
+
+async function genFile() {
+  const size = Math.max(0, Math.floor(Number($('#fileSize').value) * Number($('#fileUnit').value)));
+  const name = $('#fileName').value.trim();
+  const d = await api('/api/genfile', 'POST', name ? { size, name } : { size });
+  if (d.ok) {
+    $('#genFileInfo').textContent = `생성됨: ${d.name} (${d.size}B), SW SHA-256=${d.sha256.slice(0, 16)}…`;
+    log(`파일 생성: ${d.name} ${d.size}B`);
+    if (size < 65536) log('주의: init/update/final 시험에는 64KB(65536) 이상을 권장합니다.');
+    await refreshFiles(d.name);
+  } else log('파일 생성 실패: ' + describe(d));
+}
+
+async function refreshFiles(select) {
+  const d = await api('/api/files');
+  const sel = $('#verifyFile');
+  sel.innerHTML = '';
+  if (d.ok) for (const f of d.files)
+    sel.append(el('option', { value: f.name, textContent: `${f.name} (${f.size}B)` }));
+  if (select) sel.value = select;
+}
+
+async function digestFileOnToken() {
+  if (CUR_SESSION === null) return log('먼저 세션을 여세요(세션 탭)');
+  const name = $('#verifyFile').value;
+  if (!name) return log('파일을 먼저 생성/선택하세요');
+  const d = await api('/api/digest-file', 'POST', { session: CUR_SESSION, mech: Number($('#verifyMech').value), name });
+  $('#compareVerdict').className = 'summary';
+  $('#compareVerdict').textContent = '';
+  $('#fileOut').textContent = d.ok
+    ? `토큰 multipart 해시 (${name}, ${d.bytes}B)\n${d.hex}`
+    : '오류: ' + describe(d);
+}
+
+async function compareFile() {
+  if (CUR_SESSION === null) return log('먼저 세션을 여세요(세션 탭)');
+  const name = $('#verifyFile').value;
+  if (!name) return log('파일을 먼저 생성/선택하세요');
+  const d = await api('/api/digest-compare', 'POST', { session: CUR_SESSION, mech: Number($('#verifyMech').value), name });
+  const v = $('#compareVerdict');
+  if (!d.ok && d.match === undefined) {
+    v.className = 'summary fail';
+    v.textContent = '비교 실패: ' + describe(d);
+    $('#fileOut').textContent = '';
+    return;
+  }
+  v.className = 'summary ' + (d.match ? 'pass' : 'fail');
+  v.textContent = d.match
+    ? `✔ MATCH — 실 타겟 결과가 SW 계산과 일치 (${d.bytes}B)`
+    : `✘ MISMATCH — 실 타겟 결과가 SW와 다름 (${d.bytes}B) · mock 토큰은 정상적으로 불일치`;
+  $('#fileOut').textContent =
+    `bytes : ${d.bytes}\ntoken : ${d.tokenHex}\nSW    : ${d.swHex}\nmatch : ${d.match}`;
+  log(`비교(${name}): match=${d.match}`);
+}
+
+/* ------------------------------------------------------------------ */
+/* Unit API catalog (shared by the API tester and the scenario engine) */
+/* ------------------------------------------------------------------ */
+
+const DIGEST_OPTS = [
+  ['592', 'SHA-256'], ['624', 'SHA-512'], ['693', 'SHA3-224'],
+  ['688', 'SHA3-256'], ['704', 'SHA3-384'], ['720', 'SHA3-512'],
+];
+const USER_OPTS = [['1', 'User'], ['0', 'SO'], ['2', 'ContextSpecific']];
+const TRANSPORT_OPTS = [['mock', 'mock'], ['real', 'real'], ['socket', 'socket']];
+
+// Each op: how to call it + what params it needs + which response field it can save.
+const OPS = {
+  daemonStart: { label: '데몬 시작', method: 'POST', path: '/api/daemon/start',
+    params: [{ k: 'transport', t: 'select', opts: TRANSPORT_OPTS, def: 'mock' }] },
+  daemonStop: { label: '데몬 정지', method: 'POST', path: '/api/daemon/stop', params: [] },
+  load: { label: 'facade 로드(dlopen)', method: 'POST', path: '/api/load',
+    params: [{ k: 'module', t: 'text', def: '', opt: true, ph: '비우면 서버 기본값' }] },
+  initialize: { label: 'C_Initialize', method: 'POST', path: '/api/initialize', params: [] },
+  finalize: { label: 'C_Finalize', method: 'POST', path: '/api/finalize', params: [] },
+  dlsym: { label: 'dlsym 점검', method: 'GET', path: '/api/dlsym', params: [] },
+  library: { label: 'C_GetInfo(라이브러리)', method: 'GET', path: '/api/library', params: [] },
+  slots: { label: 'C_GetSlotList', method: 'GET', path: '/api/slots', params: [] },
+  tokenInfo: { label: 'C_GetTokenInfo', method: 'POST', path: '/api/token',
+    params: [{ k: 'slot', t: 'number', def: 0 }] },
+  mechanisms: { label: 'C_GetMechanismList', method: 'POST', path: '/api/mechanisms',
+    params: [{ k: 'slot', t: 'number', def: 0 }] },
+  openSession: { label: 'C_OpenSession', method: 'POST', path: '/api/session/open',
+    params: [{ k: 'slot', t: 'number', def: 0 }, { k: 'rw', t: 'number', def: 1 }], save: 'session' },
+  closeSession: { label: 'C_CloseSession', method: 'POST', path: '/api/session/close',
+    params: [{ k: 'session', t: 'text', def: '' }] },
+  sessionInfo: { label: 'C_GetSessionInfo', method: 'POST', path: '/api/session/info',
+    params: [{ k: 'session', t: 'text', def: '' }] },
+  login: { label: 'C_Login', method: 'POST', path: '/api/login',
+    params: [{ k: 'session', t: 'text', def: '' }, { k: 'userType', t: 'select', opts: USER_OPTS, def: '1' }, { k: 'pin', t: 'text', def: '1234' }] },
+  logout: { label: 'C_Logout', method: 'POST', path: '/api/logout',
+    params: [{ k: 'session', t: 'text', def: '' }] },
+  random: { label: 'C_GenerateRandom', method: 'POST', path: '/api/random',
+    params: [{ k: 'session', t: 'text', def: '' }, { k: 'length', t: 'number', def: 16 }], save: 'hex' },
+  digest: { label: 'C_Digest', method: 'POST', path: '/api/digest',
+    params: [{ k: 'session', t: 'text', def: '' }, { k: 'mech', t: 'select', opts: DIGEST_OPTS, def: '592' }, { k: 'input', t: 'text', def: 'abc' }], save: 'hex' },
+  gcmSelftest: { label: 'AES-GCM 자가검증', method: 'POST', path: '/api/gcm-selftest',
+    params: [{ k: 'session', t: 'text', def: '' }] },
+  genfile: { label: '테스트 파일 생성', method: 'POST', path: '/api/genfile',
+    params: [{ k: 'size', t: 'number', def: 100000 }, { k: 'name', t: 'text', def: '', opt: true, ph: '(자동)' }], save: 'name' },
+  digestFile: { label: '파일 multipart 해시(토큰)', method: 'POST', path: '/api/digest-file',
+    params: [{ k: 'session', t: 'text', def: '' }, { k: 'mech', t: 'select', opts: DIGEST_OPTS, def: '592' }, { k: 'name', t: 'text', def: '' }], save: 'hex' },
+  digestCompare: { label: '실타겟 vs SW 비교', method: 'POST', path: '/api/digest-compare',
+    params: [{ k: 'session', t: 'text', def: '' }, { k: 'mech', t: 'select', opts: DIGEST_OPTS, def: '592' }, { k: 'name', t: 'text', def: '' }], save: 'match' },
+};
+
+const NUMBER_KEYS = new Set(['slot', 'rw', 'length', 'mech', 'userType', 'session']);
+
+// Build a request body from a param map, substituting ${vars} and coercing types.
+function buildBody(opId, values, vars) {
+  const op = OPS[opId];
+  if (op.method === 'GET' || op.params.length === 0) return null;
+  const body = {};
+  for (const p of op.params) {
+    let v = values[p.k];
+    if (v === undefined || v === null) v = p.def;
+    v = subst(String(v), vars);
+    if (p.opt && v === '') continue;
+    if (NUMBER_KEYS.has(p.k) && v !== '' && !isNaN(Number(v))) body[p.k] = Number(v);
+    else body[p.k] = v;
+  }
+  return body;
+}
+
+function subst(str, vars) {
+  return str.replace(/\$\{([^}]+)\}/g, (_, name) => (vars && name in vars) ? vars[name] : '');
+}
+
+async function runOp(opId, values, vars) {
+  const op = OPS[opId];
+  const body = buildBody(opId, values, vars);
+  return api(op.path, op.method, body);
+}
+
+/* ------------------------------------------------------------------ */
+/* API tester tab                                                     */
+/* ------------------------------------------------------------------ */
+
+function fillApiOpSelect() {
+  const sel = $('#apiOp');
+  sel.innerHTML = '';
+  for (const [id, op] of Object.entries(OPS))
+    sel.append(el('option', { value: id, textContent: `${id} — ${op.label}` }));
+  sel.onchange = renderApiParams;
+  renderApiParams();
+}
+
+function renderApiParams() {
+  const op = OPS[$('#apiOp').value];
+  const box = $('#apiParams');
+  box.innerHTML = '';
+  for (const p of op.params) {
+    box.append(el('span', { className: 'pk', textContent: p.k, dataset: {} }));
+    let input;
+    if (p.t === 'select') {
+      input = el('select');
+      for (const [val, lab] of p.opts) input.append(el('option', { value: val, textContent: lab }));
+      input.value = p.def;
+    } else {
+      input = el('input', { type: p.t === 'number' ? 'number' : 'text', value: p.def ?? '' });
+      if (p.ph) input.placeholder = p.ph;
+    }
+    input.dataset.pk = p.k;
+    if (p.k === 'slot' && SELECTED_SLOT !== null) input.value = SELECTED_SLOT;
+    if (p.k === 'session' && CUR_SESSION !== null) input.value = CUR_SESSION;
+    box.append(input);
+  }
+}
+
+function currentApiValues() {
+  const values = {};
+  document.querySelectorAll('#apiParams [data-pk]').forEach((n) => { values[n.dataset.pk] = n.value; });
+  return values;
+}
+
+async function apiRun() {
+  const opId = $('#apiOp').value;
+  const d = await runOp(opId, currentApiValues(), scenarioVars);
+  $('#apiOut').textContent = JSON.stringify(d, null, 2);
+  log(`API 시험 ${opId}: ${describe(d)}`);
+}
+
+/* ------------------------------------------------------------------ */
+/* Scenario engine                                                    */
+/* ------------------------------------------------------------------ */
+
+let scenarioVars = {};                 // shared ${var} scope (also usable by API tester)
+let working = { name: '새 시나리오', steps: [] };
+
+const BUILTIN = {
+  'Mock 전체 왕복': { builtin: true, steps: [
+    { op: 'daemonStart', params: { transport: 'mock' } },
+    { op: 'load', params: { module: '' } },
+    { op: 'initialize', params: {} },
+    { op: 'slots', params: {} },
+    { op: 'openSession', params: { slot: 0, rw: 1 }, saveAs: 's' },
+    { op: 'login', params: { session: '${s}', userType: '1', pin: '1234' } },
+    { op: 'random', params: { session: '${s}', length: 16 } },
+    { op: 'digest', params: { session: '${s}', mech: '592', input: 'abc' } },
+    { op: 'gcmSelftest', params: { session: '${s}' } },
+    { op: 'logout', params: { session: '${s}' } },
+    { op: 'closeSession', params: { session: '${s}' } },
+    { op: 'finalize', params: {} },
+  ] },
+  '초기화 & 슬롯 조회': { builtin: true, steps: [
+    { op: 'load', params: { module: '' } },
+    { op: 'initialize', params: {} },
+    { op: 'slots', params: {} },
+    { op: 'tokenInfo', params: { slot: 0 } },
+    { op: 'mechanisms', params: { slot: 0 } },
+  ] },
+  '세션/로그인 수명주기': { builtin: true, steps: [
+    { op: 'openSession', params: { slot: 0, rw: 1 }, saveAs: 's' },
+    { op: 'sessionInfo', params: { session: '${s}' } },
+    { op: 'login', params: { session: '${s}', userType: '1', pin: '1234' } },
+    { op: 'logout', params: { session: '${s}' } },
+    { op: 'closeSession', params: { session: '${s}' } },
+  ] },
+  '음성: 잘못된 PIN 로그인 실패': { builtin: true, steps: [
+    { op: 'openSession', params: { slot: 0, rw: 1 }, saveAs: 's' },
+    { op: 'login', params: { session: '${s}', userType: '1', pin: '9999' }, expect: 'fail' },
+    { op: 'closeSession', params: { session: '${s}' } },
+  ] },
+  '대용량 해시 검증 (실타겟, ≥64KB)': { builtin: true, steps: [
+    { op: 'load', params: { module: '' } },
+    { op: 'initialize', params: {} },
+    { op: 'openSession', params: { slot: 0, rw: 1 }, saveAs: 's' },
+    { op: 'genfile', params: { size: 131072, name: 'verify.bin' } },
+    // 실 타겟이면 토큰 multipart 결과가 SW(OpenSSL)와 일치해야 한다(일치 기대).
+    // mock 토큰은 실제 해시가 아니므로 이 스텝은 FAIL로 표시된다(정상).
+    { op: 'digestCompare', params: { session: '${s}', mech: '592', name: 'verify.bin' }, expect: 'match' },
+    { op: 'closeSession', params: { session: '${s}' } },
+    { op: 'finalize', params: {} },
+  ] },
+};
+
+function loadSavedScenarios() {
+  try { return JSON.parse(localStorage.getItem('ncmp_scenarios') || '{}'); }
+  catch { return {}; }
+}
+function saveScenarios(obj) { localStorage.setItem('ncmp_scenarios', JSON.stringify(obj)); }
+
+function fillScenarioSelect() {
+  const sel = $('#scenarioSelect');
+  sel.innerHTML = '';
+  for (const name of Object.keys(BUILTIN))
+    sel.append(el('option', { value: 'builtin:' + name, textContent: '★ ' + name }));
+  for (const name of Object.keys(loadSavedScenarios()))
+    sel.append(el('option', { value: 'saved:' + name, textContent: name }));
+}
+
+function loadScenario() {
+  const v = $('#scenarioSelect').value;
+  if (!v) return;
+  const [kind, name] = [v.slice(0, v.indexOf(':')), v.slice(v.indexOf(':') + 1)];
+  const src = kind === 'builtin' ? BUILTIN[name] : loadSavedScenarios()[name];
+  if (!src) return;
+  working = { name, steps: JSON.parse(JSON.stringify(src.steps)) };
+  $('#scenarioName').value = kind === 'builtin' ? name + ' (사본)' : name;
+  renderSteps();
+  log(`시나리오 불러오기: ${name} (${working.steps.length} 스텝)`);
+}
+
+function newScenario() {
+  working = { name: '새 시나리오', steps: [] };
+  $('#scenarioName').value = '';
+  renderSteps();
+}
+
+function addStepFromApi() {
+  const opId = $('#apiOp').value;
+  working.steps.push({ op: opId, params: currentApiValues() });
+  renderSteps();
+  switchTab('scenario');
+  log(`시나리오에 스텝 추가: ${opId}`);
+}
+
+function renderSteps() {
+  const ol = $('#stepList');
+  ol.innerHTML = '';
+  working.steps.forEach((step, i) => {
+    const op = OPS[step.op];
+    const paramStr = Object.entries(step.params || {}).map(([k, v]) => `${k}=${v}`).join(', ');
+    const head = el('div', { className: 'sh' },
+      el('b', { textContent: step.op }),
+      el('span', { className: 'meta', textContent: op ? op.label : '(알 수 없는 op)' }));
+
+    // save-as control (only meaningful if the op returns a saveable field)
+    const saveWrap = el('label', { className: 'meta' });
+    saveWrap.append('저장변수 ');
+    const saveInp = el('input', { type: 'text', value: step.saveAs || '', size: 4, placeholder: op && op.save ? op.save : '' });
+    saveInp.oninput = () => { step.saveAs = saveInp.value.trim() || undefined; };
+    saveWrap.append(saveInp);
+
+    // expect control
+    const expSel = el('select');
+    expSel.append(el('option', { value: 'ok', textContent: '성공 기대' }));
+    expSel.append(el('option', { value: 'fail', textContent: '실패 기대' }));
+    expSel.append(el('option', { value: 'match', textContent: '일치 기대(비교)' }));
+    expSel.append(el('option', { value: 'nomatch', textContent: '불일치 기대(비교)' }));
+    expSel.value = step.expect || 'ok';
+    expSel.onchange = () => { step.expect = expSel.value; };
+    expSel.className = 'meta';
+
+    const up = el('button', { textContent: '↑', title: '위로' });
+    up.onclick = () => { if (i > 0) { [working.steps[i - 1], working.steps[i]] = [working.steps[i], working.steps[i - 1]]; renderSteps(); } };
+    const del = el('button', { textContent: '✕', className: 'x', title: '삭제' });
+    del.onclick = () => { working.steps.splice(i, 1); renderSteps(); };
+
+    head.append(saveWrap, expSel, up, del);
+    const li = el('li', {}, head);
+    if (paramStr) li.append(el('div', { className: 'meta', textContent: paramStr }));
+    ol.append(li);
+  });
+}
+
+async function runScenario() {
+  scenarioVars = {};
+  const tbody = $('#resultTable tbody');
+  tbody.innerHTML = '';
+  let pass = 0, fail = 0;
+  log(`시나리오 실행 시작: ${working.name} (${working.steps.length} 스텝)`);
+
+  for (let i = 0; i < working.steps.length; i++) {
+    const step = working.steps[i];
+    let d, ok, detail;
+    try {
+      d = await runOp(step.op, step.params || {}, scenarioVars);
+      const want = step.expect || 'ok';
+      if (want === 'match') ok = !!(d && d.match === true);
+      else if (want === 'nomatch') ok = !!(d && d.match === false);
+      else if (want === 'fail') ok = !d.ok;
+      else ok = !!d.ok;
+      if (ok && step.saveAs && d[OPS[step.op].save] !== undefined)
+        scenarioVars[step.saveAs] = d[OPS[step.op].save];
+      detail = summarize(d, step);
+    } catch (e) {
+      d = null; ok = false; detail = 'exception: ' + e.message;
+    }
+    ok ? pass++ : fail++;
+    const tr = el('tr', {},
+      el('td', { textContent: String(i + 1) }),
+      el('td', { textContent: `${step.op}${step.expect === 'fail' ? ' (실패기대)' : ''}` }),
+      el('td', { className: ok ? 'pass' : 'fail', textContent: ok ? 'PASS' : 'FAIL' }),
+      el('td', { className: 'detail', textContent: detail }));
+    tbody.append(tr);
+    if (!ok) log(`  스텝 ${i + 1} ${step.op}: FAIL — ${detail}`);
+  }
+  const sum = $('#resultSummary');
+  sum.className = 'summary ' + (fail === 0 ? 'pass' : 'fail');
+  sum.textContent = `결과: ${pass} PASS / ${fail} FAIL (총 ${pass + fail})`;
+  log(`시나리오 실행 완료: ${pass} PASS / ${fail} FAIL`);
+}
+
+function summarize(d, step) {
+  if (!d) return '(응답 없음)';
+  const parts = [`rc=${d.rc}`];
+  if (d.error) parts.push(d.error);
+  const save = OPS[step.op].save;
+  if (d.ok && save && d[save] !== undefined) parts.push(`${save}=${String(d[save]).slice(0, 48)}`);
+  if (d.slots) parts.push(`slots=[${d.slots.join(',')}]`);
+  if (d.session && typeof d.session === 'object') parts.push(`state=${d.session.state}`);
+  if (d.bytes !== undefined) parts.push(`bytes=${d.bytes}`);
+  if (d.match !== undefined) parts.push(`match=${d.match}`);
+  if (d.detail) parts.push(d.detail);
+  return parts.join(' · ');
+}
+
+function saveScenario() {
+  const name = $('#scenarioName').value.trim();
+  if (!name) return log('시나리오 이름을 입력하세요');
+  const all = loadSavedScenarios();
+  all[name] = { steps: working.steps };
+  saveScenarios(all);
+  working.name = name;
+  fillScenarioSelect();
+  $('#scenarioSelect').value = 'saved:' + name;
+  log(`시나리오 저장: ${name}`);
+}
+function deleteScenario() {
+  const v = $('#scenarioSelect').value;
+  if (!v.startsWith('saved:')) return log('내장 시나리오는 삭제할 수 없습니다');
+  const name = v.slice('saved:'.length);
+  const all = loadSavedScenarios();
+  delete all[name];
+  saveScenarios(all);
+  fillScenarioSelect();
+  log(`시나리오 삭제: ${name}`);
+}
+function exportScenario() {
+  const blob = new Blob([JSON.stringify({ name: $('#scenarioName').value || working.name, steps: working.steps }, null, 2)], { type: 'application/json' });
+  const a = el('a', { href: URL.createObjectURL(blob), download: (($('#scenarioName').value || 'scenario') + '.json') });
+  a.click(); URL.revokeObjectURL(a.href);
+}
+function importScenario(ev) {
+  const f = ev.target.files[0];
+  if (!f) return;
+  const r = new FileReader();
+  r.onload = () => {
+    try {
+      const o = JSON.parse(r.result);
+      working = { name: o.name || f.name, steps: o.steps || [] };
+      $('#scenarioName').value = working.name;
+      renderSteps();
+      log(`시나리오 가져오기: ${working.name} (${working.steps.length} 스텝)`);
+    } catch (e) { log('가져오기 실패: ' + e.message); }
+  };
+  r.readAsText(f);
+}
+
+/* ------------------------------------------------------------------ */
+/* Tabs + wiring                                                      */
+/* ------------------------------------------------------------------ */
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
+  document.querySelectorAll('.tabpane').forEach((p) => p.classList.toggle('active', p.dataset.pane === name));
+}
+
+function wire() {
+  document.querySelectorAll('.tab').forEach((t) => (t.onclick = () => switchTab(t.dataset.tab)));
+
+  $('#btnDaemonStart').onclick = daemonStart;
+  $('#btnDaemonStop').onclick = daemonStop;
+  $('#btnLoad').onclick = loadModule;
+  $('#btnInit').onclick = initialize;
+  $('#btnFinal').onclick = finalize;
+  $('#btnSlots').onclick = refreshSlots;
+  $('#btnDlsym').onclick = dlsymReport;
+
+  $('#btnTokenInfo').onclick = tokenInfo;
+  $('#btnOpenSession').onclick = openSession;
+  $('#btnCloseSession').onclick = closeSession;
+  $('#btnLogin').onclick = login;
+  $('#btnLogout').onclick = logout;
+  $('#btnRandom').onclick = genRandom;
+  $('#btnDigest').onclick = doDigest;
+  $('#btnGcm').onclick = gcmSelftest;
+
+  $('#btnGenFile').onclick = genFile;
+  $('#btnRefreshFiles').onclick = () => refreshFiles();
+  $('#btnDigestFile').onclick = digestFileOnToken;
+  $('#btnCompare').onclick = compareFile;
+
+  $('#btnApiRun').onclick = apiRun;
+  $('#btnApiAddStep').onclick = addStepFromApi;
+
+  $('#btnScenarioLoad').onclick = loadScenario;
+  $('#btnScenarioNew').onclick = newScenario;
+  $('#btnScenarioRun').onclick = runScenario;
+  $('#btnScenarioSave').onclick = saveScenario;
+  $('#btnScenarioDelete').onclick = deleteScenario;
+  $('#btnScenarioExport').onclick = exportScenario;
+  $('#scenarioImport').onchange = importScenario;
+
+  $('#btnClearLog').onclick = () => { $('#log').textContent = ''; };
+
+  fillApiOpSelect();
+  fillScenarioSelect();
+  renderSteps();
+  refreshFiles();
+  refreshStatus();
+  setInterval(refreshStatus, 3000);
+  log('웹 테스트 앱 준비 완료. 데몬 시작 → facade 로드 → C_Initialize 순으로 시작하세요.');
+}
+
+document.addEventListener('DOMContentLoaded', wire);

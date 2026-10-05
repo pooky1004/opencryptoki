@@ -165,8 +165,8 @@ CK_RV C_Initialize(CK_VOID_PTR pInitArgs)
     }
     /* Pick the lowest online slot the daemon reported. */
     g_slot = 0;
-    for (uint32_t s = 0; s < PKCS11_MAX_SLOT_COUNT; ++s) {
-        if (g_client.slot_mask & (1u << s)) { g_slot = s; break; }
+    for (uint32_t s = 0; s < NCMP_SLOT_SCAN_MAX; ++s) {
+        if (NCMP_SLOT_IN_MASK(g_client.slot_mask, s)) { g_slot = s; break; }
     }
     g_initialized = 1;
 out:
@@ -218,8 +218,8 @@ CK_RV C_GetSlotList(CK_BBOOL tokenPresent, CK_SLOT_ID_PTR pSlotList,
         return CKR_CRYPTOKI_NOT_INITIALIZED;
     if (!pulCount)
         return CKR_ARGUMENTS_BAD;
-    for (uint32_t s = 0; s < PKCS11_MAX_SLOT_COUNT; ++s)
-        if (g_client.slot_mask & (1u << s))
+    for (uint32_t s = 0; s < NCMP_SLOT_SCAN_MAX; ++s)
+        if (NCMP_SLOT_IN_MASK(g_client.slot_mask, s))
             ids[n++] = s;
     if (!pSlotList) {
         *pulCount = n;
@@ -242,7 +242,7 @@ CK_RV C_GetSlotInfo(CK_SLOT_ID slotID, CK_SLOT_INFO_PTR pInfo)
     if (!pInfo)
         return CKR_ARGUMENTS_BAD;
     if (slotID >= PKCS11_MAX_SLOT_COUNT ||
-        !(g_client.slot_mask & (1u << slotID)))
+        !NCMP_SLOT_IN_MASK(g_client.slot_mask, slotID))
         return CKR_SLOT_ID_INVALID;
     memset(pInfo, 0, sizeof(*pInfo));
     memset(pInfo->slotDescription, ' ', sizeof(pInfo->slotDescription));
@@ -262,7 +262,7 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slotID, CK_TOKEN_INFO_PTR pInfo)
     if (!pInfo)
         return CKR_ARGUMENTS_BAD;
     if (slotID >= PKCS11_MAX_SLOT_COUNT ||
-        !(g_client.slot_mask & (1u << slotID)))
+        !NCMP_SLOT_IN_MASK(g_client.slot_mask, slotID))
         return CKR_SLOT_ID_INVALID;
 
     memset(pInfo, 0, sizeof(*pInfo));
@@ -356,7 +356,7 @@ CK_RV C_OpenSession(CK_SLOT_ID slotID, CK_FLAGS flags, CK_VOID_PTR pApp,
     if (!(flags & CKF_SERIAL_SESSION))
         return CKR_SESSION_PARALLEL_NOT_SUPPORTED;
     if (slotID >= PKCS11_MAX_SLOT_COUNT ||
-        !(g_client.slot_mask & (1u << slotID)))
+        !NCMP_SLOT_IN_MASK(g_client.slot_mask, slotID))
         return CKR_SLOT_ID_INVALID;
 
     pthread_mutex_lock(&g_lock);

@@ -19,9 +19,24 @@ if(ENABLE_GUI_SERVER)
     target_include_directories(mock_server PRIVATE ${CMAKE_SOURCE_DIR}/mock)
     target_link_libraries(mock_server PRIVATE ncmp_frame_server ncmp_mock)
 
-    # Real-HSM bridge: USB transport backend. usb_transport.c compiles a stub
-    # when libusb is absent, so the bridge always builds; link libusb when found.
-    add_executable(hsm_bridge hsm_bridge.c ${CMAKE_SOURCE_DIR}/daemon/usb_transport.c)
+    # Real-HSM bridge: drives a real FX3 through the transport dispatcher
+    # (ncmp_transport_*), exactly like ncmpd. The dispatcher (transport.c)
+    # references all three backend ops tables, so link the same transport stack
+    # as the daemon (the bridge keeps the default "real"/USB backend). The mock
+    # backend pulls in the emulator sources (NOT ncmp_mock, which would re-export
+    # the public ncmp_transport_* and clash with the dispatcher). usb_transport.c
+    # compiles a no-device stub when libusb is absent, so the bridge always
+    # builds; link libusb when found.
+    add_executable(hsm_bridge
+        hsm_bridge.c
+        ${CMAKE_SOURCE_DIR}/daemon/transport.c
+        ${CMAKE_SOURCE_DIR}/daemon/usb_transport.c
+        ${CMAKE_SOURCE_DIR}/daemon/socket_transport.c
+        ${CMAKE_SOURCE_DIR}/daemon/mock_backend.c
+        ${CMAKE_SOURCE_DIR}/mock/mcu_scheduler.c
+        ${CMAKE_SOURCE_DIR}/mock/container.c
+        ${CMAKE_SOURCE_DIR}/mock/fx3_dma.c)
+    target_include_directories(hsm_bridge PRIVATE ${CMAKE_SOURCE_DIR}/mock)
     target_link_libraries(hsm_bridge PRIVATE ncmp_frame_server)
     find_package(LibUSB QUIET)
     if(LibUSB_FOUND OR TARGET LibUSB::LibUSB)

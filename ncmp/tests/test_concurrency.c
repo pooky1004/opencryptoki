@@ -79,7 +79,8 @@ int test_concurrent_enqueue_single_slot(void)
     prod_arg_t pa[NPROD];
     int total_ok = 0;
 
-    NCMP_CHECK(PKCS11_MAX_SLOT_COUNT == 4);
+    /* This exercises a single slot (slot 0); only that one must exist. */
+    NCMP_CHECK(PKCS11_MAX_SLOT_COUNT >= 1);
 
     (void)ncmp_shm_destroy(NULL);
     NCMP_CHECK(ncmp_shm_create(&base) == NCMP_OK);

@@ -345,6 +345,16 @@ static int daemon_start(const char *transport)
         pthread_mutex_unlock(&g_daemon_lock);
         return 0;
     }
+    pthread_mutex_unlock(&g_daemon_lock);
+    /* An ncmpd is already listening on our socket (started externally, or by
+     * another ncmp_web sharing this --sock)? Reuse it - do NOT unlink its
+     * socket and spawn a second daemon, which would fight over the single FX3
+     * (the loser logs "slot 0 transport open failed" and reports no slots). */
+    if (daemon_socket_ready()) {
+        fprintf(stderr, "ncmp_web: reusing existing ncmpd at %s\n", g_sock_path);
+        return 0;
+    }
+    pthread_mutex_lock(&g_daemon_lock);
     if (transport && *transport)
         snprintf(g_transport, sizeof(g_transport), "%s", transport);
     unlink(g_sock_path);

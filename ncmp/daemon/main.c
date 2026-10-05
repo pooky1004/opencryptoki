@@ -183,7 +183,9 @@ int main(int argc, char **argv)
         slots[s].slot_id = s;
 
         if (ncmp_transport_open(s, &slots[s].transport) != NCMP_OK) {
-            fprintf(stderr, "ncmpd: slot %u transport open failed\n", s);
+            fprintf(stderr, "ncmpd: slot %u transport open failed "
+                    "(device busy? another ncmpd/process may hold the FX3, "
+                    "or check udev/permissions)\n", s);
             continue;
         }
 

@@ -36,6 +36,10 @@ IPC(UNIX socket) + SHM  ──▶ ncmpd ──comm thread──▶ 실 FX3(USB) 
 - facade STDLL은 **런타임 dlopen**이라 빌드 의존이 없다.
 - 데몬(`ncmpd`)은 facade 경로가 아니라 `ncmp_web`가 자식 프로세스로 실행/감시하며
   같은 `NCMP_SOCK_PATH`를 공유한다.
+- **세션**: C_OpenSession이 토큰에 OPEN_SESSION(0x0020, flags)을 보내 핸들을 받고
+  (facade가 `dev_sid`로 저장), 이후 그 세션의 모든 명령은 핸들을 와이어 헤더
+  `session_id`로 싣는다(실 타겟 레퍼런스와 동일). C_CloseSession은 0x0021.
+  자세히: [`session-id-mapping.md`](session-id-mapping.md).
 - PKCS#11 상태는 프로세스-전역(한 facade)이라, 서버는 모든 API 호출을 하나의
   뮤텍스로 **직렬화**한다(브라우저 탭이 여럿이어도 토큰은 하나).
 
@@ -78,6 +82,10 @@ IPC(UNIX socket) + SHM  ──▶ ncmpd ──comm thread──▶ 실 FX3(USB) 
 | `GET /api/files` | — | 생성된 파일 목록 | `files[],dir` |
 | `POST /api/digest-file` | `{session,mech,name}` | 파일 **multipart**(init/update/final) 해시 | `hex,length,bytes` |
 | `POST /api/digest-compare` | `{session,mech,name}` | 토큰 multipart ↔ **SW(OpenSSL)** 비교 | `tokenHex,swHex,match,bytes` |
+| `GET /api/scenarios` | — | 서버 저장 시나리오 목록 | `scenarios[],dir` |
+| `POST /api/scenario/get` | `{name}` | 저장 시나리오 1건 | `scenario{name,steps}` |
+| `POST /api/scenario/save` | `{name,steps[]}` | 시나리오 영구 저장(JSON 파일) | `name` |
+| `POST /api/scenario/delete` | `{name}` | 저장 시나리오 삭제 | — |
 
 `rc`: 0=CKR_OK, >0=CKR_* 코드, <0=앱 오류(APP_ERR_*). `ok`는 `rc==0`.
 `digest-compare`의 판정은 `rc`(토큰 호출 성공 여부)와 별개로 **`match`** 필드가
@@ -92,6 +100,9 @@ SHA3-224/256/384/512.
 
 프레임워크 없음. `index.html` + `style.css`(다크 테마) + `app.js`.
 
+- **테마**: 헤더의 ☀️/🌙 버튼으로 **라이트/다크** 전환(선택을 localStorage에 저장,
+  첫 방문은 OS 설정을 따름). 색은 CSS 변수(`:root` 다크, `:root[data-theme=light]`
+  라이트)로 정의. 상세 사용법은 [`testapp-web-manual.md`](testapp-web-manual.md).
 - **상단 툴바**: ncmpd 전송 선택·시작/정지·상태 램프, facade 경로·로드·
   C_Initialize/Finalize·슬롯 새로고침·dlsym 점검, 서버 토큰 입력칸.
 - **좌측**: 활성 슬롯 리스트(C_GetSlotList). 선택 시 우측 패널이 그 토큰으로 전환.
@@ -117,11 +128,17 @@ SHA3-224/256/384/512.
   (실타겟, ≥64KB)”)를 불러와 실행. 각 스텝은 `성공`/`실패`/`일치`/`불일치` 기대
   단정(assertion)을 가지며 결과 표에 PASS/FAIL과 상세(rc/match/bytes/반환필드)를
   표시. `일치/불일치`는 `digest-compare`의 `match`를 판정한다.
-- **단위 조합으로 시나리오 작성**: API 탭의 “▶ 시나리오에 스텝 추가”로 현재
-  op+파라미터를 스텝으로 누적. 스텝은 위로이동·삭제·`저장변수`·`성공/실패 기대`
-  편집 가능. **변수**: 스텝 출력(예 openSession→`session`)을 `저장변수 s`로 담고
-  이후 스텝 파라미터에서 `${s}`로 참조(실행 시 치환). 시나리오는 이름으로
-  localStorage 저장/불러오기/삭제, JSON 내보내기/가져오기 지원.
+- **단위 조합으로 시나리오 작성**: 시나리오 탭의 **단위 항목 팔레트**(범주별로
+  모든 op 표시, 대부분 PKCS#11 함수; 비-PKCS#11 보조 항목은 "도구"로 표기)를
+  **순서대로 클릭**하면 스텝이 차례로 추가된다. 각 스텝은 그 자리에서 파라미터
+  (텍스트/선택) · `저장변수` · `성공/실패/일치/불일치 기대`를 수정하고 위로이동·
+  삭제할 수 있다. "PKCS#11 API 시험" 탭의 “▶ 시나리오에 스텝 추가”로도 추가 가능.
+  **변수**: openSession은 기본 `저장변수 s`로 핸들을 담고, 세션 파라미터는 기본
+  `${s}`로 채워져 클릭만으로 동작하는 체인이 만들어진다(실행 시 치환).
+- **영구 저장**: 저장 시나리오는 **서버**에 JSON 파일로 보관된다(`scendir`,
+  `/api/scenario/*`). localStorage가 아니라 서버이므로 브라우저/캐시와 무관하게
+  영구적이고 여러 접속자가 공유한다. 이름으로 저장/불러오기/삭제, JSON
+  내보내기/가져오기 지원. 내장 시나리오 5종은 `★`, 서버 저장분은 `💾`로 표시.
 
 ## 4. 수반된 코어 수정
 
@@ -159,7 +176,7 @@ curl 기반 종합 시험 결과는 [`testapp-web-test-results.md`]
 `load_config()`가 `key = value` 형식을 파싱한다.
 
 - 탐색: `--config PATH` → `$NCMP_WEB_CONFIG` → `./.config/config`.
-- 키: `host port webroot module ncmpd transport sock filedir token`.
+- 키: `host port webroot module ncmpd transport sock filedir scendir token`.
 - 우선순위: **내장 기본값 < 설정 파일 < 환경변수 < CLI 인자**.
 - 동봉 샘플: `ncmp/gui/testapp/.config/config`(기본 포트 8080 등). `GET
   /api/status`가 로드된 `configPath`/`port`/`authRequired`를 반환하고 UI 헤더에

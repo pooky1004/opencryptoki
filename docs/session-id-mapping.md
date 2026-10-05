@@ -1,8 +1,29 @@
-# 세션 ID 매핑: (PID + SID) → HSM SID
+# 세션 ID 매핑
+
+> **갱신(2026-10-05): 실 타겟(MPF300T Mi-V) 레퍼런스에 맞춰 세션 OPEN/CLOSE
+> 와이어 프로토콜을 변경했다.** 아래 §의 `(pid, sid)` 3-파라미터 모델은
+> 폐기되고, 다음으로 대체됐다(참조: 2026-10-01 GETMECHLIST/AES-GCM 패키지의
+> `host/web_ui/fx3_ci.py`):
+>
+> - **OPEN_SESSION = 0x0020**: 요청 — 와이어 헤더 `session_id = 0`, 파라미터 0 =
+>   4바이트 flags. 응답 — **파라미터 0 = 토큰이 할당한 세션 핸들(1~255)**.
+> - **CLOSE_SESSION = 0x0021**: 요청 — 헤더 `session_id = 핸들`, 파라미터 없음.
+> - 이후 그 세션의 모든 명령은 이 핸들을 와이어 헤더 `session_id`로 싣는다
+>   (STDLL은 `ncmp_client_t.active_session_id`로 전달; facade `sess_get()`가 세션
+>   조회 시 설정). LOGIN=0x0030 / LOGOUT=0x0031은 레퍼런스와 동일하여 그대로.
+>
+> 구현: `ncmp_cmd.h`(opcode/레이아웃), `usr/lib/ncmp_stdll/ncmp_p11.c`
+> (C_OpenSession/C_CloseSession + `dev_sid` 저장), `ncmp/stdll/ncmp_admin.c`
+> (`ncmp_admin_open_session`/`close_session`), `ncmp/stdll/ncmp_client.c`
+> (`active_session_id` → 헤더), `ncmp/mock/mcu_scheduler.c`(mock OPEN/CLOSE).
+> 핸들 할당은 여전히 슬롯별 1~255, 중첩 없음. 아래 원문은 과거 설계 기록으로 남긴다.
+
+---
+
+## (과거 설계) (PID + SID) → HSM SID
 
 OpenSession/CloseSession CI와, 요청 프로세스의 `(pid, sid)` 쌍을 토큰 측 8비트
-세션 id(**HSM SID**, 1~255)로 매핑하는 규칙을 정의한다. **구현 완료**(mock + CI +
-Python 클라이언트 + smoke).
+세션 id(**HSM SID**, 1~255)로 매핑하는 규칙을 정의한다.
 
 - 관련: [`command-interface.md`](command-interface.md) §6.3.9/6.3.10,
   [`architecture.md`](architecture.md), [`session-state-management.md`](session-state-management.md)

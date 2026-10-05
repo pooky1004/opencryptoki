@@ -121,7 +121,56 @@ SW와 **일치(match=true)**해야 한다. 현재 연결된 FX3는 NCMP 펌웨�
 > `digest-compare`의 `rc`는 토큰 호출 성공 여부(여기선 0)이고, 정확성 판정은
 > `match` 필드다. 시나리오 스텝의 `일치/불일치 기대` 단정이 이 `match`를 본다.
 
-## 7. 미검증/제약
+## 7. 브라우저 UI 기능 점검 (jsdom)
+
+실제 `web/index.html` + `web/app.js`를 jsdom에 로드하고 `fetch`를 라이브
+`ncmp_web`(mock)으로 포워딩해, 각 버튼 핸들러를 클릭 시뮬레이션하며 DOM 갱신을
+검증했다. 점검 항목(모두 PASS): 초기화 wire, 데몬 시작/상태, facade 로드·
+C_Initialize·라이브러리 정보, 슬롯 목록·선택, 토큰 정보·메커니즘, 세션 열기/
+세션 정보, 로그인, 난수·digest·AES-GCM, 파일 생성·목록, 토큰 multipart 해시,
+실타겟↔SW 비교(verdict 렌더), API 시험 단건 실행, 시나리오에 스텝 추가, 시나리오
+로드·실행(결과 표/요약). 신선한 상태에서 내장 "Mock 전체 왕복" 시나리오는
+**12/12 PASS**.
+
+점검 중 발견·수정한 결함:
+
+1. **`renderApiParams`의 `el('span', {dataset:{}})`** — `dataset`은 setter 없는
+   접근자라 `Object.assign`이 항상 `TypeError`를 던져 `wire()`가 중단되고, 그
+   뒤 초기화(시나리오 목록·스텝 렌더·파일 목록·상태 폴링)가 전부 실행되지
+   않았다. → 무의미한 `dataset:{}` 제거. (web/app.js)
+2. **데몬 준비 레이스** — "데몬 시작" 직후(또는 시나리오의 `daemonStart` 스텝
+   직후) 곧바로 `C_Initialize`를 호출하면, ncmpd가 소켓을 바인딩하기 전이라
+   `CKR_TOKEN_NOT_PRESENT`로 실패했다(실 FX3는 probe에 수 초 소요). →
+   서버 `/api/daemon/start`가 **소켓이 실제로 열릴 때까지 폴링 후 반환**하도록
+   수정(최대 ~10s), `/api/status`도 외부 기동 ncmpd를 소켓 도달성으로 인식.
+   UI `daemonStart()`도 준비 폴링 추가. (webserver/ncmp_web.c, web/app.js)
+
+수정 후 동일 하네스 재실행: **0 problems**, 신선 시나리오 12/12.
+
+## 8. 세션 OPEN/CLOSE 레퍼런스 정합 + 시나리오 빌더
+
+실 타겟(MPF300T Mi-V) 레퍼런스에 맞춰 세션 OPEN/CLOSE를 수정한 뒤 검증.
+
+- **세션 OPEN/CLOSE**: facade C_OpenSession이 OPEN_SESSION(0x0020, flags)을
+  보내 핸들을 받고, 이후 명령이 그 핸들을 와이어 헤더에 싣는다. jsdom 하네스에서
+  세션 열기→세션 정보→로그인→난수/digest→닫기 전부 PASS, ncmpd 로그에 세션
+  트래픽 확인(핸들 1 발급). C 테스트 `ctest` 100% 통과(회귀 없음).
+- **시나리오 빌더(팔레트·순서 클릭·서버 영구 저장)**: 전용 jsdom 하네스에서
+  모두 PASS —
+  - 팔레트 렌더(21개 단위 항목),
+  - 항목을 순서대로 클릭 → 8스텝이 **순서대로** 추가(daemonStart→load→
+    initialize→openSession→login→random→closeSession→finalize),
+  - openSession 스텝의 저장변수 기본값 `s` 적용,
+  - 서버 저장(`/api/scenario/save`) → 목록(`💾`)에 반영,
+  - 새로만들기로 비운 뒤 **서버에서 재로드** → 8스텝 복원,
+  - 실행 → **8 PASS / 0 FAIL**(클릭만으로 만든 체인이 `${s}` 치환으로 동작),
+  - 서버 삭제 → 목록에서 제거.
+  서버측 저장은 `scendir`의 JSON 파일이라 브라우저/캐시와 무관하게 영구적이다.
+- **테마 전환(라이트/다크)**: jsdom에서 토글 버튼 동작 확인 — 초기 `dark` →
+  토글 시 `data-theme=light`, 버튼 라벨 전환, localStorage에 선택 저장 → 재토글로
+  `dark` 복귀. 테마 추가 후 전체 UI 하네스 재실행 0 problems(회귀 없음).
+
+## 9. 미검증/제약
 
 - 웹 UI의 브라우저 상호작용(슬롯 클릭, 탭 전환, 시나리오 빌더 드래그/편집)은
   수동 확인 대상(헤드리스 브라우저 미사용). 정적 서빙과 REST 응답으로 간접 검증.

@@ -77,9 +77,10 @@ REST 전체 목록은 [`testapp-web-design.md`](testapp-web-design.md) §2.
 4. **파일/검증** — 크기 입력→테스트 파일 생성(≥64KB), 토큰 multipart 해시,
    **실타겟↔SW 비교(MATCH/MISMATCH)**
 5. **PKCS#11 API 시험** — 단위 API 1건 실행(요청/응답 JSON) + "시나리오에 스텝 추가"
-6. **시나리오** — 단위 스텝 조합·실행(스텝별 PASS/FAIL), 변수 `${s}`,
-   `성공/실패/일치/불일치` 단정, localStorage 저장·JSON 내보내기/가져오기, 내장
-   시나리오 5종
+6. **시나리오** — 범주별 **단위 항목 팔레트를 순서대로 클릭**해 스텝 구성(각 스텝
+   파라미터·저장변수·기대값 수정), 실행(스텝별 PASS/FAIL), 변수 `${s}`,
+   `성공/실패/일치/불일치` 단정, 내장 5종, **서버 영구 저장**(`scendir` JSON,
+   `/api/scenario/*`) + JSON 내보내기/가져오기
 상단=ncmpd 실행·상태·설정 요약, 서버 토큰 입력. 하단=로그.
 
 ### 3.4 대용량(init/update/final) + 실타겟 정확성 검증
@@ -95,6 +96,12 @@ REST 전체 목록은 [`testapp-web-design.md`](testapp-web-design.md) §2.
 우선순위: **기본값 < 파일 < env < CLI**.
 
 ## 4. 수반된 코어 수정 (Test App 과정에서)
+0. **세션 OPEN/CLOSE를 실 타겟 레퍼런스에 정합** — OPEN_SESSION 0x003A→**0x0020**
+   (요청 flags 1파라미터·헤더 sid=0 → 응답 param0=핸들), CLOSE 0x003B→**0x0021**
+   (헤더 sid=핸들, 무파라미터). facade가 토큰에 실제로 세션을 열고 `dev_sid`를
+   저장, 이후 명령이 핸들을 와이어 헤더에 싣는다(`ncmp_client_t.active_session_id`,
+   `sess_get()`가 설정). LOGIN/LOGOUT(0x0030/0x0031)은 이미 일치. mock도 갱신.
+   (`ncmp_cmd.h`, `ncmp_p11.c`, `ncmp_admin.c`, `ncmp_client.c`, `mcu_scheduler.c`)
 1. **slot_mask UB 수정** — `PKCS11_MAX_SLOT_COUNT` 4→256 전환으로 `uint32`
    마스크의 `1u<<s`(s≥32)가 UB가 되어 슬롯 열거가 `[0,32,…]`로 깨지던 것을,
    `ncmp_limits.h`의 `NCMP_SLOT_MASK_BITS(32)`/`NCMP_SLOT_SCAN_MAX`/

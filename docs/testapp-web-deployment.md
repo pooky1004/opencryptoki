@@ -47,7 +47,7 @@ ncmp/gui/testapp/build/ncmp_web \
   디렉토리 기준). 즉 `ncmp/gui/testapp/`에서 실행하면 동봉된 `.config/config`를
   자동으로 읽는다.
 - 형식: `key = value`, `#`/`;` 주석, 값에 따옴표 선택. 키:
-  `host port webroot module ncmpd transport sock filedir token`.
+  `host port webroot module ncmpd transport sock filedir scendir token`.
 
 ```ini
 # ncmp/gui/testapp/.config/config (발췌)
@@ -82,6 +82,7 @@ build/ncmp_web --config /etc/ncmp_web.config
 | `--transport` | — | `mock` | 데몬 기본 전송(real/mock/socket) |
 | `--sock` | `NCMP_SOCK_PATH` | `/tmp/ncmpd_web_<pid>.sock` | facade↔ncmpd 소켓(둘이 공유) |
 | `--filedir` | `NCMP_WEB_FILEDIR` | `/tmp/ncmp_web_files` | 생성한 테스트 파일 보관 디렉토리 |
+| `--scendir` | `NCMP_WEB_SCENDIR` | `.config/scenarios` | 저장 시나리오(JSON) 보관 디렉토리(영구 저장소 권장) |
 | — | `NCMP_WEB_TOKEN` | (없음) | 설정 시 모든 API에 베어러 토큰 요구 |
 
 데몬은 UI의 “데몬 시작/정지”로 `ncmp_web`가 자식 프로세스로 띄우고 같은

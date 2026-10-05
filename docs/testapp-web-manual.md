@@ -271,9 +271,10 @@ Token NCMP **웹 Test App**의 화면·버튼·시험 절차를 처음 쓰는 �
   생략). 예) RNG 길이 16 → p0 `10000000`(LE u32), LOGIN → p0 `01000000`(User)·
   p1 `00000000`·p2 `31323334`(PIN "1234").
 - **[▶ 전송]**: 전송할 때마다 **디버깅 창**에 한 블록이 위로 쌓이며, 각 블록에
-  **송신(TX)/수신(RX)** 을 각각 **raw(Hex, 16바이트 정렬)** 와 **parsed**
-  (frame_len·session_id·sequence_id·command_id(+CI 이름)·ack(+CKR 이름)·
-  payload_len·param[i])로 함께 보여준다. **[디버깅 창 지우기]**로 비운다.
+  **송신(TX)는 왼쪽·수신(RX)은 오른쪽(좌우 2열)** 으로 나란히, 각각 **raw(Hex,
+  16바이트 정렬)** 와 **parsed**(frame_len·session_id·sequence_id·command_id(+CI
+  이름)·ack(+CKR 이름)·payload_len·param[i])를 보여준다. 화면이 좁으면 자동으로
+  위아래로 접힌다. **[디버깅 창 지우기]**로 비운다.
 - 무응답 CI는 데몬의 USB 타임아웃(~5초) 뒤 "RX 없음 (timeout)"으로 표시된다.
 - 이 탭은 facade(C_*)를 거치지 않고 서버의 **별도 ncmp_client**로 데몬에 직접
   보낸다(상태/슬롯 폴링을 막지 않도록 독립 락 사용).

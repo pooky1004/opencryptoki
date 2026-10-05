@@ -38,12 +38,15 @@ ncmp/gui/testapp/build/ncmp_web \
 # 브라우저: http://<서버IP>:8080/
 ```
 
-> **실 FX3 주의 — ncmpd는 하나만.** 실 FX3는 한 번에 한 ncmpd만 USB를 claim한다.
-> `--transport real` ncmp_web을 **여러 개** 띄우면 각자 ncmpd를 생성해 FX3를
-> 다투고, 나중 것은 `slot 0 transport open failed` → mask=0x0가 되어 **활성 슬롯이
-> 빈 목록**이 된다. 실 타겟은 **인스턴스 하나만** 쓰거나, 여러 클라이언트가 같은
-> `--sock`을 공유한다(ncmp_web의 "데몬 시작"은 그 소켓에 ncmpd가 이미 있으면
-> 재사용함). Debug App과 함께 쓰는 법은 debugapp-deployment.md §2.1 참고.
+> **ncmpd는 시스템 전체에 하나만 — 강제됨.** ncmpd는 단일 USB 장치와 공유
+> 메모리의 소유자라, 기동 시 **전역 배타 락**(`/tmp/ncmpd.lock`, flock; 환경변수
+> `NCMP_LOCK_PATH`로 변경 가능)을 잡는다. 이미 다른 ncmpd가 떠 있으면 두 번째는
+> **즉시 거부**(`another ncmpd is already running …`)되고 종료한다(락은 프로세스
+> 종료 시 커널이 자동 해제 — 남은 락 파일은 무해). 따라서 `--transport real`
+> ncmp_web을 여러 개 띄워도 **FX3를 다투는 두 번째 ncmpd는 생기지 않는다**. 여러
+> 클라이언트(ncmp_web·Debug App·facade)는 같은 소켓(기본 `/tmp/ncmpd.sock`)을
+> 공유한다 — ncmp_web의 "데몬 시작"은 그 소켓에 ncmpd가 이미 있으면 **재사용**한다.
+> Debug App과 함께 쓰는 법은 debugapp-deployment.md §2.1 참고.
 
 ### 설정 파일 (`.config/config`)
 
@@ -87,7 +90,7 @@ build/ncmp_web --config /etc/ncmp_web.config
 | `--module` | `NCMP_PKCS11_MODULE` | (없음) | 기본 facade `.so` 경로(UI에서 비우면 사용) |
 | `--ncmpd` | — | `ncmpd` | 데몬 실행 파일(“데몬 시작”이 exec) |
 | `--transport` | — | `real` | 데몬 기본 전송(real/mock/socket). 기본 **real** |
-| `--sock` | `NCMP_SOCK_PATH` | `/tmp/ncmpd_web_<pid>.sock` | facade↔ncmpd 소켓(둘이 공유) |
+| `--sock` | `NCMP_SOCK_PATH` | `/tmp/ncmpd.sock` | facade↔ncmpd↔Debug App 공유 소켓(기본 고정 경로라 Debug App이 `--sock` 없이 접속). 격리 실행은 명시 지정 |
 | `--filedir` | `NCMP_WEB_FILEDIR` | `/tmp/ncmp_web_files` | 생성한 테스트 파일 보관 디렉토리 |
 | `--scendir` | `NCMP_WEB_SCENDIR` | `.config/scenarios` | 저장 시나리오(JSON) 보관 디렉토리(영구 저장소 권장) |
 | — | `NCMP_WEB_TOKEN` | (없음) | 설정 시 모든 API에 베어러 토큰 요구 |
@@ -196,9 +199,12 @@ curl -s -H "Authorization: Bearer $NCMP_WEB_TOKEN" \
 - **C_Initialize가 rc≠0(예: 0xE0)**: ncmpd 미기동/소켓 경로 불일치. UI의 "데몬
   시작"으로 띄우거나 `--sock`을 외부 ncmpd와 일치시켜라. UNIX 소켓 경로는 108바이트
   미만이어야 한다(너무 긴 경로 금지).
-- **ncmpd는 running인데 활성 슬롯이 빈 목록(실 FX3)**: ncmpd가 **둘 이상** 떠서
-  FX3 claim에 실패한 경우다. ncmpd 로그에 `slot 0 transport open failed` /
-  `online slots mask=0x0`가 보인다. 중복 ncmpd(다른 ncmp_web real 인스턴스,
-  남은 데몬)를 모두 종료하고 **하나만** 띄운다: `pgrep -af ncmpd`로 확인 후 정리.
-  §2의 "실 FX3 주의" 참고.
+- **두 번째 ncmpd가 안 뜸(`another ncmpd is already running`)**: 정상 동작이다 —
+  전역 락(`/tmp/ncmpd.lock`)으로 **시스템 전체 1개**만 허용한다. 기존 ncmpd를
+  재사용하거나(같은 소켓 공유), `pgrep -af ncmpd`로 확인 후 기존 것을 멈춘 뒤 다시
+  띄운다. 격리 실행이 꼭 필요하면 `NCMP_LOCK_PATH`로 다른 락 경로를 준다.
+- **ncmpd는 running인데 활성 슬롯이 빈 목록(실 FX3)**: 과거 중복 ncmpd로 FX3 claim이
+  실패하던 증상(`slot 0 transport open failed` / `online slots mask=0x0`). 이제 전역
+  락으로 중복 기동이 차단되므로, 남은(좀비) ncmpd가 있는지 `pgrep -af ncmpd`로
+  확인하고 정리한 뒤 하나만 띄운다. §2의 "ncmpd는 … 하나만" 참고.
 - **실 FX3가 안 보임**: udev 규칙(§3.2)·`plugdev` 소속 확인, `lsusb | grep 04b4:00f1`.

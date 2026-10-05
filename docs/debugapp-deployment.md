@@ -46,30 +46,33 @@ ncmp/gui/debugapp/build/ncmp_dbg \
 우선순위: **내장 기본값 < 설정 파일 < 환경변수 < CLI 인자**. 설정 파일 샘플은
 `ncmp/gui/debugapp/.config/config`.
 
-> **중요 — Test App과 같은 ncmpd(소켓)를 가리켜야 한다.** Debug App은 지정한
-> 소켓의 ncmpd에만 붙는다. Test App(`ncmp_web`)이 "데몬 시작"으로 띄우는 ncmpd는
-> 기본적으로 `/tmp/ncmpd_web_<pid>.sock`을 쓰므로, `--sock`을 비워두면 Debug App이
-> 그 데몬을 **찾지 못해 "ncmpd 연결 안 됨"** 으로 보인다. 아래 "실 FX3 + 두 앱
-> 동시 사용"을 따른다.
+> **Test App과 같은 ncmpd(소켓)를 가리켜야 한다 — 이제 기본값이 일치한다.**
+> Debug App은 지정한 소켓의 ncmpd에만 붙는다. Test App(`ncmp_web`)과 Debug App
+> (`ncmp_dbg`) **모두 기본 소켓이 `/tmp/ncmpd.sock`** 이라, 둘 다 `--sock` 없이
+> 실행하면 **자동으로 같은 ncmpd에 연결**된다(예전 pid별 경로 불일치 문제 해소).
+> 다른 경로의 ncmpd(예: systemd `/run/ncmpd/ncmpd.sock`)를 쓸 때만 양쪽에 같은
+> `--sock`/`NCMP_SOCK_PATH`를 지정한다. 아래 "실 FX3 + 두 앱 동시 사용" 참고.
 
 ## 2.1 실 FX3 + 두 앱(Test App·Debug App) 동시 사용 — 중요
 
-실 FX3는 **한 번에 한 ncmpd만** USB를 claim할 수 있다. ncmpd가 둘 이상 뜨면
-나중 것은 `slot 0 transport open failed` → `mask=0x0`가 되어 **Test App 활성 슬롯이
-빈 목록**이 된다. 따라서 **ncmpd는 하나만 띄우고 두 앱이 같은 소켓을 공유**한다.
+ncmpd는 **시스템 전체에 하나만** 떠야 한다(단일 USB 장치·SHM 소유자). 이제 ncmpd가
+기동 시 **전역 배타 락**(`/tmp/ncmpd.lock`, flock; `NCMP_LOCK_PATH`로 변경 가능)을
+잡아 **두 번째 기동을 거부**하므로 중복이 원천 차단된다(과거: 둘 이상 뜨면
+`slot 0 transport open failed`→`mask=0x0`로 Test App 슬롯이 빈 목록). 따라서 **하나의
+ncmpd를 두 앱이 같은 소켓으로 공유**한다 — 두 앱 모두 기본 소켓이 `/tmp/ncmpd.sock`
+이라 보통 추가 설정이 필요 없다.
 
-권장 방법 — **하나의 ncmpd를 고정 소켓으로 공유**:
+권장 방법 — **기본 소켓 `/tmp/ncmpd.sock` 공유(인자 불필요)**:
 ```bash
-SOCK=/tmp/ncmpd.sock
-# (A) ncmpd를 한 번만 직접 실행 (또는 Test App의 "데몬 시작"이 이 소켓에 띄우게 함)
-NCMP_SOCK_PATH=$SOCK <repo>/ncmp/gui/build-standalone/ncmpd --transport real &
-# (B) 두 앱을 같은 소켓으로
-ncmp_web  --transport real --sock $SOCK ...     # "데몬 시작"은 기존 ncmpd를 재사용함
-ncmp_dbg                   --sock $SOCK ...
+# (A) Test App 실행 → "데몬 시작"이 /tmp/ncmpd.sock에 ncmpd 1개를 띄운다
+ncmp_web  --transport real ...        # --sock 생략 → /tmp/ncmpd.sock
+# (B) Debug App을 그대로 실행 → 같은 /tmp/ncmpd.sock에 자동 연결
+ncmp_dbg  --host 0.0.0.0 --port 8090 --webroot <...>/web   # --sock 생략
 ```
-- `ncmp_web`의 "데몬 시작"은 **해당 소켓에 ncmpd가 이미 있으면 새로 띄우지 않고
-  재사용**한다(두 번째 ncmpd로 FX3를 다투지 않음).
-- `ncmp_dbg`는 반드시 **같은 `--sock`**(또는 같은 `NCMP_SOCK_PATH`)을 쓴다.
+- 두 앱의 **기본 소켓이 같아** 추가 인자 없이 같은 ncmpd에 붙는다.
+- `ncmp_web`의 "데몬 시작"은 **그 소켓에 ncmpd가 이미 있으면 재사용**한다(두 번째
+  ncmpd로 FX3를 다투지 않음).
+- 다른 경로를 쓰려면 **양쪽에 같은 `--sock`**(또는 `NCMP_SOCK_PATH`)을 지정한다.
 - 서로 다른 소켓으로 `ncmp_web`를 두 개 띄우면 ncmpd가 둘 생겨 충돌하므로 **금지**.
 
 ## 3. 시스템 설정 (필요 시)

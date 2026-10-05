@@ -125,10 +125,11 @@ SHA3-224/256/384/512.
      (요청/응답 JSON 표시). 각 항목이 시나리오의 단위 스텝이 된다.
   6. **CI 송수신** — CI(Command Interface) 단위로 실 타겟에 프레임을 직접 보내고
      받는다. CI opcode 선택 + CI별 입력 파라미터(p0~p7, Hex) + session_id, 전송 시
-     **디버깅 창**에 송신(TX)/수신(RX)을 각각 **raw(Hex)** 와 **parsed**(frame_len·
-     session_id·sequence_id·command_id(+CI 이름)·ack(+CKR 이름)·payload_len·
-     param[i])로 동시 출력. (Debug App에서 이관 — facade를 거치지 않고 서버의 별도
-     `ncmp_client`로 데몬에 직접 전송.)
+     **디버깅 창**에 **송신(TX)는 왼쪽·수신(RX)은 오른쪽(좌우 2열, 좁으면 자동
+     세로 접힘)** 으로 각각 **raw(Hex)** 와 **parsed**(frame_len·session_id·
+     sequence_id·command_id(+CI 이름)·ack(+CKR 이름)·payload_len·param[i]) 출력.
+     (Debug App에서 이관 — facade를 거치지 않고 서버의 별도 `ncmp_client`로 데몬에
+     직접 전송.)
   7. **시나리오** — 단위 스텝을 조합해 시나리오를 만들고 실행(스텝별 PASS/FAIL).
 - **하단**: 로그.
 

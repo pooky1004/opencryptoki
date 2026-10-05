@@ -32,6 +32,7 @@
 | [`testapp-web-deployment.md`](testapp-web-deployment.md) | **웹 Test App 배포·시스템 설정**. 빌드/실행 인자·env, 외부 접속을 위한 방화벽(ufw/firewalld/nft)·FX3 udev·systemd 유닛·베어러 토큰·HTTPS 리버스 프록시·SSH 터널, 트러블슈팅. 특권 변경은 미적용(명령 제공). |
 | [`testapp-web-scenario-results.md`](testapp-web-scenario-results.md) | **시나리오 시험 결과(기본 15 + 비정상 10, 실 타겟)**. 25개 시나리오를 생성·영구 저장(`ncmp/gui/testapp/.config/scenarios/`) 후 실 FX3로 실행 + mock 교차 검증. 실 보드가 부트로더(펌웨어 미적재)라 전송·메타 명령은 정상, C_OpenSession부터 타임아웃 실패 — 시나리오별 PASS/FAIL 표·스텝 rc·펌웨어 적재 후 재시험 방법. |
 | [`testapp-web-test-results.md`](testapp-web-test-results.md) | **웹 Test App 시험 결과**. 정적 서빙·전 REST API(mock)·음성 로그인(0xA0)·베어러 토큰 401/200·실 FX3(real) 실측 표, 시나리오별 PASS/FAIL, 미검증/제약. |
+| [`testapp-web-ci-results.md`](testapp-web-ci-results.md) | **CI 송수신 탭 시험 결과(실 타겟)**. `/api/ci`로 원시 CI 프레임 송수신 — TX/RX raw(Hex)+parsed 동시 출력 확인(VD_PING 예시 포함). 현 보드 미응답이라 5초 타임아웃 합성 응답(ack=0x50) 표시, mock 교차 검증(RNG 실제 응답), 응답 가능 보드 재시험 방법. |
 
 ## 핵심 소스 진입점
 

@@ -41,6 +41,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -57,6 +58,7 @@ static char g_transport[16] = "mock";  /* default --transport */
 static char g_sock_path[1024] = "";     /* NCMP_SOCK_PATH shared with facade */
 static char g_token[256] = "";          /* bearer token; empty = auth off */
 static char g_filedir[1024] = "/tmp/ncmp_web_files"; /* generated test files */
+static char g_scendir[1024] = ".config/scenarios";  /* saved scenarios (JSON) */
 static char g_config[1024] = "";        /* loaded config file path (for status) */
 
 /* Upper bound for a generated/verified test file held in memory at once. */
@@ -142,6 +144,7 @@ static void set_cfg(const char *k, const char *v)
     else if (!strcmp(k, "transport")) snprintf(g_transport, sizeof(g_transport), "%s", v);
     else if (!strcmp(k, "sock"))      snprintf(g_sock_path, sizeof(g_sock_path), "%s", v);
     else if (!strcmp(k, "filedir"))   snprintf(g_filedir, sizeof(g_filedir), "%s", v);
+    else if (!strcmp(k, "scendir"))   snprintf(g_scendir, sizeof(g_scendir), "%s", v);
     else if (!strcmp(k, "token"))     snprintf(g_token, sizeof(g_token), "%s", v);
 }
 
@@ -304,6 +307,25 @@ static void serve_static(int fd, const char *url_path)
 /* ncmpd daemon control                                              */
 /* ------------------------------------------------------------------ */
 
+/* True if the ncmpd control socket accepts a connection right now (i.e. the
+ * daemon has bound and is listening). */
+static int daemon_socket_ready(void)
+{
+    if (!g_sock_path[0])
+        return 0;
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0)
+        return 0;
+    struct sockaddr_un a;
+    memset(&a, 0, sizeof(a));
+    a.sun_family = AF_UNIX;
+    if (strlen(g_sock_path) >= sizeof(a.sun_path)) { close(fd); return 0; }
+    strncpy(a.sun_path, g_sock_path, sizeof(a.sun_path) - 1);
+    int ok = connect(fd, (struct sockaddr *)&a, sizeof(a)) == 0;
+    close(fd);
+    return ok;
+}
+
 static int daemon_running(void)
 {
     if (g_ncmpd_pid <= 0)
@@ -341,9 +363,21 @@ static int daemon_start(const char *transport)
     g_ncmpd_pid = pid;
     pthread_mutex_unlock(&g_daemon_lock);
 
-    /* Give it a moment to bind its socket before the UI loads the facade. */
-    usleep(400 * 1000);
-    return 0;
+    /* Return only once the daemon is actually reachable, so a client that loads
+     * the facade right after this never races the socket bind. The real FX3
+     * probe (token identity scan) can take several seconds, so poll up to ~10s;
+     * also give up early if the child died (e.g. exec failed). */
+    for (int i = 0; i < 100; i++) {
+        if (daemon_socket_ready())
+            return 0;
+        pthread_mutex_lock(&g_daemon_lock);
+        int alive = daemon_running();
+        pthread_mutex_unlock(&g_daemon_lock);
+        if (!alive)
+            return -1;
+        usleep(100 * 1000);
+    }
+    return 0;   /* timed out waiting; report started anyway */
 }
 
 static void daemon_stop(void)
@@ -462,6 +496,48 @@ static unsigned char *read_test_file(const char *name, long *out_len)
 }
 
 /* ------------------------------------------------------------------ */
+/* Saved scenarios (server-side JSON files => permanent, shared)      */
+/* ------------------------------------------------------------------ */
+
+static void ensure_scendir(void) { mkdir(g_scendir, 0755); }
+
+/* Write the raw scenario JSON body to <scendir>/<name>.json. */
+static int scenario_save(const char *name, const char *json, size_t len)
+{
+    ensure_scendir();
+    char full[2200];
+    snprintf(full, sizeof(full), "%s/%s.json", g_scendir, name);
+    FILE *f = fopen(full, "wb");
+    if (!f)
+        return -1;
+    size_t w = fwrite(json, 1, len, f);
+    fclose(f);
+    return w == len ? 0 : -1;
+}
+
+/* Read <scendir>/<name>.json into out (NUL-terminated). Returns length or -1. */
+static int scenario_read(const char *name, char *out, int cap)
+{
+    char full[2200];
+    snprintf(full, sizeof(full), "%s/%s.json", g_scendir, name);
+    FILE *f = fopen(full, "rb");
+    if (!f)
+        return -1;
+    int n = (int)fread(out, 1, (size_t)cap - 1, f);
+    fclose(f);
+    if (n < 0) return -1;
+    out[n] = '\0';
+    return n;
+}
+
+static int scenario_delete(const char *name)
+{
+    char full[2200];
+    snprintf(full, sizeof(full), "%s/%s.json", g_scendir, name);
+    return unlink(full) == 0 ? 0 : -1;
+}
+
+/* ------------------------------------------------------------------ */
 /* API routes (all under the API lock)                               */
 /* ------------------------------------------------------------------ */
 
@@ -478,6 +554,8 @@ static int route_api(int fd, const char *method, const char *path, const char *b
         pthread_mutex_lock(&g_daemon_lock);
         dr = daemon_running();
         pthread_mutex_unlock(&g_daemon_lock);
+        if (!dr)
+            dr = daemon_socket_ready();   /* also detect an externally-started ncmpd */
         snprintf(extra, sizeof(extra),
                  "\"daemonRunning\":%s,\"transport\":\"%s\",\"sockPath\":\"%s\","
                  "\"defaultModule\":\"%s\",\"ncmpd\":\"%s\",\"configPath\":\"%s\","
@@ -558,6 +636,77 @@ static int route_api(int fd, const char *method, const char *path, const char *b
         }
         snprintf(extra + o, sizeof(extra) - o, "],\"dir\":\"%s\"", g_filedir);
         send_result(fd, 0, extra);
+        return 0;
+    }
+
+    /* ---- saved scenarios (server-side JSON, permanent) ---- */
+    if (!strcmp(path, "/api/scenarios") && !strcmp(method, "GET")) {
+        ensure_scendir();
+        DIR *d = opendir(g_scendir);
+        int o = snprintf(extra, sizeof(extra), "\"scenarios\":[");
+        int first = 1;
+        if (d) {
+            struct dirent *de;
+            while ((de = readdir(d)) != NULL) {
+                size_t nl = strlen(de->d_name);
+                if (de->d_name[0] == '.' || nl < 6 ||
+                    strcmp(de->d_name + nl - 5, ".json") != 0)
+                    continue;
+                if (o < (int)sizeof(extra) - 160) {
+                    o += snprintf(extra + o, sizeof(extra) - o, "%s\"", first ? "" : ",");
+                    /* name without ".json", escaping quotes/backslashes */
+                    for (size_t i = 0; i < nl - 5 && o < (int)sizeof(extra) - 8; i++) {
+                        char ch = de->d_name[i];
+                        if (ch == '"' || ch == '\\') extra[o++] = '\\';
+                        extra[o++] = ch;
+                    }
+                    extra[o] = '\0';
+                    o += snprintf(extra + o, sizeof(extra) - o, "\"");
+                }
+                first = 0;
+            }
+            closedir(d);
+        }
+        snprintf(extra + o, sizeof(extra) - o, "],\"dir\":\"%s\"", g_scendir);
+        send_result(fd, 0, extra);
+        return 0;
+    }
+    if (!strcmp(path, "/api/scenario/get") && !strcmp(method, "POST")) {
+        char name[160] = "";
+        json_str(body, "name", name, sizeof(name));
+        if (!safe_name(name)) { send_result(fd, -4, "\"detail\":\"bad name\""); return 0; }
+        static char sbuf[64 * 1024];
+        int n = scenario_read(name, sbuf, sizeof(sbuf));
+        if (n < 0) { send_result(fd, -4, "\"detail\":\"not found\""); return 0; }
+        /* The scenario JSON can exceed the small extra[] buffer, so build and
+         * send the response directly. */
+        char *resp = malloc((size_t)n + 128);
+        if (!resp) { send_result(fd, -4, "\"detail\":\"oom\""); return 0; }
+        int m = snprintf(resp, (size_t)n + 128,
+                         "{\"rc\":0,\"ok\":true,\"error\":\"\",\"scenario\":%s}", sbuf);
+        send_json(fd, 200, resp);
+        free(resp);
+        (void)m;
+        return 0;
+    }
+    if (!strcmp(path, "/api/scenario/save") && !strcmp(method, "POST")) {
+        char name[160] = "";
+        json_str(body, "name", name, sizeof(name));
+        if (!safe_name(name)) { send_result(fd, -4, "\"detail\":\"bad name\""); return 0; }
+        if (scenario_save(name, body, strlen(body)) != 0) {
+            send_result(fd, -4, "\"detail\":\"write failed\"");
+            return 0;
+        }
+        snprintf(extra, sizeof(extra), "\"name\":\"%s\"", name);
+        send_result(fd, 0, extra);
+        return 0;
+    }
+    if (!strcmp(path, "/api/scenario/delete") && !strcmp(method, "POST")) {
+        char name[160] = "";
+        json_str(body, "name", name, sizeof(name));
+        if (!safe_name(name)) { send_result(fd, -4, "\"detail\":\"bad name\""); return 0; }
+        scenario_delete(name);
+        send_result(fd, 0, "");
         return 0;
     }
 
@@ -825,12 +974,13 @@ static void usage(const char *p)
     fprintf(stderr,
       "usage: %s [--config PATH] [--host H] [--port N] [--webroot DIR]\n"
       "          [--module PATH] [--ncmpd PATH] [--transport real|mock|socket]\n"
-      "          [--sock PATH] [--filedir DIR]\n"
+      "          [--sock PATH] [--filedir DIR] [--scendir DIR]\n"
       "config: --config, else $NCMP_WEB_CONFIG, else ./.config/config\n"
       "        (key = value; keys: host port webroot module ncmpd transport\n"
-      "         sock filedir token). Precedence: defaults < file < env < CLI.\n"
+      "         sock filedir scendir token). Precedence: defaults < file < env < CLI.\n"
       "env: NCMP_WEB_HOST NCMP_WEB_PORT NCMP_WEB_ROOT NCMP_WEB_TOKEN\n"
-      "     NCMP_PKCS11_MODULE NCMP_SOCK_PATH NCMP_WEB_FILEDIR NCMP_WEB_CONFIG\n", p);
+      "     NCMP_PKCS11_MODULE NCMP_SOCK_PATH NCMP_WEB_FILEDIR NCMP_WEB_SCENDIR\n"
+      "     NCMP_WEB_CONFIG\n", p);
 }
 
 int main(int argc, char **argv)
@@ -857,6 +1007,7 @@ int main(int argc, char **argv)
     if ((e = getenv("NCMP_WEB_TOKEN"))) snprintf(g_token, sizeof(g_token), "%s", e);
     if ((e = getenv("NCMP_SOCK_PATH"))) snprintf(g_sock_path, sizeof(g_sock_path), "%s", e);
     if ((e = getenv("NCMP_WEB_FILEDIR"))) snprintf(g_filedir, sizeof(g_filedir), "%s", e);
+    if ((e = getenv("NCMP_WEB_SCENDIR"))) snprintf(g_scendir, sizeof(g_scendir), "%s", e);
 
     /* 3) CLI arguments override everything. */
     for (int i = 1; i < argc; i++) {
@@ -869,6 +1020,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--transport") && i + 1 < argc) snprintf(g_transport, sizeof(g_transport), "%s", argv[++i]);
         else if (!strcmp(argv[i], "--sock") && i + 1 < argc) snprintf(g_sock_path, sizeof(g_sock_path), "%s", argv[++i]);
         else if (!strcmp(argv[i], "--filedir") && i + 1 < argc) snprintf(g_filedir, sizeof(g_filedir), "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--scendir") && i + 1 < argc) snprintf(g_scendir, sizeof(g_scendir), "%s", argv[++i]);
         else { usage(argv[0]); return 2; }
     }
     if (!g_sock_path[0]) {
@@ -877,6 +1029,7 @@ int main(int argc, char **argv)
     /* The facade (loaded in-process) must see the same socket path. */
     setenv("NCMP_SOCK_PATH", g_sock_path, 1);
     ensure_filedir();
+    ensure_scendir();
 
     /* Install SIGINT/SIGTERM WITHOUT SA_RESTART so a signal interrupts the
      * blocking accept() (EINTR) and the loop can observe g_running == 0.

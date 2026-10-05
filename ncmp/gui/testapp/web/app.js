@@ -25,6 +25,23 @@ let CUR_SESSION = null;
 
 function authToken() { return $('#authToken').value.trim(); }
 
+/* ---- theme (light / dark) ---------------------------------------- */
+function applyTheme(t) {
+  document.documentElement.setAttribute('data-theme', t);
+  try { localStorage.setItem('ncmp_theme', t); } catch { /* private mode */ }
+  const btn = $('#themeToggle');
+  if (btn) btn.textContent = (t === 'light') ? '🌙 다크' : '☀️ 라이트';
+}
+function initTheme() {
+  let t = null;
+  try { t = localStorage.getItem('ncmp_theme'); } catch { /* ignore */ }
+  if (!t) t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+  applyTheme(t);
+}
+function toggleTheme() {
+  applyTheme(document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light');
+}
+
 async function api(path, method = 'GET', body = null) {
   const headers = {};
   if (body) headers['Content-Type'] = 'application/json';
@@ -80,6 +97,15 @@ async function refreshStatus() {
 async function daemonStart() {
   const d = await api('/api/daemon/start', 'POST', { transport: $('#transport').value });
   log('데몬 시작: ' + describe(d) + (d.pid ? ` (pid ${d.pid})` : ''));
+  // Wait until the daemon has actually bound its socket before the user loads
+  // the facade. The real FX3 probe (token identity scan) can take several
+  // seconds, so poll rather than assume it is ready immediately.
+  $('#daemonText').textContent = 'ncmpd 준비 대기 중…';
+  for (let i = 0; i < 40; i++) {
+    const s = await api('/api/status');
+    if (s.daemonRunning) { log('ncmpd 준비됨'); break; }
+    await new Promise((r) => setTimeout(r, 250));
+  }
   refreshStatus();
 }
 async function daemonStop() {
@@ -355,6 +381,63 @@ async function runOp(opId, values, vars) {
   return api(op.path, op.method, body);
 }
 
+/* PKCS#11 function name (or helper note) shown next to each unit item. */
+const PK = {
+  daemonStart: '도구', daemonStop: '도구', load: '도구(dlopen)', dlsym: '도구',
+  initialize: 'C_Initialize', finalize: 'C_Finalize', library: 'C_GetInfo',
+  slots: 'C_GetSlotList', tokenInfo: 'C_GetTokenInfo', mechanisms: 'C_GetMechanismList',
+  openSession: 'C_OpenSession', sessionInfo: 'C_GetSessionInfo', login: 'C_Login',
+  logout: 'C_Logout', closeSession: 'C_CloseSession', random: 'C_GenerateRandom',
+  digest: 'C_DigestInit+Digest', gcmSelftest: 'C_GenerateKey+Encrypt/Decrypt',
+  genfile: '도구', digestFile: 'C_Digest(multipart)', digestCompare: '도구+SW',
+};
+
+/* Unit-item palette, grouped. Shown in the scenario tab; click to append a step. */
+const PALETTE = [
+  ['수명주기', ['daemonStart', 'daemonStop', 'load', 'initialize', 'finalize', 'dlsym', 'library']],
+  ['슬롯/토큰', ['slots', 'tokenInfo', 'mechanisms']],
+  ['세션/로그인', ['openSession', 'sessionInfo', 'login', 'logout', 'closeSession']],
+  ['암복호화/해시', ['random', 'digest', 'gcmSelftest']],
+  ['파일/검증', ['genfile', 'digestFile', 'digestCompare']],
+];
+
+function defaultParams(opId) {
+  const op = OPS[opId];
+  const p = {};
+  for (const q of op.params) {
+    if (q.k === 'session') p[q.k] = '${s}';          // chain from an opened session
+    else if (q.k === 'slot') p[q.k] = (SELECTED_SLOT !== null ? SELECTED_SLOT : 0);
+    else p[q.k] = q.def ?? '';
+  }
+  return p;
+}
+
+function appendStep(opId) {
+  const step = { op: opId, params: defaultParams(opId) };
+  if (OPS[opId].save === 'session') step.saveAs = 's';   // openSession -> ${s}
+  working.steps.push(step);
+  renderSteps();
+  log('스텝 추가: ' + opId + (PK[opId] ? ' (' + PK[opId] + ')' : ''));
+}
+
+function renderPalette() {
+  const box = $('#palette');
+  if (!box) return;
+  box.innerHTML = '';
+  for (const [group, ids] of PALETTE) {
+    const row = el('div', { className: 'grp' }, el('span', { className: 'glabel', textContent: group }));
+    for (const id of ids) {
+      const b = el('button', { className: 'item', type: 'button' });
+      b.append(OPS[id].label + ' ');
+      b.append(el('span', { className: 'pk', textContent: PK[id] || '' }));
+      b.title = `${id} — ${PK[id] || ''}`;
+      b.onclick = () => appendStep(id);
+      row.append(b);
+    }
+    box.append(row);
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* API tester tab                                                     */
 /* ------------------------------------------------------------------ */
@@ -373,7 +456,7 @@ function renderApiParams() {
   const box = $('#apiParams');
   box.innerHTML = '';
   for (const p of op.params) {
-    box.append(el('span', { className: 'pk', textContent: p.k, dataset: {} }));
+    box.append(el('span', { className: 'pk', textContent: p.k }));
     let input;
     if (p.t === 'select') {
       input = el('select');
@@ -457,28 +540,35 @@ const BUILTIN = {
   ] },
 };
 
-function loadSavedScenarios() {
-  try { return JSON.parse(localStorage.getItem('ncmp_scenarios') || '{}'); }
-  catch { return {}; }
-}
-function saveScenarios(obj) { localStorage.setItem('ncmp_scenarios', JSON.stringify(obj)); }
-
-function fillScenarioSelect() {
+// Saved scenarios live on the SERVER (permanent, shared across browsers),
+// fetched via /api/scenarios and /api/scenario/*.
+async function fillScenarioSelect() {
   const sel = $('#scenarioSelect');
   sel.innerHTML = '';
   for (const name of Object.keys(BUILTIN))
     sel.append(el('option', { value: 'builtin:' + name, textContent: '★ ' + name }));
-  for (const name of Object.keys(loadSavedScenarios()))
-    sel.append(el('option', { value: 'saved:' + name, textContent: name }));
+  try {
+    const d = await api('/api/scenarios');
+    if (d.ok) for (const name of d.scenarios)
+      sel.append(el('option', { value: 'saved:' + name, textContent: '💾 ' + name }));
+  } catch { /* server list optional */ }
 }
 
-function loadScenario() {
+async function loadScenario() {
   const v = $('#scenarioSelect').value;
   if (!v) return;
-  const [kind, name] = [v.slice(0, v.indexOf(':')), v.slice(v.indexOf(':') + 1)];
-  const src = kind === 'builtin' ? BUILTIN[name] : loadSavedScenarios()[name];
+  const kind = v.slice(0, v.indexOf(':'));
+  const name = v.slice(v.indexOf(':') + 1);
+  let src;
+  if (kind === 'builtin') {
+    src = BUILTIN[name];
+  } else {
+    const d = await api('/api/scenario/get', 'POST', { name });
+    if (!d.ok || !d.scenario) return log('불러오기 실패: ' + describe(d));
+    src = d.scenario;
+  }
   if (!src) return;
-  working = { name, steps: JSON.parse(JSON.stringify(src.steps)) };
+  working = { name, steps: JSON.parse(JSON.stringify(src.steps || [])) };
   $('#scenarioName').value = kind === 'builtin' ? name + ' (사본)' : name;
   renderSteps();
   log(`시나리오 불러오기: ${name} (${working.steps.length} 스텝)`);
@@ -532,7 +622,29 @@ function renderSteps() {
 
     head.append(saveWrap, expSel, up, del);
     const li = el('li', {}, head);
-    if (paramStr) li.append(el('div', { className: 'meta', textContent: paramStr }));
+
+    // Editable parameters for this step.
+    if (op && op.params.length) {
+      const pe = el('div', { className: 'pedit' });
+      for (const q of op.params) {
+        const lab = el('label', {}, q.k + ' ');
+        let inp;
+        if (q.t === 'select') {
+          inp = el('select');
+          for (const [val, txt] of q.opts) inp.append(el('option', { value: val, textContent: txt }));
+          inp.value = step.params[q.k] ?? q.def;
+        } else {
+          inp = el('input', { type: 'text', value: step.params[q.k] ?? q.def ?? '' });
+          if (q.ph) inp.placeholder = q.ph;
+        }
+        inp.oninput = inp.onchange = () => { step.params[q.k] = inp.value; };
+        lab.append(inp);
+        pe.append(lab);
+      }
+      li.append(pe);
+    } else if (paramStr) {
+      li.append(el('div', { className: 'meta', textContent: paramStr }));
+    }
     ol.append(li);
   });
 }
@@ -589,26 +701,23 @@ function summarize(d, step) {
   return parts.join(' · ');
 }
 
-function saveScenario() {
+async function saveScenario() {
   const name = $('#scenarioName').value.trim();
   if (!name) return log('시나리오 이름을 입력하세요');
-  const all = loadSavedScenarios();
-  all[name] = { steps: working.steps };
-  saveScenarios(all);
+  const d = await api('/api/scenario/save', 'POST', { name, steps: working.steps });
+  if (!d.ok) return log('시나리오 저장 실패: ' + describe(d));
   working.name = name;
-  fillScenarioSelect();
+  await fillScenarioSelect();
   $('#scenarioSelect').value = 'saved:' + name;
-  log(`시나리오 저장: ${name}`);
+  log(`시나리오 저장(서버): ${name}`);
 }
-function deleteScenario() {
+async function deleteScenario() {
   const v = $('#scenarioSelect').value;
   if (!v.startsWith('saved:')) return log('내장 시나리오는 삭제할 수 없습니다');
   const name = v.slice('saved:'.length);
-  const all = loadSavedScenarios();
-  delete all[name];
-  saveScenarios(all);
-  fillScenarioSelect();
-  log(`시나리오 삭제: ${name}`);
+  await api('/api/scenario/delete', 'POST', { name });
+  await fillScenarioSelect();
+  log(`시나리오 삭제(서버): ${name}`);
 }
 function exportScenario() {
   const blob = new Blob([JSON.stringify({ name: $('#scenarioName').value || working.name, steps: working.steps }, null, 2)], { type: 'application/json' });
@@ -677,8 +786,11 @@ function wire() {
   $('#scenarioImport').onchange = importScenario;
 
   $('#btnClearLog').onclick = () => { $('#log').textContent = ''; };
+  $('#themeToggle').onclick = toggleTheme;
 
+  initTheme();
   fillApiOpSelect();
+  renderPalette();
   fillScenarioSelect();
   renderSteps();
   refreshFiles();

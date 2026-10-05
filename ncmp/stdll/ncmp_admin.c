@@ -160,6 +160,29 @@ unsigned long ncmp_admin_logout(ncmp_client_t *c, uint32_t slot)
     return admin_cmd(c, slot, NCMP_CMD_LOGOUT, NULL, 0, NULL, 0, NULL);
 }
 
+unsigned long ncmp_admin_open_session(ncmp_client_t *c, uint32_t slot,
+                                      uint32_t flags, uint32_t *out_handle)
+{
+    uint8_t fl[4], hb[4];
+    uint32_t got = 0, ack;
+
+    /* The caller (STDLL) must have set c->active_session_id = 0 so the token
+     * sees a zero wire-header session_id on OPEN (reference protocol). */
+    ncmp_wr_u32le(fl, flags);
+    ack = admin_cmd(c, slot, NCMP_CMD_OPEN_SESSION, fl, sizeof(fl),
+                    hb, sizeof(hb), &got);
+    if (ack == NCMP_CKR_OK && out_handle)
+        *out_handle = (got >= 4) ? ncmp_rd_u32le(hb) : 0;
+    return ack;
+}
+
+unsigned long ncmp_admin_close_session(ncmp_client_t *c, uint32_t slot)
+{
+    /* The handle rides in the wire header (c->active_session_id), set by the
+     * STDLL from the session it is closing; CLOSE carries no parameters. */
+    return admin_cmd(c, slot, NCMP_CMD_CLOSE_SESSION, NULL, 0, NULL, 0, NULL);
+}
+
 unsigned long ncmp_admin_init_pin(ncmp_client_t *c, uint32_t slot,
                                   const uint8_t *pin, uint32_t pin_len)
 {

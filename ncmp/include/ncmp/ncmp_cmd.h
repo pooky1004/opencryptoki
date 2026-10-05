@@ -79,15 +79,17 @@ enum ncmp_opcode {
     NCMP_CMD_OBJECT_SET_ATTR = 0x0039, /**< [class|key_type|attrs] -> (ack). Validate key attribute changes. */
 
     /*
-     * Session management. The token owns a per-slot session table that maps the
-     * requesting (process id, caller session id) pair to an 8-bit token-side
-     * session id ("HSM SID", 1..255, unique within the slot, collision-free).
-     * OPEN_SESSION allocates/returns the HSM SID; the STDLL then carries it in
-     * the wire header's session_id for every subsequent command. CLOSE_SESSION
-     * releases it. See docs/session-id-mapping.md.
+     * Session management (matches the MPF300T Mi-V reference target, CI opcodes
+     * 0x0020/0x0021; see the 2026-10-01 GETMECHLIST/AES-GCM reference package).
+     * OPEN_SESSION is sent with a zero wire-header session_id and a single
+     * 4-byte flags parameter; the token allocates a session and returns the
+     * handle in response parameter 0. The STDLL then carries that handle in the
+     * wire header's session_id of every subsequent command for that session.
+     * CLOSE_SESSION carries the handle in the wire header and takes no
+     * parameters. See docs/session-id-mapping.md.
      */
-    NCMP_CMD_OPEN_SESSION  = 0x003A, /**< [pid(u32)|sid(u32)|flags(u32)] -> [hsm_sid(u32,1..255)]. */
-    NCMP_CMD_CLOSE_SESSION = 0x003B, /**< [hsm_sid(u32)] -> (ack). */
+    NCMP_CMD_OPEN_SESSION  = 0x0020, /**< req [flags(u32)], hdr sid=0 -> resp param0 [handle(u32,1..255)]. */
+    NCMP_CMD_CLOSE_SESSION = 0x0021, /**< req hdr sid=handle, no params -> (ack). */
 
     /*
      * Post-quantum (PKCS#11 3.2 ML-DSA / ML-KEM). All keys are forwarded as

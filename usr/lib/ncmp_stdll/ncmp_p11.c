@@ -74,6 +74,7 @@ typedef struct p11_cipher {
 typedef struct p11_session {
     int          in_use;
     uint32_t     slot;
+    uint32_t     dev_sid;   /* token-assigned session handle (OPEN_SESSION) */
     CK_FLAGS     flags;
     /* digest */
     int          dig_active;
@@ -109,7 +110,12 @@ static p11_session_t *sess_get(CK_SESSION_HANDLE h)
     if (h == CK_INVALID_HANDLE || h > P11_MAX_SESSIONS)
         return NULL;
     p11_session_t *s = &g_sessions[h - 1];
-    return s->in_use ? s : NULL;
+    if (!s->in_use)
+        return NULL;
+    /* Every session-scoped command that resolves its handle here then issues
+     * wire commands carrying this token session id in the frame header. */
+    g_client.active_session_id = s->dev_sid;
+    return s;
 }
 
 static p11_object_t *obj_get(CK_OBJECT_HANDLE h)
@@ -271,6 +277,7 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slotID, CK_TOKEN_INFO_PTR pInfo)
     memset(pInfo->model, ' ', sizeof(pInfo->model));
     memset(pInfo->serialNumber, ' ', sizeof(pInfo->serialNumber));
     memset(&id, 0, sizeof(id));
+    g_client.active_session_id = 0;   /* sessionless query */
     if (ncmp_admin_token_info(&g_client, slotID, &id) == CKR_OK) {
         memcpy(pInfo->label, id.label,
                strnlen(id.label, sizeof(pInfo->label)));
@@ -362,10 +369,23 @@ CK_RV C_OpenSession(CK_SLOT_ID slotID, CK_FLAGS flags, CK_VOID_PTR pApp,
     pthread_mutex_lock(&g_lock);
     for (int i = 0; i < P11_MAX_SESSIONS; ++i) {
         if (!g_sessions[i].in_use) {
+            uint32_t handle = 0;
+            unsigned long ack;
+
+            /* Open a session on the token: zero wire-header session_id + a
+             * single flags parameter; the token returns the handle. */
+            g_client.active_session_id = 0;
+            ack = ncmp_admin_open_session(&g_client, (uint32_t)slotID,
+                                          (uint32_t)flags, &handle);
+            if (ack != CKR_OK) {
+                pthread_mutex_unlock(&g_lock);
+                return (CK_RV)ack;
+            }
             memset(&g_sessions[i], 0, sizeof(g_sessions[i]));
             g_sessions[i].in_use = 1;
             g_sessions[i].slot = (uint32_t)slotID;
             g_sessions[i].flags = flags;
+            g_sessions[i].dev_sid = handle;
             *phSession = (CK_SESSION_HANDLE)(i + 1);
             pthread_mutex_unlock(&g_lock);
             return CKR_OK;
@@ -383,7 +403,12 @@ CK_RV C_CloseSession(CK_SESSION_HANDLE hSession)
         pthread_mutex_unlock(&g_lock);
         return CKR_SESSION_HANDLE_INVALID;
     }
+    /* Close it on the token: the handle rides in the wire header
+     * (active_session_id, set by sess_get above); CLOSE takes no parameters.
+     * The local slot is freed regardless so the handle is never reused. */
+    (void)ncmp_admin_close_session(&g_client, s->slot);
     memset(s, 0, sizeof(*s));
+    g_client.active_session_id = 0;
     pthread_mutex_unlock(&g_lock);
     return CKR_OK;
 }

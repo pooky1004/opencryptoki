@@ -1,9 +1,26 @@
 :root {
+  /* Dark theme (default). */
   --bg: #0f1419; --panel: #171d26; --panel2: #1e2631; --line: #2b3542;
   --fg: #e5edf5; --muted: #8aa0b4; --accent: #4aa3ff; --ok: #39d98a; --bad: #ff5d6c;
+  --code-bg: #0b0f14;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
+/* Light theme: applied when <html data-theme="light"> (toggle in the header). */
+:root[data-theme="light"] {
+  --bg: #f4f6f9; --panel: #ffffff; --panel2: #eef2f7; --line: #d3dae3;
+  --fg: #1a2430; --muted: #5c6b7a; --accent: #1668d6; --ok: #138a52; --bad: #cc3645;
+  --code-bg: #f1f4f8;
+}
+/* First-visit default follows the OS preference unless the user chose dark. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #f4f6f9; --panel: #ffffff; --panel2: #eef2f7; --line: #d3dae3;
+    --fg: #1a2430; --muted: #5c6b7a; --accent: #1668d6; --ok: #138a52; --bad: #cc3645;
+    --code-bg: #f1f4f8;
+  }
+}
 * { box-sizing: border-box; }
+html, body { transition: background-color .15s ease, color .15s ease; }
 body {
   margin: 0; background: var(--bg); color: var(--fg);
   font: 14px/1.5 system-ui, "Segoe UI", sans-serif;
@@ -20,6 +37,8 @@ header {
   padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line);
 }
 .conn { display: flex; align-items: center; gap: 10px; }
+.themebtn { background: var(--panel2); color: var(--fg); border: 1px solid var(--line); padding: 6px 10px; border-radius: 6px; cursor: pointer; }
+.themebtn:hover { border-color: var(--accent); }
 .dot { width: 11px; height: 11px; border-radius: 50%; display: inline-block; }
 .dot.on { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
 .dot.off { background: #55606d; }
@@ -67,7 +86,7 @@ legend { color: var(--muted); padding: 0 6px; }
 .pill { background: var(--panel2); border: 1px solid var(--line); padding: 4px 10px; border-radius: 20px; font-family: var(--mono); }
 
 .out, .log {
-  background: #0b0f14; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px;
   padding: 10px; font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap;
   word-break: break-all; max-height: 320px; overflow: auto; margin: 0;
 }
@@ -79,7 +98,18 @@ legend { color: var(--muted); padding: 0 6px; }
 .params .pk { color: var(--muted); font-family: var(--mono); }
 .params input, .params select { width: 100%; }
 
+.palette { display: flex; flex-direction: column; gap: 8px; margin: 8px 0 4px; }
+.palette .grp { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.palette .glabel { color: var(--muted); font-size: 12px; min-width: 92px; }
+.palette .item { background: var(--panel2); border: 1px solid var(--line); color: var(--fg); padding: 5px 10px; border-radius: 14px; cursor: pointer; font-size: 12.5px; }
+.palette .item:hover { border-color: var(--accent); color: var(--accent); }
+.palette .item .pk { color: var(--muted); font-family: var(--mono); font-size: 11px; }
+
 .steps { padding-left: 20px; }
+.steps .pedit { display: flex; flex-wrap: wrap; gap: 6px 10px; margin-top: 6px; }
+.steps .pedit label { font-size: 12px; color: var(--muted); }
+.steps .pedit input, .steps .pedit select { padding: 3px 6px; font-size: 12px; }
+.steps .pedit input { width: 130px; }
 .steps li { margin: 6px 0; background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
 .steps .sh { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .steps .sh b { font-family: var(--mono); }

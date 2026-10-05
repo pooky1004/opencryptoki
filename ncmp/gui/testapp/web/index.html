@@ -10,6 +10,7 @@
   <header>
     <h1>Token NCMP — Web Test App</h1>
     <div class="conn">
+      <button id="themeToggle" class="themebtn" type="button" title="밝은/어두운 테마 전환">☀️ 라이트</button>
       <label>서버 토큰
         <input id="authToken" type="password" placeholder="NCMP_WEB_TOKEN (선택)" size="16">
       </label>
@@ -207,11 +208,15 @@
             <label class="filebtn">가져오기(JSON)<input type="file" id="scenarioImport" accept=".json"></label>
           </div>
           <p class="muted small">
-            스텝은 "PKCS#11 API 시험" 탭에서 추가하거나 아래에서 직접 편집합니다.
-            출력값은 <code>$세션</code> 처럼 변수로 저장해 다음 스텝에서
-            <code>${세션}</code> 로 참조할 수 있습니다(예: openSession → 저장변수 <code>s</code>,
-            login의 session에 <code>${s}</code>).
+            아래 <b>단위 항목</b>(대부분 PKCS#11 API)을 <b>순서대로 클릭</b>하면 스텝이
+            추가됩니다. 각 스텝의 파라미터·저장변수·기대값은 그 자리에서 수정할 수 있습니다.
+            출력값은 저장변수(예 <code>s</code>)로 담아 다음 스텝에서 <code>${s}</code> 로
+            참조합니다(openSession → <code>s</code> 저장 → login의 session에 <code>${s}</code>).
+            작성한 시나리오는 이름을 지정해 <b>저장</b>하면 서버에 영구 보관됩니다.
           </p>
+          <h3>단위 항목 (클릭해서 순서대로 추가)</h3>
+          <div id="palette" class="palette"></div>
+          <h3>구성된 스텝</h3>
           <ol id="stepList" class="steps"></ol>
           <h3>실행 결과</h3>
           <table id="resultTable" class="results">

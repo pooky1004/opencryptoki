@@ -84,6 +84,29 @@ unsigned long ncmp_admin_login(ncmp_client_t *c, uint32_t slot,
 unsigned long ncmp_admin_logout(ncmp_client_t *c, uint32_t slot);
 
 /**
+ * @brief Open a session on the token (NCMP_CMD_OPEN_SESSION, reference target).
+ *
+ * The STDLL must set c->active_session_id = 0 before calling so the OPEN frame
+ * carries a zero wire-header session_id; the token allocates a session and
+ * returns the handle, which is stored in @p out_handle. The STDLL then applies
+ * that handle (via c->active_session_id) to every subsequent command.
+ *
+ * @param c          Client handle.
+ * @param slot       Physical slot.
+ * @param flags      PKCS#11 session flags (CKF_SERIAL_SESSION | CKF_RW_SESSION).
+ * @param out_handle Receives the token-assigned session handle (may be NULL).
+ * @return NCMP_CKR_OK, a token ack (e.g. CKR_SESSION_COUNT), or a transport error.
+ */
+unsigned long ncmp_admin_open_session(ncmp_client_t *c, uint32_t slot,
+                                      uint32_t flags, uint32_t *out_handle);
+
+/**
+ * @brief Close the session carried in c->active_session_id (NCMP_CMD_CLOSE_SESSION).
+ * @return NCMP_CKR_OK, a token ack, or a mapped transport error.
+ */
+unsigned long ncmp_admin_close_session(ncmp_client_t *c, uint32_t slot);
+
+/**
  * @brief SO sets the (new) user PIN on the token.
  * @return NCMP_CKR_OK, a token ack, or a mapped transport error.
  */

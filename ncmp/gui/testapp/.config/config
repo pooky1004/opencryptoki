@@ -39,3 +39,8 @@ sock =
 # --- Test files ----------------------------------------------------------
 # Where generated test files (for init/update/final + SW compare) are kept.
 filedir = /tmp/ncmp_web_files
+
+# --- Saved scenarios -----------------------------------------------------
+# Directory for permanently saved test scenarios (one JSON file each). Keep it
+# on persistent storage (not /tmp) so scenarios survive reboots.
+scendir = .config/scenarios

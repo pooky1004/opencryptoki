@@ -18,6 +18,14 @@ typedef struct ncmp_client {
     void    *shm_base;  /**< Local SHM mapping base. */
     uint32_t slot_mask; /**< Bitmask of online slots reported by the daemon. */
     uint32_t seq;       /**< Monotonic request id source (atomic increment). */
+    /**
+     * Wire-header session_id applied to the next command(s). Set by the caller
+     * (the STDLL facade sets it to the token-assigned session handle for a
+     * session-scoped operation, or 0 for a sessionless one) and read by
+     * ncmp_client_simple()/ncmp_client_command_mp() when building the frame.
+     * Zero after ncmp_client_init(). See NCMP_CMD_OPEN_SESSION / session-id-mapping.
+     */
+    uint32_t active_session_id;
 } ncmp_client_t;
 
 /**

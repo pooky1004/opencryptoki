@@ -94,7 +94,7 @@ int ncmp_client_command(ncmp_client_t *c, uint32_t slot_id, uint32_t opcode,
         return NCMP_ERR_PARAM_SIZE;
 
     memset(&req, 0, sizeof(req));
-    req.header.session_id = 0; /* sessionless transport command */
+    req.header.session_id = c->active_session_id; /* token session handle, or 0 */
     req.header.sequence_id = __atomic_add_fetch(&c->seq, 1, __ATOMIC_RELAXED);
     req.header.command_id = opcode;
     req.param_len[0] = in_len;
@@ -144,7 +144,7 @@ int ncmp_client_command_mp(ncmp_client_t *c, uint32_t slot_id, uint32_t opcode,
         free(req_payload);
         return rc;
     }
-    req.header.session_id = 0;
+    req.header.session_id = c->active_session_id; /* token session handle, or 0 */
     req.header.sequence_id = __atomic_add_fetch(&c->seq, 1, __ATOMIC_RELAXED);
     req.header.command_id = opcode;
 

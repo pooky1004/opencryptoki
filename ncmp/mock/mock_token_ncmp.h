@@ -71,10 +71,8 @@ typedef struct mock_key {
  * the requesting (pid, sid) pair; a repeat open of the same pair is idempotent.
  */
 typedef struct mock_session {
-    int      in_use;  /**< Non-zero when allocated. */
-    uint32_t pid;     /**< Requesting process id (OPEN_SESSION param0). */
-    uint32_t sid;     /**< Caller-supplied session id (OPEN_SESSION param1). */
-    uint32_t flags;   /**< Session flags (OPEN_SESSION param2). */
+    int      in_use;  /**< Non-zero when allocated; the handle is index + 1. */
+    uint32_t flags;   /**< Session flags (OPEN_SESSION request parameter 0). */
 } mock_session_t;
 
 /** Maximum PIN length the mock token stores. */

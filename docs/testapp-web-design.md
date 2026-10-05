@@ -40,6 +40,11 @@ IPC(UNIX socket) + SHM  ──▶ ncmpd ──comm thread──▶ 실 FX3(USB) 
   (facade가 `dev_sid`로 저장), 이후 그 세션의 모든 명령은 핸들을 와이어 헤더
   `session_id`로 싣는다(실 타겟 레퍼런스와 동일). C_CloseSession은 0x0021.
   자세히: [`session-id-mapping.md`](session-id-mapping.md).
+- **세션 0 폴백(opt-in)**: 환경변수 `NCMP_SESSION0_FALLBACK`가 설정되면
+  C_OpenSession이 토큰 OPEN_SESSION을 보내지 않고 **wire session_id=0**을 쓰는
+  로컬 세션을 만든다(C_CloseSession도 토큰 CLOSE 생략). OPEN_SESSION을 구현하지
+  않은(또는 응답하지 않는) 펌웨어 브링업/디버그용. 기본 OFF — 운영 동작 불변.
+  실측 결과는 [`testapp-web-scenario-results.md`](testapp-web-scenario-results.md) §6-2.
 - PKCS#11 상태는 프로세스-전역(한 facade)이라, 서버는 모든 API 호출을 하나의
   뮤텍스로 **직렬화**한다(브라우저 탭이 여럿이어도 토큰은 하나).
 

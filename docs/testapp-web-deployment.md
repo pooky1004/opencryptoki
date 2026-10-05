@@ -34,7 +34,7 @@ ncmp/gui/testapp/build/ncmp_web \
     --webroot   $REPO/ncmp/gui/testapp/web \
     --module    $REPO/ncmp/gui/build-standalone/libpkcs11_ncmp_p11.so \
     --ncmpd     $REPO/ncmp/gui/build-standalone/ncmpd \
-    --transport mock        # 실 FX3는 real
+    --transport real        # 기본값 real (하드웨어 없으면 mock)
 # 브라우저: http://<서버IP>:8080/
 ```
 
@@ -63,7 +63,7 @@ port = 8080
 token =                     # 비우면 인증 끔. 운영 시 강한 비밀값 설정
 module = ../build-standalone/libpkcs11_ncmp_p11.so
 ncmpd  = ../build-standalone/ncmpd
-transport = mock
+transport = real
 filedir = /tmp/ncmp_web_files
 ```
 
@@ -86,7 +86,7 @@ build/ncmp_web --config /etc/ncmp_web.config
 | `--webroot` | `NCMP_WEB_ROOT` | `web` | 정적 UI 디렉토리 |
 | `--module` | `NCMP_PKCS11_MODULE` | (없음) | 기본 facade `.so` 경로(UI에서 비우면 사용) |
 | `--ncmpd` | — | `ncmpd` | 데몬 실행 파일(“데몬 시작”이 exec) |
-| `--transport` | — | `mock` | 데몬 기본 전송(real/mock/socket) |
+| `--transport` | — | `real` | 데몬 기본 전송(real/mock/socket). 기본 **real** |
 | `--sock` | `NCMP_SOCK_PATH` | `/tmp/ncmpd_web_<pid>.sock` | facade↔ncmpd 소켓(둘이 공유) |
 | `--filedir` | `NCMP_WEB_FILEDIR` | `/tmp/ncmp_web_files` | 생성한 테스트 파일 보관 디렉토리 |
 | `--scendir` | `NCMP_WEB_SCENDIR` | `.config/scenarios` | 저장 시나리오(JSON) 보관 디렉토리(영구 저장소 권장) |

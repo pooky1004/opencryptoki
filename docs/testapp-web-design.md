@@ -76,7 +76,8 @@ IPC(UNIX socket) + SHM  ──▶ ncmpd ──comm thread──▶ 실 FX3(USB) 
 | `POST /api/token` | `{slot}` | C_GetTokenInfo | `token{}` |
 | `POST /api/mechanisms` | `{slot}` | C_GetMechanismList | `mechanisms[]` |
 | `POST /api/session/open` | `{slot,rw}` | C_OpenSession | `session` |
-| `POST /api/session/close` | `{session}` | C_CloseSession | — |
+| `POST /api/session/adopt` | `{slot,session}` | 입력한 wire session_id로 로컬 세션 생성(토큰 OPEN 없음, `NCMP_OpenSessionWithId`) | `session,wireSid` |
+| `POST /api/session/close` | `{session}` | C_CloseSession (adopt 세션은 토큰 CLOSE 생략) | — |
 | `POST /api/session/info` | `{session}` | C_GetSessionInfo | `session{}` |
 | `POST /api/login` | `{session,userType,pin}` | C_Login | — |
 | `POST /api/logout` | `{session}` | C_Logout | — |

@@ -1228,7 +1228,12 @@ int main(int argc, char **argv)
         else { usage(argv[0]); return 2; }
     }
     if (!g_sock_path[0]) {
-        snprintf(g_sock_path, sizeof(g_sock_path), "/tmp/ncmpd_web_%d.sock", (int)getpid());
+        /* Stable, well-known user-space path (not per-pid) so the facade, a
+         * separately-launched Debug App (ncmp_dbg) and any other client all
+         * rendezvous on this ncmpd without passing --sock. A second ncmp_web
+         * reuses an ncmpd already listening here (see daemon_start). Set an
+         * explicit --sock/NCMP_SOCK_PATH to run isolated instances. */
+        snprintf(g_sock_path, sizeof(g_sock_path), "/tmp/ncmpd.sock");
     }
     /* The facade (loaded in-process) must see the same socket path. */
     setenv("NCMP_SOCK_PATH", g_sock_path, 1);

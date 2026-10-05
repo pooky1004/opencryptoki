@@ -33,7 +33,9 @@ module = ../build-standalone/libpkcs11_ncmp_p11.so
 ncmpd = ../build-standalone/ncmpd
 # Default daemon transport: real | mock | socket.
 transport = real
-# UNIX socket shared between the facade and ncmpd. Empty = auto (/tmp/..).
+# UNIX socket shared between the facade, ncmpd, and other clients (Debug App).
+# Empty = the shared default /tmp/ncmpd.sock, so a separately-launched Debug App
+# (ncmp_dbg) connects with no --sock. Set an explicit path for isolated runs.
 sock =
 
 # --- Test files ----------------------------------------------------------

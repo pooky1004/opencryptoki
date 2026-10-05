@@ -993,14 +993,19 @@ async function ciSend() {
   let d;
   try { d = await api('/api/ci', 'POST', body); }
   catch (e) { box.append(el('div', { className: 'dir err', textContent: '요청 실패: ' + e.message })); return; }
-  if (d.request) box.append(ciFrameBlock('송신(TX)', d.request));
+  // TX (left) and RX (right) side by side.
+  const frames = el('div', { className: 'frames2' });
+  box.append(frames);
+  if (d.request) frames.append(ciFrameBlock('송신(TX)', d.request));
   if (!d.ok) {
     const why = d.error || (d.rc === -7 ? 'timeout (토큰 무응답)' : 'rc=' + d.rc);
-    box.append(el('div', { className: 'xh' }, el('span', { className: 'dir err', textContent: '✘ RX 없음: ' + why })));
+    frames.append(el('div', { className: 'frame' },
+      el('div', { className: 'lbl', textContent: '수신(RX)' }),
+      el('div', { className: 'dir err', textContent: '✘ RX 없음: ' + why })));
     log(`  수신 실패: ${why}`);
   } else {
     head.append(el('span', { className: 'dir rx', textContent: `  ◀ RX ack=${ckrName(d.response.ack)} (${d.elapsedMs}ms)` }));
-    box.append(ciFrameBlock('수신(RX)', d.response));
+    frames.append(ciFrameBlock('수신(RX)', d.response));
     log(`  수신: ack=${ckrName(d.response.ack)} (${d.elapsedMs}ms)`);
   }
 }

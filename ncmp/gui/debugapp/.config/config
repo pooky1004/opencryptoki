@@ -16,6 +16,8 @@ webroot = web
 token =
 
 # --- ncmpd handshake -----------------------------------------------------
-# UNIX control socket ncmpd listens on. Empty = default (NCMP_IPC_SOCK_PATH);
-# must match the NCMP_SOCK_PATH the daemon was started with.
+# UNIX control socket ncmpd listens on. Empty = the shared default
+# /tmp/ncmpd.sock, which is also the Web Test App's default, so both connect to
+# the same ncmpd with no --sock. Set this (or NCMP_SOCK_PATH) to match a daemon
+# started elsewhere (e.g. systemd /run/ncmpd/ncmpd.sock).
 sock =

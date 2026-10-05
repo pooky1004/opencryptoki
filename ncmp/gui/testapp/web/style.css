@@ -149,6 +149,9 @@ footer .row { justify-content: flex-start; }
 .xchg .xh { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 12px; color: var(--muted); margin-bottom: 6px; }
 .xchg .dir { font-weight: 700; }
 .xchg .dir.tx { color: var(--accent); } .xchg .dir.rx { color: var(--ok); } .xchg .dir.err { color: var(--bad); }
+/* TX (left) / RX (right) side by side; stack on narrow screens. */
+.frames2 { display: flex; flex-wrap: wrap; gap: 12px; }
+.frames2 > .frame { flex: 1 1 0; min-width: 240px; }
 .frame { margin: 6px 0; }
 .frame .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
 .frame pre.hex { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-all; margin: 3px 0; }

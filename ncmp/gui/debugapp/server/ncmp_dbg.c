@@ -481,6 +481,12 @@ int main(int argc, char **argv)
         else { usage(argv[0]); return 2; }
     }
 
+    /* Default to the shared user-space socket the Web Test App's ncmpd uses, so
+     * launching the Debug App alongside it connects with no --sock. Overridable
+     * by config/env/CLI; set to the system path for a systemd-run ncmpd. */
+    if (!g_sock_path[0])
+        snprintf(g_sock_path, sizeof(g_sock_path), "/tmp/ncmpd.sock");
+
     struct sigaction sa; memset(&sa, 0, sizeof(sa)); sa.sa_handler = on_signal;
     sigaction(SIGINT, &sa, NULL); sigaction(SIGTERM, &sa, NULL);
     signal(SIGPIPE, SIG_IGN);

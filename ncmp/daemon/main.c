@@ -23,14 +23,18 @@
 #include "ncmp/ncmp_ipc.h"
 #include "ncmp/ncmp_errno.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 volatile sig_atomic_t g_running = 1;
 
@@ -118,6 +122,56 @@ static void ncmpd_probe_identity(ncmp_transport_t *transport, uint32_t slot_id,
             (int)NCMP_TI_SERIAL_LEN, ident.serial);
 }
 
+/**
+ * @brief Enforce a single system-wide ncmpd instance.
+ *
+ * ncmpd owns the one physical USB device and the shared memory, so a second
+ * instance must never run (two daemons would fight over the FX3 and corrupt the
+ * rendezvous). Hold an exclusive, non-blocking advisory lock on a fixed file
+ * for the whole process lifetime; the kernel releases it automatically when the
+ * process exits (or is killed), so a stale lock file is harmless. Path defaults
+ * to /tmp/ncmpd.lock, overridable with $NCMP_LOCK_PATH.
+ *
+ * @return The held lock fd (kept open on purpose) on success; -1 if another
+ *         instance holds the lock or the file cannot be locked.
+ */
+static int ncmpd_single_instance_lock(void)
+{
+    const char *path = getenv("NCMP_LOCK_PATH");
+    int fd;
+
+    if (!path || !*path)
+        path = "/tmp/ncmpd.lock";
+
+    fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    if (fd < 0) {
+        fprintf(stderr, "ncmpd: cannot open lock file %s: %s\n",
+                path, strerror(errno));
+        return -1;
+    }
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        if (errno == EWOULDBLOCK)
+            fprintf(stderr, "ncmpd: another ncmpd is already running "
+                    "(lock %s held) - only one ncmpd may run system-wide; "
+                    "reuse it (share its socket) or stop it first.\n", path);
+        else
+            fprintf(stderr, "ncmpd: flock(%s) failed: %s\n",
+                    path, strerror(errno));
+        close(fd);
+        return -1;
+    }
+    /* Record the PID for diagnostics; keep the fd open to hold the lock. */
+    if (ftruncate(fd, 0) == 0) {
+        char buf[32];
+        int n = snprintf(buf, sizeof(buf), "%d\n", (int)getpid());
+        if (n > 0) {
+            ssize_t w = write(fd, buf, (size_t)n);
+            (void)w;
+        }
+    }
+    return fd;
+}
+
 int main(int argc, char **argv)
 {
     ncmpd_slot_ctx_t slots[PKCS11_MAX_SLOT_COUNT];
@@ -154,6 +208,11 @@ int main(int argc, char **argv)
     fprintf(stderr, "ncmpd: transport = %s\n",
             backend == NCMP_BACKEND_MOCK ? "mock" :
             backend == NCMP_BACKEND_SOCKET ? "socket" : "real");
+
+    /* Refuse to start if another ncmpd already runs (single device/SHM owner).
+     * The lock fd is intentionally held for the process lifetime. */
+    if (ncmpd_single_instance_lock() < 0)
+        return 1;
 
     if (ncmpd_install_signals() != NCMP_OK) {
         fprintf(stderr, "ncmpd: failed to install signal handlers\n");

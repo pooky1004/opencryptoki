@@ -38,6 +38,13 @@ ncmp/gui/testapp/build/ncmp_web \
 # 브라우저: http://<서버IP>:8080/
 ```
 
+> **실 FX3 주의 — ncmpd는 하나만.** 실 FX3는 한 번에 한 ncmpd만 USB를 claim한다.
+> `--transport real` ncmp_web을 **여러 개** 띄우면 각자 ncmpd를 생성해 FX3를
+> 다투고, 나중 것은 `slot 0 transport open failed` → mask=0x0가 되어 **활성 슬롯이
+> 빈 목록**이 된다. 실 타겟은 **인스턴스 하나만** 쓰거나, 여러 클라이언트가 같은
+> `--sock`을 공유한다(ncmp_web의 "데몬 시작"은 그 소켓에 ncmpd가 이미 있으면
+> 재사용함). Debug App과 함께 쓰는 법은 debugapp-deployment.md §2.1 참고.
+
 ### 설정 파일 (`.config/config`)
 
 포트 등 접속 정보를 매번 인자로 넘기지 않도록 **설정 파일**에 저장할 수 있다.
@@ -189,4 +196,9 @@ curl -s -H "Authorization: Bearer $NCMP_WEB_TOKEN" \
 - **C_Initialize가 rc≠0(예: 0xE0)**: ncmpd 미기동/소켓 경로 불일치. UI의 "데몬
   시작"으로 띄우거나 `--sock`을 외부 ncmpd와 일치시켜라. UNIX 소켓 경로는 108바이트
   미만이어야 한다(너무 긴 경로 금지).
+- **ncmpd는 running인데 활성 슬롯이 빈 목록(실 FX3)**: ncmpd가 **둘 이상** 떠서
+  FX3 claim에 실패한 경우다. ncmpd 로그에 `slot 0 transport open failed` /
+  `online slots mask=0x0`가 보인다. 중복 ncmpd(다른 ncmp_web real 인스턴스,
+  남은 데몬)를 모두 종료하고 **하나만** 띄운다: `pgrep -af ncmpd`로 확인 후 정리.
+  §2의 "실 FX3 주의" 참고.
 - **실 FX3가 안 보임**: udev 규칙(§3.2)·`plugdev` 소속 확인, `lsusb | grep 04b4:00f1`.

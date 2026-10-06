@@ -56,7 +56,18 @@ ncmpd (conn_thread + SHM 소유)  ──comm thread──▶ 실 FX3(USB)/mock/s
 | `GET /api/status` | — | 연결/ SHM 헤더 | `connected,shmName,magic,version,slotCount,totalSize,slotMask,sockPath,authRequired` |
 | `GET /api/slots` | — | 실재(ABSENT 아님) 슬롯 요약 | `slots[],slotCount,shown` |
 | `POST /api/slot` | `{slot}` | 슬롯 1개 전체 SHM 덤프 | `state,boundCkSlot,curSessions,maxInflight,stats,token,bufPool,queue,busy[]` |
-| `POST /api/reconnect` | — | SHM detach 후 재attach | `connected` |
+| `POST /api/lastmsg` | `{slot}` | comm_thread↔HSM **마지막 TX/RX** 프레임 | `tx{len,cap,ms,hex,parsed,…},rx{…}` |
+| `POST /api/reconnect` | — | SHM detach 후 재attach | `connected,reason` |
+
+> **comm↔HSM 마지막 메시지**: comm_thread가 각 슬롯에서 토큰으로 **보낸 마지막
+> 프레임(TX, 세션/컨텍스트 변환 후 와이어 바이트)**과 **받은 마지막 프레임(RX, 원시)**을
+> SHM `NCMP_Slot.last_msg`(`NCMP_LastMsg`, 최대 `NCMP_LASTMSG_CAP`=4KB 캡처)에 기록한다.
+> `/api/lastmsg`가 이를 **raw(Hex) + parsed**(frame_len·session_id·sequence_id·
+> command_id(+이름)·ack(+CKR)·payload_len·param[i])로 돌려주고, 슬롯 상세에 표시된다.
+> **파라미터 하나가 1024바이트를 초과하면 hex는 1024바이트까지만** 출력하고(`shown`),
+> 실제 길이(`len`)와 `truncated`로 표시한다. TX는 **전송 성공 여부와 무관하게**
+> 기록되어(미응답 토큰도 보낸 프레임을 확인 가능), RX는 수신 성공 시 기록된다.
+> 단일 writer(해당 슬롯 comm_thread)라 락 없음(읽기 전용 뷰어는 torn read 허용).
 
 > Debug App은 **읽기 전용 SHM 인스펙터**다. 토큰에 명령을 보내는 경로는 없다
 > (이전의 `POST /api/ci` CI 송수신 기능은 제거됨 — 실 타겟 명령 송신은 Web Test

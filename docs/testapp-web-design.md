@@ -110,28 +110,27 @@ SHA3-224/256/384/512.
 - **테마**: 헤더의 ☀️/🌙 버튼으로 **라이트/다크** 전환(선택을 localStorage에 저장,
   첫 방문은 OS 설정을 따름). 색은 CSS 변수(`:root` 다크, `:root[data-theme=light]`
   라이트)로 정의. 상세 사용법은 [`testapp-web-manual.md`](testapp-web-manual.md).
-- **상단 툴바**: ncmpd 전송 선택·시작/정지·상태 램프, facade 경로·로드·
-  C_Initialize/Finalize·슬롯 새로고침·dlsym 점검, 서버 토큰 입력칸.
-- **좌측**: 활성 슬롯 리스트(C_GetSlotList). 선택 시 우측 패널이 그 토큰으로 전환.
-- **우측 탭**:
-  1. **토큰 정보** — C_GetTokenInfo + 메커니즘 목록.
-  2. **세션/로그인** — R/W 세션 열기·닫기, 세션 정보, 로그인/로그아웃.
-  3. **암복호화/해시** — C_GenerateRandom, C_Digest(SHA-256/512·SHA3),
-     AES-GCM 자가검증.
-  4. **파일/검증** — ① 크기를 입력해 테스트 파일 생성(바이트/KB/MB; init/update/
-     final 시험은 ≥64KB 필요), ② 그 파일을 토큰 **multipart** 해시, ③ **실 타겟
-     ↔ SW(OpenSSL) 비교**로 토큰이 정확히 동작하는지 MATCH/MISMATCH 판정.
-  5. **PKCS#11 API 시험** — **단위 API 항목**을 골라 파라미터를 채워 1건 실행
-     (요청/응답 JSON 표시). 각 항목이 시나리오의 단위 스텝이 된다.
-  6. **CI 송수신** — CI(Command Interface) 단위로 실 타겟에 프레임을 직접 보내고
-     받는다. CI opcode 선택 + CI별 입력 파라미터(p0~p7, Hex) + session_id, 전송 시
-     **디버깅 창**에 **송신(TX)는 왼쪽·수신(RX)은 오른쪽(좌우 2열, 좁으면 자동
-     세로 접힘)** 으로 각각 **raw(Hex)** 와 **parsed**(frame_len·session_id·
-     sequence_id·command_id(+CI 이름)·ack(+CKR 이름)·payload_len·param[i]) 출력.
-     (Debug App에서 이관 — facade를 거치지 않고 서버의 별도 `ncmp_client`로 데몬에
-     직접 전송.)
-  7. **시나리오** — 단위 스텝을 조합해 시나리오를 만들고 실행(스텝별 PASS/FAIL).
-- **하단**: 로그.
+- **헤더(앱바)**: `◆ NCMP HSM` 로고, **브레드크럼**(그룹 › 메뉴, 선택에 따라 갱신),
+  테마 토글·서버 토큰·연결 상태 램프·`FX3 · SuperSpeed` 배지.
+- **상단 툴바**: ncmpd 전송 선택·시작/정지, facade 경로·로드·**C_Initialize**·
+  **C_Finalize**(로드와 슬롯 새로고침 사이)·슬롯 새로고침·dlsym 점검.
+- **좌측**: 맨 위 **활성 슬롯 패널**(`#slotList`, C_GetSlotList, 상시 표시·메뉴 전환
+  무관)과 그 아래 **그룹 네비**(가로 탭 폐지, `.navitem[data-tab]` →
+  `.tabpane[data-pane]`). 슬롯 선택이 토큰 정보·세션·암호 명령의 대상이며, 세션
+  ID는 슬롯마다 다를 수 있어 세션 표의 "세션 ID" 칸에 slot도 함께 표시.
+  - **장치 관리**: `장치 현황 · SRAM`(C_GetTokenInfo/MechList + 명령 기본값 접기) ·
+    `세션 관리`.
+  - **암호 서비스**: `AES / SHA3`(C_Digest) · `AES-GCM`(자가검증) · `ML-DSA / ML-KEM`
+    (mode-2 미구현 안내) · `난수 생성`(C_GenerateRandom) · `CI 명령 제어`(원시 CI
+    송수신, TX/RX raw+parsed 좌우 2열).
+  - **도구**: `파일 · 검증`(테스트 파일 생성 + 토큰 multipart 해시 + 실타겟↔SW 비교)
+    · `PKCS#11 API 시험`(단위 API 1건 + 시나리오 스텝화) · `시나리오`.
+  - **모니터링**: `암복호화 속도 측정`(준비 중) · `활동 기록`(로그).
+- **세션 관리 페이지**: 첨부 설계처럼 **좌우 2카드** — **Sessions**(최대 256,
+  `새 세션`=C_OpenSession / `ID로 추가`=adopt, 표 `No·세션ID·역할·관리`, 빈 상태
+  문구) + **Authentication**(Session▼ 선택기 / Role▼ / PIN / Login·Logout·Ping).
+  모든 per-세션 명령은 선택된 세션으로 전송되며, 로그인하면 표의 **역할**이 갱신된다.
+- **콘텐츠**는 카드(`.card`)로 감싸며, 현재 메뉴의 pane만 표시된다.
 
 ### 단위 항목 ↔ 시나리오 엔진 (요구사항 매핑)
 

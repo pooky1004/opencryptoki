@@ -1,22 +1,30 @@
 # 세션 ID 매핑
 
-> **갱신(2026-10-05): 실 타겟(MPF300T Mi-V) 레퍼런스에 맞춰 세션 OPEN/CLOSE
-> 와이어 프로토콜을 변경했다.** 아래 §의 `(pid, sid)` 3-파라미터 모델은
-> 폐기되고, 다음으로 대체됐다(참조: 2026-10-01 GETMECHLIST/AES-GCM 패키지의
-> `host/web_ui/fx3_ci.py`):
+> **갱신(2026-10-06): `(pid, app_sid) → hsm_sid` 매핑을 ncmpd에 구현했다.**
+> 2026-10-05의 "단순 핸들" 노트를 대체한다(원래 (pid+sid)→HSM SID 설계를 재채택,
+> app_sid는 OPEN의 param1에 실음).
 >
-> - **OPEN_SESSION = 0x0020**: 요청 — 와이어 헤더 `session_id = 0`, 파라미터 0 =
->   4바이트 flags. 응답 — **파라미터 0 = 토큰이 할당한 세션 핸들(1~255)**.
-> - **CLOSE_SESSION = 0x0021**: 요청 — 헤더 `session_id = 핸들`, 파라미터 없음.
-> - 이후 그 세션의 모든 명령은 이 핸들을 와이어 헤더 `session_id`로 싣는다
->   (STDLL은 `ncmp_client_t.active_session_id`로 전달; facade `sess_get()`가 세션
->   조회 시 설정). LOGIN=0x0030 / LOGOUT=0x0031은 레퍼런스와 동일하여 그대로.
+> - **OPEN_SESSION = 0x0020**: App(STDLL) 요청 — 와이어 헤더 `session_id = 0`,
+>   파라미터 `[pid, app_sid, flags]`. app_sid는 **앱이 고르는 세션 식별자**(facade
+>   의 `g_next_app_sid` 단조 증가). ncmpd는 enqueue한 **pid를 큐 엔트리에 기록**하고,
+>   토큰으로 보낼 때 **param1(sid)=0**으로 바꿔 보낸다(토큰이 새 세션 할당). 토큰
+>   응답 — **param0 = hsm_sid**. ncmpd는 슬롯 SHM의 `sess_map[(pid, app_sid)] =
+>   hsm_sid`(`NCMP_SessMap`)에 저장한다.
+> - **이후 모든 명령**: 와이어 헤더 `session_id = app_sid`로 도착하면 ncmpd가
+>   `(pid, app_sid) → hsm_sid`로 **헤더 session_id를 치환**해 토큰에 보낸다(그리고
+>   보낸 hsm_sid로 응답을 상관). LOGIN=0x0030 등 모든 opcode 동일.
+> - **CLOSE_SESSION = 0x0021**: 헤더 `session_id = app_sid` → hsm_sid로 치환,
+>   성공 시 매핑 제거.
 >
-> 구현: `ncmp_cmd.h`(opcode/레이아웃), `usr/lib/ncmp_stdll/ncmp_p11.c`
-> (C_OpenSession/C_CloseSession + `dev_sid` 저장), `ncmp/stdll/ncmp_admin.c`
-> (`ncmp_admin_open_session`/`close_session`), `ncmp/stdll/ncmp_client.c`
-> (`active_session_id` → 헤더), `ncmp/mock/mcu_scheduler.c`(mock OPEN/CLOSE).
-> 핸들 할당은 여전히 슬롯별 1~255, 중첩 없음. 아래 원문은 과거 설계 기록으로 남긴다.
+> 구현: `ncmp_cmd.h`(opcode/레이아웃), `ncmp_shm.h`(`NCMP_SessMap`+슬롯 테이블,
+> SHM v3), `ncmp_queue.h`(`NCMP_QEntry.pid`), `ncmp/common/ncmp_slot.c`
+> (`ncmp_sess_map_*` + enqueue pid), `ncmp/stdll/ncmp_client.c`(pid 기록),
+> `ncmp/daemon/comm_thread.c`(`sess_xform_request`/`sess_apply_response` 변환),
+> `ncmp/stdll/ncmp_admin.c`(`ncmp_admin_open_session`=[pid,app_sid,flags]),
+> `usr/lib/ncmp_stdll/ncmp_p11.c`(app_sid 생성·`dev_sid`), `ncmp/mock/mcu_scheduler.c`
+> (OPEN flags=param2, hsm_sid 반환). 테스트 `ncmp/tests/test_session_map.c`.
+> GUI 표시: `ncmp_web`의 `POST /api/sessmap`(SHM `sess_map` 조회) + 세션 관리 탭의
+> "토큰 세션 맵" 표. 아래 원문은 상세 설계 기록이다.
 
 ---
 

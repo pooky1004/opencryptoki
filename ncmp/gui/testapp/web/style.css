@@ -58,20 +58,59 @@ header {
 .defaults > summary:hover { color: var(--accent); }
 .defaults > .row { padding: 0 12px 12px; }
 
-main { display: flex; gap: 12px; padding: 12px 16px; align-items: stretch; }
-.slots { width: 230px; flex-shrink: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
-.slots ul { list-style: none; margin: 0; padding: 0; }
-.slots li { padding: 8px 10px; border-radius: 6px; cursor: pointer; font-family: var(--mono); }
-.slots li:hover { background: var(--panel2); }
-.slots li.sel { background: var(--accent); color: #04121f; font-weight: 600; }
+/* ---- App shell: header brand/breadcrumb, left grouped nav, card content ---- */
+.appbar { gap: 16px; justify-content: flex-start; }
+.brand { display: flex; align-items: baseline; gap: 6px; font-size: 18px; white-space: nowrap; }
+.brand .logo { color: var(--accent); }
+.brand b { font-weight: 800; letter-spacing: .02em; }
+.brandsub { color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .12em; }
+.crumb { color: var(--muted); font-size: 13px; display: flex; gap: 8px; align-items: center; min-width: 0; }
+.crumb .sep { opacity: .6; }
+.crumb .cur { color: var(--fg); font-weight: 600; }
+.appbar .conn { margin-left: auto; }
+.hwbadge { background: var(--panel2); border: 1px solid var(--line); color: var(--muted); border-radius: 999px; padding: 4px 12px; font-size: 12px; white-space: nowrap; }
 
-.panel { flex: 1; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; min-width: 0; }
-.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); padding: 8px 8px 0; flex-wrap: wrap; }
-.tab { background: transparent; border: none; color: var(--muted); padding: 8px 14px; border-radius: 6px 6px 0 0; cursor: pointer; }
-.tab.active { background: var(--panel2); color: var(--fg); }
-.tabbody { padding: 14px; }
+.shell { display: flex; gap: 12px; padding: 12px 16px; align-items: stretch; }
+.sidenav { width: 230px; flex-shrink: 0; display: flex; flex-direction: column; gap: 16px; }
+.slotspanel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.slotspanel .navhead { padding: 0 0 6px; }
+.navgroup { display: flex; flex-direction: column; gap: 2px; }
+.navhead { color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; padding: 4px 10px; }
+.navitem { text-align: left; background: transparent; border: 1px solid transparent; color: var(--fg); padding: 8px 12px; border-radius: 8px; cursor: pointer; font-size: 13px; }
+.navitem:hover { background: var(--panel2); }
+.navitem.active { background: var(--panel2); border-color: var(--line); color: var(--accent); font-weight: 600; }
+
+.content { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+.card-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 8px; }
+.card-head h2, .card-head h3 { margin: 0; }
+.cards2 { display: flex; gap: 12px; align-items: flex-start; }
+.cards2 > .card { flex: 1; min-width: 0; }
+.subrow { gap: 8px; flex-wrap: wrap; margin: 4px 0 10px; }
+
+.slotlist { list-style: none; margin: 6px 0; padding: 0; }
+.slotlist li { padding: 8px 10px; border-radius: 6px; cursor: pointer; font-family: var(--mono); border: 1px solid transparent; }
+.slotlist li:hover { background: var(--panel2); }
+.slotlist li.sel { background: var(--accent); color: #04121f; font-weight: 600; }
+
+.field { display: block; margin: 10px 0; color: var(--muted); font-size: 12px; }
+.field select, .field input { display: block; width: 100%; margin-top: 4px; }
+.pinwrap { display: flex; gap: 6px; margin-top: 4px; }
+.pinwrap input { flex: 1; }
+.empty { text-align: center; padding: 24px 8px; }
+table.sess td .link, .link { background: transparent; border: none; color: var(--accent); cursor: pointer; padding: 2px 4px; font-size: 12px; }
+.link:hover { text-decoration: underline; }
+table.sess tr.cur td { background: var(--panel2); }
+
 .tabpane { display: none; }
 .tabpane.active { display: block; }
+.tabpane .card + .card { margin-top: 12px; }
+
+@media (max-width: 860px) {
+  .shell { flex-direction: column; }
+  .sidenav { width: auto; flex-direction: row; flex-wrap: wrap; }
+  .cards2 { flex-direction: column; }
+}
 
 .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; }
 label { display: inline-flex; align-items: center; gap: 5px; }

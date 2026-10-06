@@ -75,7 +75,9 @@ typedef struct p11_cipher {
 typedef struct p11_session {
     int          in_use;
     uint32_t     slot;
-    uint32_t     dev_sid;   /* token-assigned session handle (OPEN_SESSION) */
+    uint32_t     dev_sid;   /* app session id = wire session_id for this session
+                            * (OPEN sends it in param1; ncmpd maps it to hsm_sid) */
+    uint32_t     hsm_sid;   /* token-assigned hsm session id (OPEN resp param0) */
     uint8_t      adopted;   /* 1 = caller-supplied wire session id, no token open/close */
     CK_FLAGS     flags;
     /* digest */
@@ -100,6 +102,7 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static int             g_initialized;
 static ncmp_client_t  g_client;
 static uint32_t       g_slot;                 /* first online slot */
+static uint32_t       g_next_app_sid = 1;     /* monotonic app session id source */
 static p11_session_t  g_sessions[P11_MAX_SESSIONS];
 static p11_object_t   g_objects[P11_MAX_OBJECTS];
 
@@ -383,7 +386,7 @@ CK_RV C_OpenSession(CK_SLOT_ID slotID, CK_FLAGS flags, CK_VOID_PTR pApp,
     pthread_mutex_lock(&g_lock);
     for (int i = 0; i < P11_MAX_SESSIONS; ++i) {
         if (!g_sessions[i].in_use) {
-            uint32_t handle = 0;
+            uint32_t app_sid = 0, hsm = 0;
 
             if (session0_fallback_enabled()) {
                 /*
@@ -394,14 +397,20 @@ CK_RV C_OpenSession(CK_SLOT_ID slotID, CK_FLAGS flags, CK_VOID_PTR pApp,
                  * firmware that does not (yet) implement OPEN_SESSION. Off by
                  * default; production behaviour (real open) is unchanged.
                  */
-                handle = 0;
+                app_sid = 0;
             } else {
-                /* Open a session on the token: zero wire-header session_id + a
-                 * single flags parameter; the token returns the handle. */
+                /*
+                 * Open a session: pick our own app_sid, send OPEN with a zero
+                 * wire-header session_id and params [pid, app_sid, flags].
+                 * ncmpd maps (pid, app_sid) -> the token hsm_sid and translates
+                 * app_sid -> hsm_sid on every later command. We keep app_sid as
+                 * the session's wire id (dev_sid).
+                 */
                 unsigned long ack;
+                app_sid = g_next_app_sid++;
                 g_client.active_session_id = 0;
                 ack = ncmp_admin_open_session(&g_client, (uint32_t)slotID,
-                                              (uint32_t)flags, &handle);
+                                              app_sid, (uint32_t)flags, &hsm);
                 if (ack != CKR_OK) {
                     pthread_mutex_unlock(&g_lock);
                     return (CK_RV)ack;
@@ -411,7 +420,8 @@ CK_RV C_OpenSession(CK_SLOT_ID slotID, CK_FLAGS flags, CK_VOID_PTR pApp,
             g_sessions[i].in_use = 1;
             g_sessions[i].slot = (uint32_t)slotID;
             g_sessions[i].flags = flags;
-            g_sessions[i].dev_sid = handle;
+            g_sessions[i].dev_sid = app_sid;
+            g_sessions[i].hsm_sid = hsm;
             *phSession = (CK_SESSION_HANDLE)(i + 1);
             pthread_mutex_unlock(&g_lock);
             return CKR_OK;

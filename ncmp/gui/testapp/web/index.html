@@ -7,17 +7,19 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <header>
-    <h1>Token NCMP — Web Test App</h1>
+  <header class="appbar">
+    <div class="brand"><span class="logo">◆</span> <b>NCMP</b> <span class="brandsub">HSM</span></div>
+    <div class="crumb"><span id="crumbGroup">장치 관리</span> <span class="sep">›</span> <span id="crumbItem" class="cur">세션 관리</span></div>
     <div class="conn">
       <button id="themeToggle" class="themebtn" type="button" title="밝은/어두운 테마 전환">☀️ 라이트</button>
       <label>서버 토큰
-        <input id="authToken" type="password" placeholder="NCMP_WEB_TOKEN (선택)" size="16">
+        <input id="authToken" type="password" placeholder="NCMP_WEB_TOKEN (선택)" size="14">
         <button type="button" class="eye" data-target="authToken" title="토큰 표시/숨김" aria-label="토큰 표시/숨김">👁</button>
       </label>
       <span id="daemonDot" class="dot off"></span>
-      <span id="daemonText">상태 확인 중…</span>
+      <span id="daemonText" class="small">상태 확인 중…</span>
       <span id="cfgInfo" class="muted small"></span>
+      <span class="hwbadge">FX3 · SuperSpeed</span>
     </div>
   </header>
 
@@ -37,139 +39,154 @@
       <strong>facade</strong>
       <input id="modulePath" type="text" placeholder="libpkcs11_ncmp.so 경로 (비우면 서버 기본값)">
       <button id="btnLoad">로드</button>
+      <button id="btnInit" class="primary">C_Initialize</button>
+      <button id="btnFinal">C_Finalize</button>
       <button id="btnSlots">슬롯 새로고침</button>
       <button id="btnDlsym">dlsym 점검</button>
     </div>
     <div id="libInfo" class="muted"></div>
   </section>
 
-  <main>
-    <!-- Left: active slots -->
-    <aside class="slots">
-      <h2>활성 슬롯</h2>
-      <ul id="slotList"></ul>
-      <p class="muted small">슬롯을 선택하면 오른쪽에 해당 토큰 메뉴가 표시됩니다.</p>
+  <div class="shell">
+    <!-- Left: active slots (persistent) + grouped navigation -->
+    <aside class="sidenav">
+      <div class="slotspanel">
+        <div class="navhead">활성 슬롯</div>
+        <ul id="slotList" class="slotlist"></ul>
+        <p class="muted small">슬롯 선택 = 토큰 정보·세션·암호 명령의 대상. 슬롯마다 세션 ID가 다를 수 있습니다.</p>
+      </div>
+      <div class="navgroup">
+        <div class="navhead">장치 관리</div>
+        <button class="navitem" type="button" data-tab="token"   data-group="장치 관리" data-label="장치 현황 · SRAM">장치 현황 · SRAM</button>
+        <button class="navitem active" type="button" data-tab="session" data-group="장치 관리" data-label="세션 관리">세션 관리</button>
+      </div>
+      <div class="navgroup">
+        <div class="navhead">암호 서비스</div>
+        <button class="navitem" type="button" data-tab="hash" data-group="암호 서비스" data-label="AES / SHA3">AES / SHA3</button>
+        <button class="navitem" type="button" data-tab="gcm"  data-group="암호 서비스" data-label="AES-GCM">AES-GCM</button>
+        <button class="navitem" type="button" data-tab="pqc"  data-group="암호 서비스" data-label="ML-DSA / ML-KEM">ML-DSA / ML-KEM</button>
+        <button class="navitem" type="button" data-tab="rng"  data-group="암호 서비스" data-label="난수 생성">난수 생성</button>
+        <button class="navitem" type="button" data-tab="ci"   data-group="암호 서비스" data-label="CI 명령 제어">CI 명령 제어</button>
+      </div>
+      <div class="navgroup">
+        <div class="navhead">도구</div>
+        <button class="navitem" type="button" data-tab="file"     data-group="도구" data-label="파일 · 검증">파일 · 검증</button>
+        <button class="navitem" type="button" data-tab="api"      data-group="도구" data-label="PKCS#11 API 시험">PKCS#11 API 시험</button>
+        <button class="navitem" type="button" data-tab="scenario" data-group="도구" data-label="시나리오">시나리오</button>
+      </div>
+      <div class="navgroup">
+        <div class="navhead">모니터링</div>
+        <button class="navitem" type="button" data-tab="perf" data-group="모니터링" data-label="암복호화 속도 측정">암복호화 속도 측정</button>
+        <button class="navitem" type="button" data-tab="log"  data-group="모니터링" data-label="활동 기록">활동 기록</button>
+      </div>
     </aside>
 
-    <!-- Right: tabs -->
-    <section class="panel">
-      <nav class="tabs">
-        <button class="tab active" data-tab="token">토큰 정보</button>
-        <button class="tab" data-tab="sessions">활성 세션</button>
-        <button class="tab" data-tab="session">세션 / 로그인</button>
-        <button class="tab" data-tab="crypto">암복호화 / 해시</button>
-        <button class="tab" data-tab="file">파일 / 검증</button>
-        <button class="tab" data-tab="api">PKCS#11 API 시험</button>
-        <button class="tab" data-tab="ci">CI 송수신</button>
-        <button class="tab" data-tab="scenario">시나리오</button>
-      </nav>
-
-      <div class="tabbody">
-        <!-- Token -->
-        <div class="tabpane active" data-pane="token">
-          <fieldset>
-            <legend>라이브러리 수명주기</legend>
-            <div class="row">
-              <button id="btnInit" class="primary">C_Initialize</button>
-              <button id="btnFinal">C_Finalize</button>
-              <span class="muted small">먼저 상단 "로드"로 facade를 올린 뒤 C_Initialize를 호출합니다. C_Initialize 시 아래 "명령 기본값"이 각 탭 입력칸에 반영됩니다.</span>
-            </div>
-          </fieldset>
-
-          <details id="cmdDefaults" class="defaults">
-            <summary title="여기서 지정한 값이 로그인·세션 명령의 기본값으로 쓰입니다(C_Initialize 시 적용). 각 탭에서 개별 수정 가능">명령 기본값 (PIN · 사용자 · 세션 ID)</summary>
-            <div class="row">
-              <label>사용자
-                <select id="defUserType">
-                  <option value="1">User</option>
-                  <option value="0">SO</option>
-                  <option value="2">ContextSpecific</option>
-                </select>
-              </label>
-              <label>User PIN <input type="password" id="defPin" value="1234" size="10"></label>
-              <button type="button" class="eye" data-target="defPin" title="표시/숨김">👁</button>
-              <label>SO PIN <input type="password" id="defSoPin" value="12345678" size="12"></label>
-              <button type="button" class="eye" data-target="defSoPin" title="표시/숨김">👁</button>
-              <label>세션 ID <input type="number" id="defSessionId" value="1" min="0" max="65535" style="width:84px"></label>
-              <label><input type="checkbox" id="defRw" checked> R/W</label>
-              <button id="btnApplyDefaults" type="button" title="지금 각 탭 입력칸에 반영">적용</button>
-            </div>
-          </details>
-
-          <button id="btnTokenInfo">토큰 정보 조회 (C_GetTokenInfo + MechanismList)</button>
+    <!-- Right: content -->
+    <section class="content">
+      <!-- 장치 현황 · SRAM -->
+      <div class="tabpane" data-pane="token">
+        <div class="card">
+          <div class="card-head">
+            <h2>토큰 정보</h2>
+            <button id="btnTokenInfo">조회 (C_GetTokenInfo + MechanismList)</button>
+          </div>
+          <p class="muted small">왼쪽 "활성 슬롯"에서 선택한 슬롯을 대상으로 조회합니다.</p>
           <pre id="tokenInfo" class="out"></pre>
           <h3>지원 메커니즘</h3>
           <ul id="mechList" class="mechs"></ul>
         </div>
+        <details id="cmdDefaults" class="defaults card">
+          <summary title="여기서 지정한 값이 로그인·세션 명령의 기본값으로 쓰입니다(C_Initialize 시 적용). 각 탭에서 개별 수정 가능">명령 기본값 (PIN · 사용자 · R/W)</summary>
+          <div class="row">
+            <label>사용자
+              <select id="defUserType">
+                <option value="1">User</option>
+                <option value="0">SO</option>
+                <option value="2">ContextSpecific</option>
+              </select>
+            </label>
+            <label title="실 토큰 User PIN 12345678 / mock 1234 (transport에 맞춰 자동 설정)">User PIN <input type="password" id="defPin" value="12345678" size="10"></label>
+            <button type="button" class="eye" data-target="defPin" title="표시/숨김">👁</button>
+            <label title="실 토큰 SO PIN 87654321 / mock 12345678 (transport에 맞춰 자동 설정)">SO PIN <input type="password" id="defSoPin" value="87654321" size="12"></label>
+            <button type="button" class="eye" data-target="defSoPin" title="표시/숨김">👁</button>
+            <label><input type="checkbox" id="defRw" checked> R/W</label>
+            <button id="btnApplyDefaults" type="button" title="지금 각 탭 입력칸에 반영">적용</button>
+          </div>
+        </details>
+      </div>
 
-        <!-- Session -->
-        <div class="tabpane" data-pane="sessions">
-          <div class="row">
-            <button id="btnSessRefresh">새로고침</button>
-            <button id="btnSessRefreshAll">토큰 상태 조회(C_GetSessionInfo 전체)</button>
-            <span id="sessSummary" class="muted small"></span>
-          </div>
-          <table id="sessTable" class="results">
-            <thead><tr>
-              <th>현재</th><th>handle</th><th>종류</th><th>wire sid</th><th>slot</th>
-              <th>열린 시각</th><th>경과</th><th>명령수</th>
-              <th>마지막 명령</th><th>결과</th><th>마지막 시각</th>
-              <th>토큰 state</th><th>동작</th>
-            </tr></thead>
-            <tbody></tbody>
-          </table>
-          <p class="muted small">
-            세션을 열거나(세션/로그인 탭) 명령을 보낼 때마다 이 표가 갱신됩니다.
-            "종류"=open(C_OpenSession)/adopt(세션 ID 지정). "토큰 state"는
-            C_GetSessionInfo 결과(2=R/W user 등)이며 "토큰 상태 조회"로 채웁니다.
-          </p>
-        </div>
-
-        <div class="tabpane" data-pane="session">
-          <div class="row">
-            <label><input type="checkbox" id="rwSession" checked> R/W 세션</label>
-            <button id="btnOpenSession">세션 열기 (C_OpenSession)</button>
-            <button id="btnCloseSession">세션 닫기</button>
-            <span id="sessionText" class="pill">세션 없음</span>
-          </div>
-          <div class="row">
-            <label>세션 ID <input type="number" id="sessionId" value="1" min="0" max="65535" style="width:110px"></label>
-            <button id="btnAdoptSession">ID로 세션 열기</button>
-            <span class="muted small">토큰 OPEN_SESSION 없이 입력한 세션 ID(0~65535, 0=시스템)를 와이어 헤더에 사용. 여러 개 열 수 있습니다.</span>
-          </div>
-          <div class="row">
-            <label><b>활성 세션</b> <select id="activeSession" class="sessionPicker"></select></label>
-            <span class="muted small">모든 명령(로그인·난수·해시·GCM·파일 검증)은 선택된 세션 ID로 전송됩니다.</span>
-          </div>
-          <fieldset>
-            <legend>로그인 / 로그아웃</legend>
-            <div class="row">
-              <label>사용자
-                <select id="userType">
-                  <option value="1">User</option>
-                  <option value="0">SO</option>
-                  <option value="2">ContextSpecific</option>
-                </select>
-              </label>
-              <label>PIN <input type="password" id="pin" value="1234" size="12"></label>
-              <button type="button" class="eye" data-target="pin" title="PIN 표시/숨김" aria-label="PIN 표시/숨김">👁</button>
-              <button id="btnLogin">C_Login</button>
-              <button id="btnLogout">C_Logout</button>
+      <!-- 세션 관리 (Sessions + Authentication) -->
+      <div class="tabpane active" data-pane="session">
+        <div class="cards2">
+          <!-- Sessions -->
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h2>Sessions</h2>
+                <p class="muted small">최대 256개의 휘발성 세션</p>
+              </div>
             </div>
-          </fieldset>
-          <h3>세션 정보 (C_GetSessionInfo)</h3>
-          <pre id="sessionInfo" class="out"></pre>
-        </div>
+            <div class="row subrow">
+              <label><input type="checkbox" id="rwSession" checked> R/W</label>
+              <button id="btnOpenSession" class="primary">새 세션</button>
+              <button id="btnCloseSession">선택 세션 닫기</button>
+              <button id="btnSessRefresh" class="link">새로고침</button>
+              <button id="btnSessRefreshAll" class="link">토큰 상태 조회</button>
+            </div>
+            <table id="sessTable" class="results sess">
+              <thead><tr><th>No</th><th>세션 ID</th><th>역할</th><th>관리</th></tr></thead>
+              <tbody></tbody>
+            </table>
+            <div id="sessEmpty" class="empty muted">열린 세션이 없습니다. 새 세션을 추가하세요.</div>
+            <div id="sessSummary" class="muted small"></div>
 
-        <!-- Crypto -->
-        <div class="tabpane" data-pane="crypto">
+            <h3>토큰 세션 맵 (app_sid ↔ hsm_sid)</h3>
+            <table id="sessMapTable" class="results sess">
+              <thead><tr><th>종류</th><th>pid</th><th>app_sid</th><th>hsm_sid</th></tr></thead>
+              <tbody></tbody>
+            </table>
+            <div id="sessMapEmpty" class="muted small">열린 세션 없음. "새 세션"(C_OpenSession)으로 세션을 여세요.</div>
+            <p class="muted small">"새 세션"은 R/W 속성으로 C_OpenSession을 호출해 토큰까지 명령을 보냅니다. ncmpd가 토큰 OPEN으로 hsm_sid를 할당·매핑합니다.</p>
+          </div>
+
+          <!-- Authentication -->
+          <div class="card">
+            <h2>Authentication</h2>
+            <p class="muted small">선택한 세션으로 실행하며, 로그인 상태는 토큰 전체의 모든 세션에 적용됩니다.</p>
+            <label class="field">Session
+              <select id="activeSession" class="sessionPicker"></select>
+            </label>
+            <label class="field">Role
+              <select id="userType">
+                <option value="1">User</option>
+                <option value="0">SO</option>
+                <option value="2">ContextSpecific</option>
+              </select>
+            </label>
+            <label class="field">PIN
+              <span class="pinwrap">
+                <input type="password" id="pin" value="1234" placeholder="PIN">
+                <button type="button" class="eye" data-target="pin" title="PIN 표시/숨김" aria-label="PIN 표시/숨김">👁</button>
+              </span>
+            </label>
+            <div class="row">
+              <button id="btnLogin" class="primary">Login</button>
+              <button id="btnLogout">Logout</button>
+              <button id="btnPing">Ping</button>
+            </div>
+            <span id="sessionText" class="pill">세션 없음</span>
+            <pre id="sessionInfo" class="out"></pre>
+          </div>
+        </div>
+      </div>
+
+      <!-- AES / SHA3 (hash + AES-CTR) -->
+      <div class="tabpane" data-pane="hash">
+        <div class="card">
+          <h2>해시 (SHA-2 / SHA-3)</h2>
+          <p class="muted small">선택한 세션으로 C_DigestInit + C_Digest(단발)를 실행합니다.</p>
           <div class="row">
             <label><b>활성 세션</b> <select class="sessionPicker"></select></label>
-            <span class="muted small">세션 탭에서 연 세션 중 선택. 명령은 이 세션으로 전송됩니다.</span>
-          </div>
-          <div class="row">
-            <label>난수 길이 <input type="number" id="randLen" value="16" min="1" max="1024"></label>
-            <button id="btnRandom">C_GenerateRandom</button>
           </div>
           <div class="row">
             <label>해시
@@ -183,17 +200,128 @@
               </select>
             </label>
             <input type="text" id="digestInput" value="abc" placeholder="입력 문자열(UTF-8)">
-            <button id="btnDigest">C_Digest</button>
-          </div>
-          <div class="row">
-            <button id="btnGcm">AES-GCM 자가검증 (GenerateKey + Encrypt/Decrypt)</button>
+            <button id="btnDigest" class="primary">C_Digest</button>
           </div>
           <h3>결과</h3>
-          <pre id="cryptoOut" class="out"></pre>
+          <pre id="hashOut" class="out"></pre>
         </div>
 
-        <!-- File generation + real-vs-SW verification -->
-        <div class="tabpane" data-pane="file">
+        <div class="card">
+          <h2>AES-CTR (암·복호화)</h2>
+          <p class="muted small">선택한 세션으로 사용자 키를 C_CreateObject → C_EncryptInit(CKM_AES_CTR)
+            → C_Encrypt로 처리합니다. CTR은 암·복호화가 동일 연산입니다. 입력 ≤ 3968바이트.</p>
+          <div class="row">
+            <label>동작
+              <select id="ctrDir"><option value="1">암호화</option><option value="0">복호화</option></select>
+            </label>
+            <label>AES 키 Hex (16/24/32B) <input type="password" id="ctrKey" autocomplete="off" placeholder="000102…"></label>
+          </div>
+          <div class="row">
+            <label>Counter Hex (16B) <input type="text" id="ctrCounter" autocomplete="off" placeholder="00000000000000000000000000000001"></label>
+          </div>
+          <div class="row">
+            <label style="flex:1">입력 Hex <input type="text" id="ctrData" autocomplete="off" placeholder="616263"></label>
+            <button id="btnCtr" class="primary">실행</button>
+          </div>
+          <h3>결과</h3>
+          <pre id="ctrOut" class="out"></pre>
+        </div>
+      </div>
+
+      <!-- AES-GCM -->
+      <div class="tabpane" data-pane="gcm">
+        <div class="card">
+          <h2>AES-GCM · 인증 암호화</h2>
+          <p class="muted small">선택한 세션으로 사용자 키를 C_CreateObject → C_EncryptInit(CKM_AES_GCM)
+            → C_Encrypt/C_Decrypt로 처리합니다. 암호화 출력은 암호문+태그, 복호화 입력은 암호문+태그입니다.</p>
+          <div class="row">
+            <label><b>활성 세션</b> <select class="sessionPicker"></select></label>
+            <label>동작
+              <select id="gcmDir"><option value="1">암호화</option><option value="0">복호화 및 태그 검증</option></select>
+            </label>
+          </div>
+          <div class="row">
+            <label>AES 키 Hex (16/24/32B) <input type="password" id="gcmKey" autocomplete="off" spellcheck="false"></label>
+            <label>IV Hex (1–16B, 권장 12B) <input type="text" id="gcmIv" autocomplete="off" spellcheck="false"></label>
+            <button id="btnGcmNewIv" class="ghost">새 12B IV</button>
+          </div>
+          <div class="row">
+            <label style="flex:1">AAD Hex (선택) <input type="text" id="gcmAad" autocomplete="off" spellcheck="false"></label>
+            <label>태그 길이
+              <select id="gcmTagLen">
+                <option value="16">16B (권장)</option><option value="15">15B</option>
+                <option value="14">14B</option><option value="13">13B</option><option value="12">12B</option>
+              </select>
+            </label>
+          </div>
+          <div class="row">
+            <label id="gcmDataLabel" style="flex:1">평문 Hex <input type="text" id="gcmData" autocomplete="off" spellcheck="false" placeholder="616263"></label>
+          </div>
+          <div class="row" id="gcmTagRow" hidden>
+            <label style="flex:1">인증 태그 Hex <input type="text" id="gcmTag" autocomplete="off" spellcheck="false"></label>
+          </div>
+          <div class="row">
+            <button id="btnGcm" class="primary">GCM 실행</button>
+            <button id="btnGcmClear" class="ghost">입력·결과 지우기</button>
+            <button id="btnGcmSelf" class="ghost">자가검증(랜덤 키)</button>
+          </div>
+          <p class="muted small">AAD·본문 각각 ≤ 3968바이트. 같은 키로 암호화할 때 IV를 재사용하지 마세요. 키는 실행 후 입력란에서 지웁니다.</p>
+          <h3>결과</h3>
+          <pre id="gcmOut" class="out">실행 전</pre>
+        </div>
+      </div>
+
+      <!-- ML-DSA / ML-KEM -->
+      <div class="tabpane" data-pane="pqc">
+        <div class="card">
+          <h2>ML-DSA / ML-KEM (PQC)</h2>
+          <p class="muted">이 웹앱이 로드하는 standalone facade(mode-2)에는 ML-DSA/ML-KEM
+            연산이 구현되어 있지 않습니다(스텁). 광고 메커니즘 목록은 "장치 현황 · SRAM"의
+            토큰 정보 조회에서 확인할 수 있습니다. PQC 전체 기능은 opencryptoki full 빌드의
+            mode-1 STDLL에서 제공됩니다(<code>ncmp_specific.c</code>).</p>
+        </div>
+      </div>
+
+      <!-- 난수 생성 -->
+      <div class="tabpane" data-pane="rng">
+        <div class="card">
+          <h2>난수 생성</h2>
+          <div class="row">
+            <label><b>활성 세션</b> <select class="sessionPicker"></select></label>
+          </div>
+          <div class="row">
+            <label>난수 길이 <input type="number" id="randLen" value="16" min="1" max="1024"></label>
+            <button id="btnRandom" class="primary">C_GenerateRandom</button>
+          </div>
+          <h3>결과</h3>
+          <pre id="rngOut" class="out"></pre>
+        </div>
+      </div>
+
+      <!-- CI 명령 제어 -->
+      <div class="tabpane" data-pane="ci">
+        <div class="card">
+          <p class="muted">CI(Command Interface) 단위로 실 타겟에 프레임을 직접 보내고 받습니다. 송신/수신 메시지를 <b>raw(Hex)</b>와 <b>parsed</b> 형태로 디버깅 창에 동시 출력합니다.</p>
+          <div class="row cibar">
+            <label>슬롯 <input type="number" id="ciSlot" value="0" min="0" style="width:70px"></label>
+            <label>CI <select id="ciCmd"></select></label>
+            <label>session_id <input type="number" id="ciSession" value="0" min="0" style="width:100px"></label>
+            <button id="ciSend" class="primary">▶ 전송</button>
+            <button id="ciClear">디버깅 창 지우기</button>
+            <span id="ciHint" class="muted small"></span>
+          </div>
+          <div class="ciparams">
+            <div class="muted small">CI별 입력 파라미터(Hex, 공백 허용, 비우면 생략). 예: <code>10000000</code> = little-endian u32 값 16</div>
+            <div id="ciParamRows"></div>
+          </div>
+          <h3>디버깅 창 — 송신(TX)/수신(RX)을 raw(Hex) + parsed 동시 출력</h3>
+          <div id="ciDebug" class="cidebug"></div>
+        </div>
+      </div>
+
+      <!-- 파일 · 검증 -->
+      <div class="tabpane" data-pane="file">
+        <div class="card">
           <fieldset>
             <legend>테스트 파일 생성 (init/update/final 시험은 데이터 ≥ 64KB 필요)</legend>
             <div class="row">
@@ -234,7 +362,7 @@
               <button id="btnCompare" class="primary">▶ 실타겟 vs SW 비교</button>
             </div>
             <p class="muted small">
-              비교는 세션이 필요합니다(세션 탭에서 열기). 토큰(실 FX3)의 multipart
+              비교는 세션이 필요합니다(세션 관리에서 열기). 토큰(실 FX3)의 multipart
               (init/update/final) 결과와 호스트의 OpenSSL 계산 결과를 대조해
               <b>일치(MATCH)</b> 여부로 정확성을 판정합니다. mock 토큰은 실제 해시가
               아니므로 MISMATCH가 정상입니다.
@@ -243,9 +371,11 @@
             <pre id="fileOut" class="out"></pre>
           </fieldset>
         </div>
+      </div>
 
-        <!-- API tester -->
-        <div class="tabpane" data-pane="api">
+      <!-- PKCS#11 API 시험 -->
+      <div class="tabpane" data-pane="api">
+        <div class="card">
           <p class="muted">단위 API 항목을 골라 파라미터를 채우고 실행합니다. 각 항목이 시나리오의 "단위 스텝"이 됩니다.</p>
           <div class="row">
             <label>API 항목
@@ -258,28 +388,11 @@
           <h3>응답</h3>
           <pre id="apiOut" class="out"></pre>
         </div>
+      </div>
 
-        <!-- Raw CI send/receive -->
-        <div class="tabpane" data-pane="ci">
-          <p class="muted">CI(Command Interface) 단위로 실 타겟에 프레임을 직접 보내고 받습니다. 송신/수신 메시지를 <b>raw(Hex)</b>와 <b>parsed</b> 형태로 디버깅 창에 동시 출력합니다.</p>
-          <div class="row cibar">
-            <label>슬롯 <input type="number" id="ciSlot" value="0" min="0" style="width:70px"></label>
-            <label>CI <select id="ciCmd"></select></label>
-            <label>session_id <input type="number" id="ciSession" value="0" min="0" style="width:100px"></label>
-            <button id="ciSend" class="primary">▶ 전송</button>
-            <button id="ciClear">디버깅 창 지우기</button>
-            <span id="ciHint" class="muted small"></span>
-          </div>
-          <div class="ciparams">
-            <div class="muted small">CI별 입력 파라미터(Hex, 공백 허용, 비우면 생략). 예: <code>10000000</code> = little-endian u32 값 16</div>
-            <div id="ciParamRows"></div>
-          </div>
-          <h3>디버깅 창 — 송신(TX)/수신(RX)을 raw(Hex) + parsed 동시 출력</h3>
-          <div id="ciDebug" class="cidebug"></div>
-        </div>
-
-        <!-- Scenarios -->
-        <div class="tabpane" data-pane="scenario">
+      <!-- 시나리오 -->
+      <div class="tabpane" data-pane="scenario">
+        <div class="card">
           <div class="row">
             <label>시나리오
               <select id="scenarioSelect"></select>
@@ -314,16 +427,28 @@
           <div id="resultSummary" class="summary"></div>
         </div>
       </div>
-    </section>
-  </main>
 
-  <footer>
-    <div class="row">
-      <strong>로그</strong>
-      <button id="btnClearLog">지우기</button>
-    </div>
-    <pre id="log" class="log"></pre>
-  </footer>
+      <!-- 암복호화 속도 측정 (placeholder) -->
+      <div class="tabpane" data-pane="perf">
+        <div class="card">
+          <h2>암복호화 속도 측정</h2>
+          <p class="muted">처리량/지연 측정 화면(준비 중). 현재는 "파일 · 검증"에서 대용량
+            파일의 토큰 multipart 해시와 SW 대조로 동작·정확성을 확인할 수 있습니다.</p>
+        </div>
+      </div>
+
+      <!-- 활동 기록 (log) -->
+      <div class="tabpane" data-pane="log">
+        <div class="card">
+          <div class="card-head">
+            <h2>활동 기록</h2>
+            <button id="btnClearLog">지우기</button>
+          </div>
+          <pre id="log" class="log"></pre>
+        </div>
+      </div>
+    </section>
+  </div>
 
   <script src="app.js"></script>
 </body>

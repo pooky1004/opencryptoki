@@ -28,6 +28,9 @@
 /* Raw CI (Command Interface) send path: a second ncmp_client straight to the
  * daemon, independent of the dlopen'd facade, used by the "CI 송수신" tab. */
 #include "ncmp/ncmp_client.h"
+#include "ncmp/ncmp_ipc.h"
+#include "ncmp/ncmp_shm.h"
+#include "ncmp/ncmp_slot.h"
 #include "ncmp/ncmp_wire.h"
 #include "ncmp/ncmp_errno.h"
 #include "ncmp/ncmp_limits.h"
@@ -37,7 +40,9 @@
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
+#include <sys/mman.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -343,6 +348,79 @@ static int daemon_socket_ready(void)
     return ok;
 }
 
+/**
+ * @brief Decide whether an already-listening ncmpd is actually usable.
+ *
+ * A connectable socket is NOT proof of health: an ncmpd can keep listening
+ * after its POSIX SHM object (/dev/shm/ncmpd_shm) has been unlinked - for
+ * example by the unit-test suite (ncmp_shm_destroy uses the same name) or by a
+ * second daemon that briefly started and exited. Such a "zombie" still answers
+ * HELLO with a cached slot mask, but every client's ncmp_shm_attach() then
+ * fails with ENOENT, so C_Initialize returns CKR_TOKEN_NOT_PRESENT (0xE0) and
+ * no slots ever appear. Reuse a daemon only when it (a) completes the
+ * HELLO/ATTACH handshake and (b) advertises an SHM object that still exists.
+ *
+ * @return 1 if the existing daemon is healthy and reusable, 0 otherwise.
+ */
+static int daemon_healthy(void)
+{
+    struct sockaddr_un a;
+    NCMP_IpcMsg hello, reply;
+    char shm_name[sizeof(reply.shm_name) + 1];
+    int fd, sfd, ok = 0;
+
+    if (!g_sock_path[0])
+        return 0;
+    fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0)
+        return 0;
+    memset(&a, 0, sizeof(a));
+    a.sun_family = AF_UNIX;
+    if (strlen(g_sock_path) >= sizeof(a.sun_path)) { close(fd); return 0; }
+    strncpy(a.sun_path, g_sock_path, sizeof(a.sun_path) - 1);
+    if (connect(fd, (struct sockaddr *)&a, sizeof(a)) != 0) { close(fd); return 0; }
+
+    memset(&hello, 0, sizeof(hello));
+    hello.op = NCMP_IPC_HELLO;
+    hello.version = NCMP_IPC_VERSION;
+    shm_name[0] = '\0';
+    if (write(fd, &hello, sizeof(hello)) == (ssize_t)sizeof(hello) &&
+        read(fd, &reply, sizeof(reply)) == (ssize_t)sizeof(reply) &&
+        reply.op == NCMP_IPC_ATTACH && reply.version == NCMP_IPC_VERSION) {
+        memcpy(shm_name, reply.shm_name, sizeof(reply.shm_name));
+        shm_name[sizeof(reply.shm_name)] = '\0';
+        ok = 1;
+    }
+    close(fd);
+    if (!ok)
+        return 0;
+
+    /* The advertised SHM object must still exist, or no client can attach. */
+    sfd = shm_open(shm_name[0] ? shm_name : NCMP_SHM_NAME, O_RDWR, 0);
+    if (sfd < 0)
+        return 0;
+    close(sfd);
+    return 1;
+}
+
+/** Read the PID an ncmpd recorded in its single-instance lock file (0 if none). */
+static pid_t daemon_lock_pid(void)
+{
+    const char *path = getenv("NCMP_LOCK_PATH");
+    FILE *f;
+    int pid = 0;
+
+    if (!path || !*path)
+        path = "/tmp/ncmpd.lock";
+    f = fopen(path, "r");
+    if (!f)
+        return 0;
+    if (fscanf(f, "%d", &pid) != 1)
+        pid = 0;
+    fclose(f);
+    return (pid_t)pid;
+}
+
 static int daemon_running(void)
 {
     if (g_ncmpd_pid <= 0)
@@ -368,8 +446,39 @@ static int daemon_start(const char *transport)
      * socket and spawn a second daemon, which would fight over the single FX3
      * (the loser logs "slot 0 transport open failed" and reports no slots). */
     if (daemon_socket_ready()) {
-        fprintf(stderr, "ncmp_web: reusing existing ncmpd at %s\n", g_sock_path);
-        return 0;
+        if (daemon_healthy()) {
+            fprintf(stderr, "ncmp_web: reusing existing ncmpd at %s\n",
+                    g_sock_path);
+            return 0;
+        }
+        /* A daemon is listening but is unusable (its SHM is gone or it fails the
+         * handshake): a zombie that would make every C_Initialize fail with
+         * CKR_TOKEN_NOT_PRESENT and show no slots. Reclaim it - terminate the
+         * lock owner so a fresh daemon can take over the single-instance lock
+         * and the FX3 - then fall through to spawn a new one. */
+        pid_t zpid = daemon_lock_pid();
+
+        fprintf(stderr, "ncmp_web: existing ncmpd at %s is stale "
+                "(SHM missing / unresponsive); reclaiming (pid %d)\n",
+                g_sock_path, (int)zpid);
+        if (zpid > 1 && (kill(zpid, 0) == 0 || errno == EPERM)) {
+            kill(zpid, SIGTERM);
+            for (int i = 0; i < 30 && daemon_socket_ready(); i++)
+                usleep(100 * 1000);
+            if (daemon_socket_ready()) {
+                kill(zpid, SIGKILL);
+                for (int i = 0; i < 20 && daemon_socket_ready(); i++)
+                    usleep(100 * 1000);
+            }
+        }
+        if (daemon_socket_ready()) {
+            fprintf(stderr, "ncmp_web: could not reclaim stale ncmpd at %s "
+                    "(pid %d) - stop it manually and retry\n",
+                    g_sock_path, (int)zpid);
+            return -1;
+        }
+        fprintf(stderr, "ncmp_web: stale ncmpd reclaimed; starting fresh\n");
+        /* fall through to spawn a new daemon */
     }
     pthread_mutex_lock(&g_daemon_lock);
     /* Guard the self-overlap: callers may pass g_transport itself (when the
@@ -759,7 +868,7 @@ static int route_api(int fd, const char *method, const char *path, const char *b
         json_str(body, "transport", t, sizeof(t));
         int rc = daemon_start(t[0] ? t : g_transport);
         snprintf(extra, sizeof(extra), "\"pid\":%d", (int)g_ncmpd_pid);
-        if (rc != 0) { app_last_error(); send_result(fd, rc, "\"detail\":\"fork/exec failed\""); }
+        if (rc != 0) { app_last_error(); send_result(fd, rc, "\"detail\":\"ncmpd 시작 실패: fork/exec 실패 또는 기존 ncmpd가 비정상(SHM 없음)이어서 회수 불가 - 수동으로 종료 후 재시도\""); }
         else send_result(fd, 0, extra);
         return 0;
     }
@@ -905,6 +1014,39 @@ static int route_api(int fd, const char *method, const char *path, const char *b
         return 0;
     }
 
+    /* ---- ncmpd session map: (pid, app_sid) -> hsm_sid, read from SHM ---- */
+    if (!strcmp(path, "/api/sessmap") && !strcmp(method, "POST")) {
+        long slot = 0;
+        char *out = malloc(8192);
+        if (!out) { send_json(fd, 500, "{\"ok\":false,\"error\":\"oom\"}"); return 0; }
+        json_long(body, "slot", &slot);
+        pthread_mutex_lock(&g_ci_lock);
+        if (!ci_ensure()) {
+            pthread_mutex_unlock(&g_ci_lock);
+            free(out);
+            send_json(fd, 200, "{\"ok\":false,\"error\":\"ncmpd not connected\"}");
+            return 0;
+        }
+        NCMP_Slot *sl = (slot >= 0) ? ncmp_shm_slot(g_ci_cli.shm_base, (uint32_t)slot) : NULL;
+        int o = snprintf(out, 8192, "{\"ok\":true,\"slot\":%ld,\"entries\":[", slot);
+        int first = 1;
+        if (sl) {
+            for (int i = 0; i < PKCS11_MAX_SESSION_PER_SLOT; ++i) {
+                NCMP_SessMap *m = &sl->sess_map[i];
+                if (!m->in_use) continue;
+                o += snprintf(out + o, 8192 - o,
+                              "%s{\"pid\":%u,\"appSid\":%u,\"hsmSid\":%u}",
+                              first ? "" : ",", m->pid, m->app_sid, m->hsm_sid);
+                first = 0;
+            }
+        }
+        pthread_mutex_unlock(&g_ci_lock);
+        snprintf(out + o, 8192 - o, "]}");
+        send_json(fd, 200, out);
+        free(out);
+        return 0;
+    }
+
     /* ---- everything below drives the token: serialise ---- */
     pthread_mutex_lock(&g_api_lock);
     int rc = -4;        /* APP_ERR_ARGS by default */
@@ -1031,6 +1173,58 @@ static int route_api(int fd, const char *method, const char *path, const char *b
         rc = app_aes_gcm_selftest((unsigned long)h, detail, sizeof(detail));
         /* escape detail quickly (no quotes expected) */
         snprintf(extra, sizeof(extra), "\"detail\":\"%s\"", detail);
+    } else if (!strcmp(path, "/api/encrypt") && !strcmp(method, "POST")) {
+        /* AES-GCM / AES-CTR one-shot via PKCS#11 (C_CreateObject + C_Encrypt/
+         * C_Decrypt) with a caller-supplied key. algo="gcm"|"ctr";
+         * encrypt=1 encrypt, 0 decrypt. key/iv/counter/aad/data are hex. */
+        long h = 0, enc = 1, tagb = 16;
+        char algo[8] = "gcm";
+        char *keyh = malloc(4096), *ivh = malloc(4096), *aadh = malloc(9000),
+             *datah = malloc(9000);
+        uint8_t *key = malloc(64), *iv = malloc(64), *aad = malloc(4096),
+                *din = malloc(4096), *dout = malloc(4096 + 64);
+        if (!keyh || !ivh || !aadh || !datah || !key || !iv || !aad || !din || !dout) {
+            free(keyh); free(ivh); free(aadh); free(datah);
+            free(key); free(iv); free(aad); free(din); free(dout);
+            rc = -4;
+        } else {
+            keyh[0] = ivh[0] = aadh[0] = datah[0] = '\0';
+            json_long(body, "session", &h);
+            json_long(body, "encrypt", &enc);
+            json_long(body, "tagBytes", &tagb);
+            json_str(body, "algo", algo, sizeof(algo));
+            json_str(body, "key", keyh, 4096);
+            json_str(body, "iv", ivh, 4096);         /* GCM IV or CTR counter */
+            json_str(body, "aad", aadh, 9000);
+            json_str(body, "data", datah, 9000);
+            int kl = ci_hex2bytes(keyh, key, 64);
+            int il = ci_hex2bytes(ivh, iv, 64);
+            int al = aadh[0] ? ci_hex2bytes(aadh, aad, 4096) : 0;
+            int dl = datah[0] ? ci_hex2bytes(datah, din, 4096) : 0;
+            if (kl < 0 || il < 0 || al < 0 || dl < 0) {
+                app_set_last_error("bad hex in key/iv/aad/data");
+                rc = APP_ERR_ARGS;
+            } else {
+                unsigned long olen = 4096 + 64;
+                if (!strcmp(algo, "ctr")) {
+                    if (il != 16) { app_set_last_error("AES-CTR counter must be 16 bytes"); rc = APP_ERR_ARGS; }
+                    else rc = app_aes_ctr((unsigned long)h, (int)enc, key, (unsigned long)kl,
+                                          iv, din, (unsigned long)dl, dout, &olen);
+                } else {
+                    rc = app_aes_gcm((unsigned long)h, (int)enc, key, (unsigned long)kl,
+                                     iv, (unsigned long)il, aad, (unsigned long)al,
+                                     (unsigned long)tagb, din, (unsigned long)dl, dout, &olen);
+                }
+                if (rc == 0) {
+                    int o = snprintf(extra, sizeof(extra), "\"hex\":\"");
+                    for (unsigned long i = 0; i < olen && o < BUF - 4; i++)
+                        o += snprintf(extra + o, sizeof(extra) - o, "%02x", dout[i]);
+                    snprintf(extra + o, sizeof(extra) - o, "\",\"length\":%lu", olen);
+                }
+            }
+            free(keyh); free(ivh); free(aadh); free(datah);
+            free(key); free(iv); free(aad); free(din); free(dout);
+        }
     } else if (!strcmp(path, "/api/digest-file") && !strcmp(method, "POST")) {
         /* Multipart (init/update/final) digest of a test file on the token. */
         long h = 0, mech = 0x250;

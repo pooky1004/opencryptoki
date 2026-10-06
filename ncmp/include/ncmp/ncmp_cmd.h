@@ -79,17 +79,27 @@ enum ncmp_opcode {
     NCMP_CMD_OBJECT_SET_ATTR = 0x0039, /**< [class|key_type|attrs] -> (ack). Validate key attribute changes. */
 
     /*
-     * Session management (matches the MPF300T Mi-V reference target, CI opcodes
-     * 0x0020/0x0021; see the 2026-10-01 GETMECHLIST/AES-GCM reference package).
-     * OPEN_SESSION is sent with a zero wire-header session_id and a single
-     * 4-byte flags parameter; the token allocates a session and returns the
-     * handle in response parameter 0. The STDLL then carries that handle in the
-     * wire header's session_id of every subsequent command for that session.
-     * CLOSE_SESSION carries the handle in the wire header and takes no
-     * parameters. See docs/session-id-mapping.md.
+     * Session management + (pid, app_sid) -> hsm_sid mapping (see
+     * docs/session-id-mapping.md).
+     *
+     * OPEN_SESSION from the app (STDLL) carries params [pid, app_sid, flags] with
+     * a zero wire-header session_id. The app picks its own app_sid; ncmpd records
+     * the enqueuing pid in the ring entry. ncmpd rebuilds the token frame as a
+     * SINGLE param0 = flags with a zero header session_id (the firmware's
+     * OPEN_SESSION contract; see fx3_ci/server reference and
+     * comm_thread.c:sess_xform_request); pid/app_sid stay host-side only. The
+     * token allocates a fresh session and returns its hsm_sid in response
+     * param0. ncmpd then stores sess_map[(pid, app_sid)] = hsm_sid in the slot
+     * (NCMP_SessMap).
+     *
+     * Every later command for that session arrives with wire session_id =
+     * app_sid; ncmpd translates it to hsm_sid before sending to the token (and
+     * uses hsm_sid to correlate the response). CLOSE_SESSION arrives with wire
+     * session_id = app_sid, is translated to hsm_sid, and its mapping is removed
+     * on success. CLOSE takes no parameters.
      */
-    NCMP_CMD_OPEN_SESSION  = 0x0020, /**< req [flags(u32)], hdr sid=0 -> resp param0 [handle(u32,1..255)]. */
-    NCMP_CMD_CLOSE_SESSION = 0x0021, /**< req hdr sid=handle, no params -> (ack). */
+    NCMP_CMD_OPEN_SESSION  = 0x0020, /**< app req [pid,app_sid,flags] hdr sid=0; ncmpd->token single [flags] hdr sid=0 -> resp param0 [hsm_sid]. */
+    NCMP_CMD_CLOSE_SESSION = 0x0021, /**< req hdr sid=app_sid (ncmpd->token hsm_sid), no params -> (ack). */
 
     /*
      * Post-quantum (PKCS#11 3.2 ML-DSA / ML-KEM). All keys are forwarded as

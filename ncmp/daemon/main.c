@@ -16,6 +16,7 @@
  */
 #include "ncmpd.h"
 #include "ncmp/ncmp_shm.h"
+#include "ncmp/ncmp_slot.h"
 #include "ncmp/ncmp_slotmap.h"
 #include "ncmp/ncmp_transport.h"
 #include "ncmp/ncmp_wire.h"
@@ -82,6 +83,7 @@ static void ncmpd_ensure_sock_dir(void)
  * token by label or serial. A probe failure is non-fatal: the slot still serves
  * crypto, it just has no cached identity (binding falls back to first-free).
  */
+#if 0 /* Boot-time identity probe disabled (per request); see the call site. */
 static void ncmpd_probe_identity(ncmp_transport_t *transport, uint32_t slot_id,
                                  void *shm_base)
 {
@@ -102,10 +104,19 @@ static void ncmpd_probe_identity(ncmp_transport_t *transport, uint32_t slot_id,
     req.payload_cap = sizeof(payload);
     if (ncmp_wire_encode(&req, reqbuf, sizeof(reqbuf), &enc_len) != NCMP_OK)
         return;
-    if (ncmp_transport_send(transport, reqbuf, enc_len) != NCMP_OK)
-        return;
-    if (ncmp_transport_recv(transport, rspbuf, sizeof(rspbuf), &got) != NCMP_OK)
-        return;
+    /* Capture the boot identity probe as this slot's last comm<->HSM message so
+     * the Debug App shows something right after startup (before app commands). */
+    {
+        NCMP_Slot *slot = ncmp_shm_slot(shm_base, slot_id);
+        if (slot)
+            ncmp_slot_lastmsg_tx(slot, reqbuf, (uint32_t)enc_len);
+        if (ncmp_transport_send(transport, reqbuf, enc_len) != NCMP_OK)
+            return;
+        if (ncmp_transport_recv(transport, rspbuf, sizeof(rspbuf), &got) != NCMP_OK)
+            return;
+        if (slot)
+            ncmp_slot_lastmsg_rx(slot, rspbuf, (uint32_t)got);
+    }
 
     rsp.payload = payload;
     rsp.payload_cap = sizeof(payload);
@@ -121,6 +132,7 @@ static void ncmpd_probe_identity(ncmp_transport_t *transport, uint32_t slot_id,
             (int)NCMP_TI_LABEL_LEN, ident.label,
             (int)NCMP_TI_SERIAL_LEN, ident.serial);
 }
+#endif /* boot-time identity probe disabled */
 
 /**
  * @brief Enforce a single system-wide ncmpd instance.
@@ -241,6 +253,12 @@ int main(int argc, char **argv)
         slots[s].slot = slot;
         slots[s].slot_id = s;
 
+        /* The real FX3 Slave-FIFO path is strictly one request/response at a
+         * time (bus-turnaround erratum; see usb_transport.c), so serialise it.
+         * Mock/socket keep the pipelined default. */
+        if (backend == NCMP_BACKEND_REAL)
+            slot->max_inflight = 1;
+
         if (ncmp_transport_open(s, &slots[s].transport) != NCMP_OK) {
             fprintf(stderr, "ncmpd: slot %u transport open failed "
                     "(device busy? another ncmpd/process may hold the FX3, "
@@ -248,9 +266,13 @@ int main(int argc, char **argv)
             continue;
         }
 
-        /* Scan the token's identity before its comm_thread claims the
-         * transport, and cache it in SHM for CK-slot binding. */
-        ncmpd_probe_identity(slots[s].transport, s, shm_base);
+        /* Boot-time token-identity scan DISABLED (per request): do not open a
+         * session or query the token (VD_TOKEN_INFO) at startup. Identity is
+         * fetched later within a session instead. Leaving it on made the Debug
+         * App's comm<->HSM view always show a TOKEN_INFO TX (and an empty RX on a
+         * non-responding token). CK-slot binding by label/serial then falls back
+         * to first-free until an in-session identity query runs. */
+        /* ncmpd_probe_identity(slots[s].transport, s, shm_base); */
 
         if (pthread_create(&slots[s].thread, NULL, ncmpd_comm_thread,
                            &slots[s]) != 0) {

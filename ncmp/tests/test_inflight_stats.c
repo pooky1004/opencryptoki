@@ -9,6 +9,7 @@
  *   - in_flight_cnt returns to 0 once every response is consumed.
  */
 #include "ncmp/ncmp_shm.h"
+#include <unistd.h>
 #include "ncmp/ncmp_slot.h"
 #include "ncmp/ncmp_transport.h"
 #include "ncmp/ncmp_wire.h"
@@ -58,8 +59,8 @@ int test_inflight_stats_tracking(void)
     for (int i = 0; i < N; ++i) {
         NCMP_Message req;
         build_req(&req, pl[i], 1u, (uint32_t)i);
-        NCMP_CHECK(ncmp_slot_enqueue(base, slot, 1u, (uint32_t)i, &req,
-                                     &idx[i]) == NCMP_OK);
+        NCMP_CHECK(ncmp_slot_enqueue(base, slot, 1u, (uint32_t)getpid(),
+                                     (uint32_t)i, &req, &idx[i]) == NCMP_OK);
     }
 
     memset(&ctx, 0, sizeof(ctx));

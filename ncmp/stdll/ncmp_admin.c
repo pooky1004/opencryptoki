@@ -161,19 +161,32 @@ unsigned long ncmp_admin_logout(ncmp_client_t *c, uint32_t slot)
 }
 
 unsigned long ncmp_admin_open_session(ncmp_client_t *c, uint32_t slot,
-                                      uint32_t flags, uint32_t *out_handle)
+                                      uint32_t app_sid, uint32_t flags,
+                                      uint32_t *out_hsm)
 {
-    uint8_t fl[4], hb[4];
-    uint32_t got = 0, ack;
+    uint8_t pidb[4], sidb[4], flb[4], out[16];
+    const uint8_t *parts[3] = { pidb, sidb, flb };
+    uint32_t lens[3] = { 4, 4, 4 };
+    const uint8_t *p0; uint32_t l0;
+    NCMP_Message rsp;
+    int nrc;
 
-    /* The caller (STDLL) must have set c->active_session_id = 0 so the token
-     * sees a zero wire-header session_id on OPEN (reference protocol). */
-    ncmp_wr_u32le(fl, flags);
-    ack = admin_cmd(c, slot, NCMP_CMD_OPEN_SESSION, fl, sizeof(fl),
-                    hb, sizeof(hb), &got);
-    if (ack == NCMP_CKR_OK && out_handle)
-        *out_handle = (got >= 4) ? ncmp_rd_u32le(hb) : 0;
-    return ack;
+    if (!c)
+        return NCMP_CKR_ARGUMENTS_BAD;
+    /* Params [pid, app_sid, flags]. The caller must set c->active_session_id = 0
+     * so the wire header session_id is 0 on OPEN. ncmpd records (pid, app_sid),
+     * forwards to the token with sid=0, and maps the returned hsm_sid. */
+    ncmp_wr_u32le(pidb, c->pid);
+    ncmp_wr_u32le(sidb, app_sid);
+    ncmp_wr_u32le(flb, flags);
+    nrc = ncmp_client_command_mp(c, slot, NCMP_CMD_OPEN_SESSION, parts, lens, 3,
+                                 out, sizeof(out), &rsp);
+    if (nrc != NCMP_OK)
+        return ncmp_err_to_ckr(nrc);
+    if (rsp.header.ack == NCMP_CKR_OK && out_hsm)
+        *out_hsm = (ncmp_msg_param(&rsp, 0, &p0, &l0) == NCMP_OK && l0 >= 4)
+                       ? ncmp_rd_u32le(p0) : 0;
+    return rsp.header.ack;
 }
 
 unsigned long ncmp_admin_close_session(ncmp_client_t *c, uint32_t slot)

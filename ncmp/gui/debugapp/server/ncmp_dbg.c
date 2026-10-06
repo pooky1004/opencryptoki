@@ -60,7 +60,25 @@ static int g_cli_ok = 0;
 static void *g_shm = NULL;             /* = g_cli.shm_base (read-only SHM view) */
 static uint32_t g_slot_mask = 0;       /* online mask from the handshake */
 static int g_connected = 0;
+static int g_last_rc = 0;              /* last ncmp_client_init rc (0 = ok) */
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Human-readable reason for a failed attach, to surface in the UI. */
+static const char *dbg_conn_reason(void)
+{
+    if (g_connected)
+        return "";
+    switch (g_last_rc) {
+    case NCMP_ERR_NODAEMON:
+        return "ncmpd 미연결: 소켓에 데몬이 없습니다. Web Test App의 [데몬 시작]으로 ncmpd를 띄우거나 --sock 경로를 맞추세요(기본 /tmp/ncmpd.sock).";
+    case NCMP_ERR_VERSION:
+        return "SHM 버전 불일치: ncmpd와 다른 빌드입니다. ncmp_dbg를 최신 소스로 재빌드하세요(Web Test App/ncmpd와 동일 버전).";
+    case 0:
+        return "ncmpd 미연결.";
+    default:
+        return "ncmpd 연결 실패(내부 오류).";
+    }
+}
 
 static volatile sig_atomic_t g_running = 1;
 static void on_signal(int s) { (void)s; g_running = 0; }
@@ -189,7 +207,9 @@ static void *shm_ensure(void)
         /* ncmp_client_init does the conn_thread HELLO handshake AND attaches
          * the SHM, and gives us the command path (enqueue ring) for the CI
          * send/receive tab. */
-        if (ncmp_client_init(&g_cli, g_sock_path[0] ? g_sock_path : NULL) == NCMP_OK) {
+        int rc = ncmp_client_init(&g_cli, g_sock_path[0] ? g_sock_path : NULL);
+        g_last_rc = rc;
+        if (rc == NCMP_OK) {
             g_cli_ok = 1;
             g_shm = g_cli.shm_base;
             g_slot_mask = g_cli.slot_mask;
@@ -260,11 +280,70 @@ static int emit_slot_summary(char *buf, int cap, int o, NCMP_Slot *s)
     return o + w;
 }
 
+#define BUF (64 * 1024)
+
 /* ------------------------------------------------------------------ */
-/* CI send/receive (per-CI command to the real target) helpers        */
+/* Last comm<->HSM message (TX/RX) rendering                           */
 /* ------------------------------------------------------------------ */
 
-#define BUF (64 * 1024)
+static uint32_t lm_rd32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/* Per-parameter hex output cap: a parameter larger than this is shown only up to
+ * this many bytes (the real length is still reported, with truncated=true). */
+#define LM_PARAM_HEX_CAP 1024u
+
+/* Emit "key":{len,cap,ms,hex, [parsed header + params]} from a captured frame.
+ * @p b holds @p caplen bytes of a @p fulllen-byte wire frame (may be truncated).
+ * Wire layout: frame_len(4) hdr{sid,seq,cmd,ack,paylen}(20) param_len[8](32) params. */
+static int lm_emit(char *buf, int cap, int o, const char *key,
+                   const uint8_t *b, uint32_t caplen, uint32_t fulllen,
+                   unsigned long long ms)
+{
+    o += snprintf(buf + o, cap - o,
+                  "\"%s\":{\"len\":%u,\"cap\":%u,\"ms\":%llu,\"hex\":\"",
+                  key, fulllen, caplen, ms);
+    for (uint32_t i = 0; i < caplen && o < cap - 4; i++)
+        o += snprintf(buf + o, cap - o, "%02x", b[i]);
+    o += snprintf(buf + o, cap - o, "\"");
+    if (caplen >= 56) {
+        uint32_t fl = lm_rd32(b), sid = lm_rd32(b + 4), seq = lm_rd32(b + 8);
+        uint32_t cmd = lm_rd32(b + 12), ack = lm_rd32(b + 16), pl = lm_rd32(b + 20);
+        uint32_t off = 56;
+        int first = 1;
+        o += snprintf(buf + o, cap - o,
+            ",\"parsed\":true,\"frameLen\":%u,\"sessionId\":%u,\"sequenceId\":%u,"
+            "\"commandId\":%u,\"ack\":%u,\"payloadLen\":%u,\"params\":[",
+            fl, sid, seq, cmd, ack, pl);
+        for (int i = 0; i < 8; i++) {
+            uint32_t plen = lm_rd32(b + 24 + i * 4);
+            if (!plen) continue;
+            if (o < cap - 100) {
+                uint32_t avail = (off < caplen) ? (caplen - off) : 0;
+                if (avail > plen) avail = plen;
+                /* Cap a single parameter's hex output at 1024 bytes. */
+                uint32_t show = avail < LM_PARAM_HEX_CAP ? avail : LM_PARAM_HEX_CAP;
+                o += snprintf(buf + o, cap - o,
+                              "%s{\"idx\":%d,\"len\":%u,\"shown\":%u,\"truncated\":%s,\"hex\":\"",
+                              first ? "" : ",", i, plen, show,
+                              (show < plen) ? "true" : "false");
+                for (uint32_t k = 0; k < show && o < cap - 4; k++)
+                    o += snprintf(buf + o, cap - o, "%02x", b[off + k]);
+                o += snprintf(buf + o, cap - o, "\"}");
+                first = 0;
+            }
+            off += plen;
+        }
+        o += snprintf(buf + o, cap - o, "]");
+    } else {
+        o += snprintf(buf + o, cap - o, ",\"parsed\":false");
+    }
+    o += snprintf(buf + o, cap - o, "}");
+    return o;
+}
 
 /* ------------------------------------------------------------------ */
 /* API routes                                                         */
@@ -283,11 +362,13 @@ static void route_api(int fd, const char *method, const char *path, const char *
     if (!strcmp(path, "/api/status")) {
         snprintf(buf, BUF,
             "{\"connected\":%s,\"shmName\":\"%s\",\"sockPath\":\"%s\",\"configPath\":\"%s\","
-            "\"host\":\"%s\",\"port\":%d,\"authRequired\":%s,\"slotMask\":%u"
+            "\"host\":\"%s\",\"port\":%d,\"authRequired\":%s,\"slotMask\":%u,"
+            "\"reason\":\"%s\""
             "%s%s%s}",
             g_connected ? "true" : "false", NCMP_SHM_NAME,
             g_sock_path[0] ? g_sock_path : "(default)", g_config,
             g_host, g_port, g_token[0] ? "true" : "false", g_slot_mask,
+            dbg_conn_reason(),
             h ? ",\"magic\":" : "", "", "");
         /* append header fields when attached */
         if (h) {
@@ -376,10 +457,32 @@ static void route_api(int fd, const char *method, const char *path, const char *
                 cnt[0], cnt[1], cnt[2], cnt[3], cnt[4], cnt[5]);
             send_json(fd, 200, buf);
         }
+    } else if (!strcmp(path, "/api/lastmsg")) {
+        /* body: {"slot":N} -> last comm<->HSM TX/RX (raw + parsed). */
+        long slot = -1;
+        const char *q = body ? strstr(body, "\"slot\"") : NULL;
+        if (q) { q = strchr(q, ':'); if (q) slot = strtol(q + 1, NULL, 0); }
+        if (!h || slot < 0 || (uint32_t)slot >= h->slot_count) {
+            send_json(fd, 200, g_connected ? "{\"error\":\"bad slot\"}"
+                                           : "{\"connected\":false}");
+        } else {
+            NCMP_LastMsg lm = h->slots[slot].last_msg;  /* snapshot copy */
+            uint32_t txc = lm.tx_cap > NCMP_LASTMSG_CAP ? NCMP_LASTMSG_CAP : lm.tx_cap;
+            uint32_t rxc = lm.rx_cap > NCMP_LASTMSG_CAP ? NCMP_LASTMSG_CAP : lm.rx_cap;
+            int o = snprintf(buf, BUF, "{\"connected\":true,\"slot\":%ld,", slot);
+            o = lm_emit(buf, BUF, o, "tx", lm.tx, txc, lm.tx_len,
+                        (unsigned long long)lm.tx_ms);
+            o += snprintf(buf + o, BUF - o, ",");
+            o = lm_emit(buf, BUF, o, "rx", lm.rx, rxc, lm.rx_len,
+                        (unsigned long long)lm.rx_ms);
+            snprintf(buf + o, BUF - o, "}");
+            send_json(fd, 200, buf);
+        }
     } else if (!strcmp(path, "/api/reconnect")) {
         shm_drop();
         shm_ensure();
-        snprintf(buf, BUF, "{\"connected\":%s}", g_connected ? "true" : "false");
+        snprintf(buf, BUF, "{\"connected\":%s,\"reason\":\"%s\"}",
+                 g_connected ? "true" : "false", dbg_conn_reason());
         send_json(fd, 200, buf);
     } else {
         send_json(fd, 404, "{\"error\":\"no such api\"}");

@@ -61,6 +61,8 @@ int test_admin_init_token(void);
 int test_admin_token_params(void);
 int test_admin_login_flags(void);
 int test_admin_set_utc_time(void);
+/* (pid, app_sid) -> hsm_sid session map + translation. */
+int test_session_map_translate(void);
 /* Object management: key registration + attribute forwarding to the token. */
 int test_object_add(void);
 int test_object_add_no_value(void);
@@ -123,6 +125,7 @@ int main(void)
     NCMP_RUN(test_admin_token_params);
     NCMP_RUN(test_admin_login_flags);
     NCMP_RUN(test_admin_set_utc_time);
+    NCMP_RUN(test_session_map_translate);
 
     NCMP_RUN(test_object_add);
     NCMP_RUN(test_object_add_no_value);

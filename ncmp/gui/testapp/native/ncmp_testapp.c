@@ -54,6 +54,8 @@ static CK_C_Digest            p_Digest;
 static CK_C_DigestUpdate      p_DigestUpdate;
 static CK_C_DigestFinal       p_DigestFinal;
 static CK_C_GenerateKey       p_GenerateKey;
+static CK_C_CreateObject      p_CreateObject;
+static CK_C_DestroyObject     p_DestroyObject;
 static CK_C_EncryptInit       p_EncryptInit;
 static CK_C_Encrypt           p_Encrypt;
 static CK_C_DecryptInit       p_DecryptInit;
@@ -92,6 +94,7 @@ static void set_err(const char *fmt, ...)
 }
 
 const char *app_last_error(void) { return g_err; }
+void app_set_last_error(const char *msg) { set_err("%s", msg ? msg : ""); }
 
 /* ------------------------------------------------------------------ */
 /* Load / unload                                                     */
@@ -138,6 +141,8 @@ int app_load(const char *module_path)
     SYM(p_DigestUpdate,     CK_C_DigestUpdate,     "C_DigestUpdate");
     SYM(p_DigestFinal,      CK_C_DigestFinal,      "C_DigestFinal");
     SYM(p_GenerateKey,      CK_C_GenerateKey,      "C_GenerateKey");
+    SYM(p_CreateObject,     CK_C_CreateObject,     "C_CreateObject");
+    SYM(p_DestroyObject,    CK_C_DestroyObject,    "C_DestroyObject");
     SYM(p_EncryptInit,      CK_C_EncryptInit,      "C_EncryptInit");
     SYM(p_Encrypt,          CK_C_Encrypt,          "C_Encrypt");
     SYM(p_DecryptInit,      CK_C_DecryptInit,      "C_DecryptInit");
@@ -520,4 +525,131 @@ int app_aes_gcm_selftest(unsigned long session, char *detail, int cap)
                      (unsigned long)ctlen, ok ? "OK" : "MISMATCH");
         return ok ? 0 : 1;
     }
+}
+
+/* Create a transient AES secret-key object from raw @p key bytes (local to the
+ * facade; never a token object). Caller destroys it with C_DestroyObject. */
+static CK_RV app_make_aes_key(CK_SESSION_HANDLE session, const unsigned char *key,
+                              unsigned long key_len, CK_OBJECT_HANDLE *out_key)
+{
+    CK_OBJECT_CLASS cls = CKO_SECRET_KEY;
+    CK_KEY_TYPE kt = CKK_AES;
+    CK_BBOOL yes = CK_TRUE, no = CK_FALSE;
+    CK_ATTRIBUTE tmpl[] = {
+        { CKA_CLASS, &cls, sizeof(cls) },
+        { CKA_KEY_TYPE, &kt, sizeof(kt) },
+        { CKA_VALUE, (void *)key, (CK_ULONG)key_len },
+        { CKA_ENCRYPT, &yes, sizeof(yes) },
+        { CKA_DECRYPT, &yes, sizeof(yes) },
+        { CKA_TOKEN, &no, sizeof(no) },
+    };
+    return p_CreateObject(session, tmpl, 6, out_key);
+}
+
+/**
+ * @brief AES-GCM encrypt/decrypt with a caller-supplied key (one-shot) via
+ *        PKCS#11 (C_CreateObject + C_EncryptInit/C_Encrypt). On encrypt the
+ *        output is ciphertext||tag; on decrypt the input must be ciphertext||tag
+ *        and the output is the recovered plaintext.
+ * @return 0 on success (and *io_len set to the produced byte count) or CK_RV.
+ */
+int app_aes_gcm(unsigned long session, int encrypt,
+                const unsigned char *key, unsigned long key_len,
+                const unsigned char *iv, unsigned long iv_len,
+                const unsigned char *aad, unsigned long aad_len,
+                unsigned long tag_bytes,
+                const unsigned char *in, unsigned long in_len,
+                unsigned char *out, unsigned long *io_len)
+{
+    CK_OBJECT_HANDLE hk = 0;
+    CK_GCM_PARAMS gcm;
+    CK_MECHANISM mg;
+    CK_ULONG outlen;
+    CK_RV rv;
+
+    NEED(p_CreateObject); NEED(p_DestroyObject);
+    NEED(p_EncryptInit); NEED(p_Encrypt);
+    NEED(p_DecryptInit); NEED(p_Decrypt);
+    if (!io_len || (key_len != 16 && key_len != 24 && key_len != 32)) {
+        set_err("AES-GCM: key must be 16/24/32 bytes");
+        return APP_ERR_ARGS;
+    }
+    outlen = *io_len;
+
+    rv = app_make_aes_key((CK_SESSION_HANDLE)session, key, key_len, &hk);
+    if (rv != CKR_OK) { set_err("C_CreateObject -> 0x%08lX", (unsigned long)rv); return (int)rv; }
+
+    memset(&gcm, 0, sizeof(gcm));
+    gcm.pIv = (CK_BYTE_PTR)iv; gcm.ulIvLen = (CK_ULONG)iv_len; gcm.ulIvBits = (CK_ULONG)(iv_len * 8);
+    gcm.pAAD = (CK_BYTE_PTR)(aad_len ? aad : NULL); gcm.ulAADLen = (CK_ULONG)aad_len;
+    gcm.ulTagBits = (CK_ULONG)(tag_bytes * 8);
+    mg.mechanism = CKM_AES_GCM; mg.pParameter = &gcm; mg.ulParameterLen = sizeof(gcm);
+
+    if (encrypt) {
+        rv = p_EncryptInit((CK_SESSION_HANDLE)session, &mg, hk);
+        if (rv == CKR_OK)
+            rv = p_Encrypt((CK_SESSION_HANDLE)session, (CK_BYTE_PTR)in,
+                           (CK_ULONG)in_len, out, &outlen);
+    } else {
+        rv = p_DecryptInit((CK_SESSION_HANDLE)session, &mg, hk);
+        if (rv == CKR_OK)
+            rv = p_Decrypt((CK_SESSION_HANDLE)session, (CK_BYTE_PTR)in,
+                           (CK_ULONG)in_len, out, &outlen);
+    }
+    (void)p_DestroyObject((CK_SESSION_HANDLE)session, hk);
+    if (rv != CKR_OK) { set_err("%s -> 0x%08lX", encrypt ? "C_Encrypt" : "C_Decrypt", (unsigned long)rv); return (int)rv; }
+    *io_len = (unsigned long)outlen;
+    return 0;
+}
+
+/**
+ * @brief AES-CTR encrypt/decrypt with a caller-supplied key and 16-byte counter
+ *        block, via PKCS#11. CTR is symmetric, so @p encrypt only selects the
+ *        PKCS#11 entry points.
+ * @return 0 on success (*io_len set to produced bytes) or CK_RV.
+ */
+int app_aes_ctr(unsigned long session, int encrypt,
+                const unsigned char *key, unsigned long key_len,
+                const unsigned char *counter,
+                const unsigned char *in, unsigned long in_len,
+                unsigned char *out, unsigned long *io_len)
+{
+    CK_OBJECT_HANDLE hk = 0;
+    CK_AES_CTR_PARAMS ctr;
+    CK_MECHANISM mc;
+    CK_ULONG outlen;
+    CK_RV rv;
+
+    NEED(p_CreateObject); NEED(p_DestroyObject);
+    NEED(p_EncryptInit); NEED(p_Encrypt);
+    NEED(p_DecryptInit); NEED(p_Decrypt);
+    if (!io_len || (key_len != 16 && key_len != 24 && key_len != 32)) {
+        set_err("AES-CTR: key must be 16/24/32 bytes");
+        return APP_ERR_ARGS;
+    }
+    outlen = *io_len;
+
+    rv = app_make_aes_key((CK_SESSION_HANDLE)session, key, key_len, &hk);
+    if (rv != CKR_OK) { set_err("C_CreateObject -> 0x%08lX", (unsigned long)rv); return (int)rv; }
+
+    memset(&ctr, 0, sizeof(ctr));
+    ctr.ulCounterBits = 128;
+    memcpy(ctr.cb, counter, 16);
+    mc.mechanism = CKM_AES_CTR; mc.pParameter = &ctr; mc.ulParameterLen = sizeof(ctr);
+
+    if (encrypt) {
+        rv = p_EncryptInit((CK_SESSION_HANDLE)session, &mc, hk);
+        if (rv == CKR_OK)
+            rv = p_Encrypt((CK_SESSION_HANDLE)session, (CK_BYTE_PTR)in,
+                           (CK_ULONG)in_len, out, &outlen);
+    } else {
+        rv = p_DecryptInit((CK_SESSION_HANDLE)session, &mc, hk);
+        if (rv == CKR_OK)
+            rv = p_Decrypt((CK_SESSION_HANDLE)session, (CK_BYTE_PTR)in,
+                           (CK_ULONG)in_len, out, &outlen);
+    }
+    (void)p_DestroyObject((CK_SESSION_HANDLE)session, hk);
+    if (rv != CKR_OK) { set_err("%s -> 0x%08lX", encrypt ? "C_Encrypt" : "C_Decrypt", (unsigned long)rv); return (int)rv; }
+    *io_len = (unsigned long)outlen;
+    return 0;
 }

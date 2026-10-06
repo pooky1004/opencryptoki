@@ -1042,15 +1042,17 @@ object_set_attr_done:
         break;
     }
     case NCMP_CMD_OPEN_SESSION: {
-        /* Reference target protocol: request carries a zero wire-header
-         * session_id and a single 4-byte flags parameter; the token allocates a
-         * session and returns the handle in response parameter 0. The handle is
-         * the table index + 1 (1..255), so it is never 0 and never collides
-         * with another live session in this slot. */
+        /* Request from ncmpd: a single param0 = flags with a zero wire-header
+         * session_id (matches the real firmware). The token allocates a session
+         * and returns its session id (hsm_sid) in response parameter 0. The
+         * handle is the table index + 1 (1..255), so it is never 0 and never
+         * collides with another live session in this slot. */
         const uint8_t *pflags;
         uint32_t lflags, flags = 0;
         int free_idx = -1;
 
+        /* ncmpd rewrites OPEN to a single param0 = flags before it reaches the
+         * token (matches the real firmware); read flags from param0. */
         if (ncmp_msg_param(msg, 0, &pflags, &lflags) == NCMP_OK && lflags >= 4)
             flags = ncmp_rd_u32le(pflags);
 

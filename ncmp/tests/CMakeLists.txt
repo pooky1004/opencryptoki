@@ -19,6 +19,7 @@ add_executable(ncmp_tests
     test_ctx_typed.c
     # Token admin: identity query, CK-slot binding, login/PIN lifecycle.
     test_admin.c
+    test_session_map.c
     # Object management: key registration + attribute forwarding to the token.
     test_object.c
     # SHA3 / XOF / post-quantum (ML-DSA, ML-KEM) adapter tests.

@@ -7,6 +7,7 @@
  * FREE), and an accurate total command count.
  */
 #include "ncmp/ncmp_shm.h"
+#include <unistd.h>
 #include "ncmp/ncmp_slot.h"
 #include "ncmp/ncmp_queue.h"
 #include "ncmp/ncmp_transport.h"
@@ -49,8 +50,8 @@ static void *producer(void *a)
         req.payload = body;
         req.payload_cap = 4;
 
-        if (ncmp_slot_enqueue(p->base, p->slot, p->session, (uint32_t)i, &req,
-                              &idx) != NCMP_OK)
+        if (ncmp_slot_enqueue(p->base, p->slot, p->session, (uint32_t)getpid(),
+                              (uint32_t)i, &req, &idx) != NCMP_OK)
             return NULL;
 
         memset(&rsp, 0, sizeof(rsp));

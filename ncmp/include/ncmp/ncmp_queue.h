@@ -44,7 +44,14 @@ typedef enum ncmp_qstate {
  */
 typedef struct ncmp_qentry {
     volatile int32_t state;       /**< ncmp_qstate_t, CAS-only. */
-    uint32_t         owner_sess;  /**< Session id of the enqueuing client. */
+    uint32_t         owner_sess;  /**< Wire session id used to correlate the USB
+                                   *   response to this entry. Starts as the
+                                   *   enqueuing client's app session id; the
+                                   *   comm_thread overwrites it with the token
+                                   *   hsm session id it actually sent (see the
+                                   *   session-id translation in comm_thread). */
+    uint32_t         pid;         /**< Enqueuing process id (client-stamped), key
+                                   *   for the (pid, app_sid)->hsm_sid map. */
     uint32_t         sequence_id; /**< Correlates request and response. */
     uint32_t         req_len;     /**< Encoded request length in bytes. */
     uint32_t         rsp_len;     /**< Encoded response length in bytes. */

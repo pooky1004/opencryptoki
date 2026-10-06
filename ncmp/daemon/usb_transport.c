@@ -49,13 +49,72 @@
 #ifdef NCMP_HAVE_LIBUSB
 
 #include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
+
+/*
+ * FX3 Slave-FIFO (slfifosync) transport quirks, matching the verified reference
+ * host (bang/.../host/web_ui/fx3_ci.py):
+ *   - The GPIF bus has a short-packet erratum: a device->host (P-to-U) response
+ *     is only committed when the FOLLOWING host->device (U-to-P) transfer turns
+ *     the bus around. So after every real request we send a harmless NOP trigger
+ *     OUT, then read IN; the NOP's own response is discarded.
+ *   - Physical USB transfers are padded to a 4-byte multiple (32-bit GPIF bus).
+ *   - A short cooldown is needed after an IN response before the next OUT.
+ */
+#define FX3_GUARD_NS      5000000ull            /* 5 ms interframe guard */
+#define FX3_OUT_CHUNK_MS  50
+#define FX3_RX_CAP        (2u * (uint32_t)NCMP_MAX_FRAME_SIZE)
+#define FX3_NOP_FRAME_LEN 56u                   /* 4 + 20 + 32, already 4-aligned */
 
 struct ncmp_transport {
     libusb_context       *ctx;
     libusb_device_handle *dev;
     uint8_t               ep_in;
     uint8_t               ep_out;
+    uint8_t              *rx;        /* pending IN accumulator (FX3_RX_CAP) */
+    size_t                rx_len;    /* valid bytes in rx */
+    uint8_t              *txpad;     /* 4-byte-padded OUT scratch (frame + pad) */
+    uint32_t              trig_seq;  /* NOP trigger sequence counter */
+    uint64_t              next_out_ns; /* earliest time the next OUT may start */
 };
+
+static uint64_t fx3_now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static void fx3_sleep_ns(uint64_t ns)
+{
+    struct timespec ts;
+    ts.tv_sec = (time_t)(ns / 1000000000ull);
+    ts.tv_nsec = (long)(ns % 1000000000ull);
+    nanosleep(&ts, NULL);
+}
+
+static uint32_t fx3_rd32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static void fx3_wr32(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
+}
+
+/* Build a 56-byte NOP trigger frame (command_id 0, no params). */
+static void fx3_build_nop(uint8_t out[FX3_NOP_FRAME_LEN], uint32_t seq)
+{
+    memset(out, 0, FX3_NOP_FRAME_LEN);
+    fx3_wr32(out + 0, 20u + 32u);   /* frame_len = header(20) + payload(32) */
+    fx3_wr32(out + 8, seq);         /* sequence_id */
+    fx3_wr32(out + 20, 32u);        /* payload_len = param-length array only */
+}
 
 /** Count FX3 devices matching our VID/PID in @p list; open the @p want-th one. */
 static libusb_device *ncmp_pick_device(libusb_device **list, ssize_t n,
@@ -125,16 +184,22 @@ static int usb_open(uint32_t slot_id, ncmp_transport_t **out)
         return NCMP_ERR_NOSPACE;
     t->ep_in = NCMP_FX3_EP_IN;
     t->ep_out = NCMP_FX3_EP_OUT;
+    t->rx = (uint8_t *)malloc(FX3_RX_CAP);
+    t->txpad = (uint8_t *)malloc((size_t)NCMP_MAX_FRAME_SIZE + 4u);
+    if (!t->rx || !t->txpad) {
+        free(t->rx); free(t->txpad); free(t);
+        return NCMP_ERR_NOSPACE;
+    }
 
     if (libusb_init(&t->ctx) != 0) {
-        free(t);
+        free(t->rx); free(t->txpad); free(t);
         return NCMP_ERR_USB;
     }
 
     n = libusb_get_device_list(t->ctx, &list);
     if (n < 0) {
         libusb_exit(t->ctx);
-        free(t);
+        free(t->rx); free(t->txpad); free(t);
         return NCMP_ERR_USB;
     }
     dev = ncmp_pick_device(list, n, slot_id, NULL);
@@ -142,7 +207,7 @@ static int usb_open(uint32_t slot_id, ncmp_transport_t **out)
     libusb_free_device_list(list, 1);
     if (rc != 0 || !t->dev) {
         libusb_exit(t->ctx);
-        free(t);
+        free(t->rx); free(t->txpad); free(t);
         return NCMP_ERR_USB;
     }
 
@@ -150,111 +215,212 @@ static int usb_open(uint32_t slot_id, ncmp_transport_t **out)
     if (libusb_claim_interface(t->dev, NCMP_FX3_IFACE) != 0) {
         libusb_close(t->dev);
         libusb_exit(t->ctx);
-        free(t);
+        free(t->rx); free(t->txpad); free(t);
         return NCMP_ERR_USB;
     }
+
+    /* Recover a possibly-wedged FX3: a prior run (or an aborted transfer) can
+     * leave the Slave-FIFO GPIF/DMA stuck so the bulk-OUT endpoint stops
+     * draining (every OUT then times out). A USB reset restores it. Best effort;
+     * re-claim afterwards since a reset re-enumerates the interface. */
+    if (libusb_reset_device(t->dev) == 0)
+        (void)libusb_claim_interface(t->dev, NCMP_FX3_IFACE);
 
     *out = t;
     return NCMP_OK;
 }
 
-/** Transfer exactly @p len bytes on @p ep; direction implied by the endpoint. */
-static int ncmp_bulk_exact(ncmp_transport_t *t, uint8_t ep, uint8_t *buf,
-                           size_t len)
+/* Append whatever is available on the bulk IN endpoint to t->rx (best effort). */
+static void fx3_drain_in(ncmp_transport_t *t, int timeout_ms)
 {
-    size_t done = 0;
+    int space, transferred = 0, rc;
 
-    while (done < len) {
-        int chunk = (len - done) > INT32_MAX ? INT32_MAX : (int)(len - done);
+    if (t->rx_len + 1024u > FX3_RX_CAP)
+        return;   /* no room; a frame should be parseable already */
+    space = (int)(FX3_RX_CAP - t->rx_len);
+    rc = libusb_bulk_transfer(t->dev, t->ep_in, t->rx + t->rx_len, space,
+                              &transferred, timeout_ms);
+    if ((rc == 0 || rc == LIBUSB_ERROR_TIMEOUT) && transferred > 0)
+        t->rx_len += (size_t)transferred;
+}
+
+/* Write @p len bytes to EP_OUT by @p deadline, servicing IN during the send so
+ * a queued response cannot back-pressure the GPIF and stall a long OUT. */
+static int fx3_out_write(ncmp_transport_t *t, const uint8_t *buf, size_t len,
+                         uint64_t deadline_ns)
+{
+    size_t off = 0;
+
+    while (off < len) {
+        uint64_t now = fx3_now_ns();
+        int rem_ms = now < deadline_ns ? (int)((deadline_ns - now) / 1000000ull) : 1;
+        int to = rem_ms < FX3_OUT_CHUNK_MS ? rem_ms : FX3_OUT_CHUNK_MS;
         int transferred = 0;
-        int rc = libusb_bulk_transfer(t->dev, ep, buf + done, chunk,
-                                      &transferred, NCMP_USB_TIMEOUT_MS);
+        int rc;
 
-        if (rc == LIBUSB_ERROR_TIMEOUT && transferred == 0)
-            return NCMP_ERR_TIMEOUT;
+        if (to < 1) to = 1;
+        rc = libusb_bulk_transfer(t->dev, t->ep_out, (uint8_t *)buf + off,
+                                  (int)(len - off), &transferred, to);
+        off += (size_t)transferred;
         if (rc != 0 && rc != LIBUSB_ERROR_TIMEOUT)
             return NCMP_ERR_USB;
-        if (transferred == 0)
-            return NCMP_ERR_USB;
-        done += (size_t)transferred;
+        if (off == len)
+            return NCMP_OK;
+        if (fx3_now_ns() >= deadline_ns)
+            return NCMP_ERR_TIMEOUT;
+        fx3_drain_in(t, to);   /* keep the IN side moving while OUT is partial */
     }
     return NCMP_OK;
 }
 
-static int usb_send(ncmp_transport_t *t, const uint8_t *frame, size_t len)
+/* Send one NOP trigger OUT to turn the GPIF bus around (commit a response). */
+static void fx3_send_trigger(ncmp_transport_t *t, int timeout_ms)
 {
-    if (!t || !frame)
-        return NCMP_ERR_INVAL;
-    /* Cast away const: libusb writes from the buffer but does not modify it. */
-    return ncmp_bulk_exact(t, t->ep_out, (uint8_t *)frame, len);
+    uint8_t nop[FX3_NOP_FRAME_LEN];
+    int transferred = 0;
+
+    t->trig_seq = (t->trig_seq + 1u) & 0xFFFFFFFFu;
+    fx3_build_nop(nop, t->trig_seq);
+    (void)libusb_bulk_transfer(t->dev, t->ep_out, nop, (int)sizeof(nop),
+                               &transferred, timeout_ms);
 }
 
-/**
- * Read one complete frame from the bulk IN endpoint in a single transfer.
- *
- * The FX3 firmware emits each response as one bulk transfer, so the host posts
- * one read spanning the whole max-size buffer and takes whatever the device
- * delivers. libusb ends the transfer on a short packet (or a ZLP when the frame
- * length is a multiple of the endpoint's max packet size), returning the full
- * frame length in @p *out_len. The buffer must be at least one full frame
- * (NCMP_MAX_FRAME_SIZE); an oversized transfer is reported as LIBUSB_ERROR_
- * OVERFLOW and mapped to NCMP_ERR_PAYLOAD.
- */
-static int ncmp_bulk_read_frame(ncmp_transport_t *t, uint8_t *buf,
-                                size_t buf_len, size_t *out_len)
+static int usb_send(ncmp_transport_t *t, const uint8_t *frame, size_t len)
 {
-    int cap = buf_len > INT32_MAX ? INT32_MAX : (int)buf_len;
-    int transferred = 0;
-    int rc = libusb_bulk_transfer(t->dev, t->ep_in, buf, cap, &transferred,
-                                  NCMP_USB_TIMEOUT_MS);
+    uint64_t now, deadline;
+    size_t plen;
+    int rc;
 
-    if (rc == LIBUSB_ERROR_TIMEOUT && transferred == 0)
-        return NCMP_ERR_TIMEOUT;
-    if (rc == LIBUSB_ERROR_OVERFLOW)
+    if (!t || !frame || len == 0)
+        return NCMP_ERR_INVAL;
+    if (len > (size_t)NCMP_MAX_FRAME_SIZE)
         return NCMP_ERR_PAYLOAD;
-    if (rc != 0 && rc != LIBUSB_ERROR_TIMEOUT)
-        return NCMP_ERR_USB;
-    if (transferred <= 0)
-        return NCMP_ERR_USB;
 
-    *out_len = (size_t)transferred;
+    /* Cooldown: the Slave-FIFO DMA needs a gap after an IN before the next OUT. */
+    now = fx3_now_ns();
+    if (t->next_out_ns > now)
+        fx3_sleep_ns(t->next_out_ns - now);
+
+    /* Pad the physical transfer to a 4-byte multiple (32-bit GPIF bus). */
+    plen = (len + 3u) & ~(size_t)3u;
+    memcpy(t->txpad, frame, len);
+    if (plen > len)
+        memset(t->txpad + len, 0, plen - len);
+
+    deadline = fx3_now_ns() + (uint64_t)NCMP_USB_TIMEOUT_MS * 1000000ull;
+    rc = fx3_out_write(t, t->txpad, plen, deadline);
+    if (getenv("NCMP_USB_DEBUG"))
+        fprintf(stderr, "[usb] OUT %zu bytes rc=%d rx_pending=%zu\n", plen, rc, t->rx_len);
+    if (rc != NCMP_OK)
+        return rc;
+
+    /* Erratum workaround: a NOP trigger turns the bus around so the device
+     * commits this request's response to the IN endpoint. */
+    fx3_sleep_ns(FX3_GUARD_NS);
+    fx3_send_trigger(t, FX3_OUT_CHUNK_MS);
     return NCMP_OK;
+}
+
+/* Extract the first non-NOP frame from t->rx into @p buf. Returns 1 on success
+ * (sets *out_len), 0 if more bytes are needed, -1 on a corrupt stream. NOP
+ * trigger responses (command_id 0) are discarded. */
+static int fx3_extract(ncmp_transport_t *t, uint8_t *buf, size_t cap,
+                       size_t *out_len)
+{
+    size_t pos = 0;
+
+    while (t->rx_len - pos >= NCMP_FRAME_PREFIX_SIZE) {
+        uint32_t frame_len = fx3_rd32(t->rx + pos);
+        size_t total = (size_t)frame_len + NCMP_FRAME_PREFIX_SIZE;
+        size_t physical;
+        uint32_t cmd;
+
+        if (total < 56u || total > (size_t)NCMP_MAX_FRAME_SIZE) {
+            t->rx_len = 0;        /* desynced: drop the buffer and resync */
+            return 0;
+        }
+        physical = (total + 3u) & ~(size_t)3u;
+        if (t->rx_len - pos < physical)
+            break;                /* a full (padded) frame has not arrived yet */
+
+        cmd = fx3_rd32(t->rx + pos + 12);   /* command_id at offset 12 */
+        if (cmd == 0x0000u) {               /* NOP trigger response: discard */
+            pos += physical;
+            continue;
+        }
+        if (total > cap) {                  /* caller buffer too small: skip */
+            pos += physical;
+            continue;
+        }
+        memcpy(buf, t->rx + pos, total);
+        *out_len = total;
+        pos += physical;
+        memmove(t->rx, t->rx + pos, t->rx_len - pos);
+        t->rx_len -= pos;
+        return 1;
+    }
+    if (pos > 0) {                          /* compact consumed NOP bytes */
+        memmove(t->rx, t->rx + pos, t->rx_len - pos);
+        t->rx_len -= pos;
+    }
+    return 0;
 }
 
 static int usb_recv(ncmp_transport_t *t, uint8_t *buf, size_t buf_len,
-                        size_t *out_len)
+                    size_t *out_len)
 {
-    const size_t fixed = NCMP_FRAME_PREFIX_SIZE + NCMP_HEADER_WIRE_SIZE;
-    NCMP_Header hdr;
-    size_t got = 0;
-    int rc;
+    uint64_t deadline;
+    int flush_retries = 0;
+    const int flush_limit = 3 + NCMP_USB_TIMEOUT_MS / 200;
 
     if (!t || !buf || !out_len)
         return NCMP_ERR_INVAL;
-    if (buf_len < fixed)
-        return NCMP_ERR_TRUNCATED;
 
-    /*
-     * Single-shot read: pull the entire frame in ONE bulk transfer into the
-     * caller's max-size buffer, then parse. The FX3 bulk IN endpoint delivers a
-     * whole frame per transfer, so the header and its payload cannot be split
-     * across two reads without losing byte-stream alignment.
-     */
-    rc = ncmp_bulk_read_frame(t, buf, buf_len, &got);
-    if (rc != NCMP_OK)
-        return rc;
+    deadline = fx3_now_ns() + (uint64_t)NCMP_USB_TIMEOUT_MS * 1000000ull;
+    for (;;) {
+        int r = fx3_extract(t, buf, buf_len, out_len);
+        if (r == 1) {
+            t->next_out_ns = fx3_now_ns() + FX3_GUARD_NS;
+            return NCMP_OK;
+        }
+        if (fx3_now_ns() >= deadline)
+            return NCMP_ERR_TIMEOUT;
 
-    /* Parse the header from what arrived and confirm the frame is complete. */
-    if (got < fixed)
-        return NCMP_ERR_TRUNCATED;
-    rc = ncmp_wire_decode_header(buf, got, &hdr);
-    if (rc != NCMP_OK)
-        return rc;
-    if (got != fixed + hdr.payload_len)
-        return NCMP_ERR_TRUNCATED;
+        int rem_ms = (int)((deadline - fx3_now_ns()) / 1000000ull);
+        int to = (flush_retries < flush_limit)
+                     ? (rem_ms < 200 ? rem_ms : 200) : rem_ms;
+        int space = (t->rx_len + 1024u <= FX3_RX_CAP)
+                        ? (int)(FX3_RX_CAP - t->rx_len) : 0;
+        int transferred = 0, rc;
 
-    *out_len = got;
-    return NCMP_OK;
+        if (to < 1) to = 1;
+        if (space <= 0) {        /* buffer full but no complete frame: resync */
+            t->rx_len = 0;
+            continue;
+        }
+        rc = libusb_bulk_transfer(t->dev, t->ep_in, t->rx + t->rx_len, space,
+                                  &transferred, to);
+        if (getenv("NCMP_USB_DEBUG"))
+            fprintf(stderr, "[usb] IN rc=%d transferred=%d rx_len=%zu retries=%d\n",
+                    rc, transferred, t->rx_len, flush_retries);
+        if (rc == LIBUSB_ERROR_OVERFLOW)
+            return NCMP_ERR_PAYLOAD;
+        if (transferred > 0) {
+            t->rx_len += (size_t)transferred;
+            continue;
+        }
+        if (rc == LIBUSB_ERROR_TIMEOUT) {
+            /* Nothing yet: a late response needs another bus turnaround. */
+            if (flush_retries < flush_limit && fx3_now_ns() < deadline) {
+                flush_retries++;
+                fx3_send_trigger(t, FX3_OUT_CHUNK_MS);
+                continue;
+            }
+            return NCMP_ERR_TIMEOUT;
+        }
+        if (rc != 0)
+            return NCMP_ERR_USB;
+    }
 }
 
 static int usb_close(ncmp_transport_t *t)
@@ -267,6 +433,8 @@ static int usb_close(ncmp_transport_t *t)
     }
     if (t->ctx)
         libusb_exit(t->ctx);
+    free(t->rx);
+    free(t->txpad);
     free(t);
     return NCMP_OK;
 }

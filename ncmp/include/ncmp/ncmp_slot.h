@@ -22,15 +22,35 @@
  *
  * @param base       Local SHM mapping base.
  * @param slot       Target slot.
- * @param session_id Owning session handle (matched against the response).
+ * @param session_id Owning (app) session id; stored in owner_sess initially.
+ * @param pid        Enqueuing process id (key for the session map).
  * @param sequence_id Per-session request id (matched against the response).
  * @param req        Request message to encode.
  * @param out_idx    Receives the claimed ring index on success.
  * @return NCMP_OK, NCMP_ERR_FULL if the ring is saturated, or an encode error.
  */
 int ncmp_slot_enqueue(void *base, NCMP_Slot *slot, uint32_t session_id,
-                      uint32_t sequence_id, const NCMP_Message *req,
-                      int *out_idx);
+                      uint32_t pid, uint32_t sequence_id,
+                      const NCMP_Message *req, int *out_idx);
+
+/**
+ * @brief Session-map helpers (ncmpd side). The slot's comm_thread is the single
+ *        writer, so these take no lock; readers (display) tolerate a stale read.
+ */
+int  ncmp_sess_map_store(NCMP_Slot *slot, uint32_t pid, uint32_t app_sid,
+                         uint32_t hsm_sid);
+int  ncmp_sess_map_lookup(const NCMP_Slot *slot, uint32_t pid, uint32_t app_sid,
+                          uint32_t *out_hsm);
+void ncmp_sess_map_remove_hsm(NCMP_Slot *slot, uint32_t hsm_sid);
+
+/**
+ * @brief Capture the last comm<->HSM frame for Debug App inspection.
+ * @param slot Target slot. @param buf Wire frame bytes. @param len Frame length.
+ * Stores up to NCMP_LASTMSG_CAP bytes into slot->last_msg (tx or rx) with a
+ * monotonic timestamp. Written by the slot owner (comm_thread) or the boot probe.
+ */
+void ncmp_slot_lastmsg_tx(NCMP_Slot *slot, const uint8_t *buf, uint32_t len);
+void ncmp_slot_lastmsg_rx(NCMP_Slot *slot, const uint8_t *buf, uint32_t len);
 
 /**
  * @brief Wait for entry @p idx to reach DONE, then decode its response.

@@ -85,8 +85,29 @@ int app_digest_multipart(unsigned long session, unsigned long mech,
  *  string filled. Returns 0 on success (round-trip matched). */
 int app_aes_gcm_selftest(unsigned long session, char *detail, int cap);
 
+/** AES-GCM one-shot with a caller-supplied key (C_CreateObject + C_Encrypt/
+ *  C_Decrypt). Encrypt output is ciphertext||tag; decrypt input is
+ *  ciphertext||tag. *io_len in=out buffer cap, out=produced. Returns 0/CK_RV. */
+int app_aes_gcm(unsigned long session, int encrypt,
+                const unsigned char *key, unsigned long key_len,
+                const unsigned char *iv, unsigned long iv_len,
+                const unsigned char *aad, unsigned long aad_len,
+                unsigned long tag_bytes,
+                const unsigned char *in, unsigned long in_len,
+                unsigned char *out, unsigned long *io_len);
+
+/** AES-CTR one-shot with a caller-supplied key + 16-byte counter block. Returns
+ *  0/CK_RV; *io_len in=cap, out=produced. */
+int app_aes_ctr(unsigned long session, int encrypt,
+                const unsigned char *key, unsigned long key_len,
+                const unsigned char *counter,
+                const unsigned char *in, unsigned long in_len,
+                unsigned char *out, unsigned long *io_len);
+
 /** Human-readable last error (never NULL). */
 const char *app_last_error(void);
+/** Set the last-error string (used by the web layer for arg validation). */
+void app_set_last_error(const char *msg);
 
 #ifdef __cplusplus
 }

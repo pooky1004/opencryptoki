@@ -24,7 +24,7 @@ async function refreshStatus() {
   const s = await api('/api/status');
   const on = !!s.connected;
   $('#connDot').className = 'dot ' + (on ? 'on' : 'off');
-  $('#connText').textContent = on ? 'ncmpd SHM 연결됨' : 'ncmpd 연결 안 됨';
+  $('#connText').textContent = on ? 'ncmpd SHM 연결됨' : ('ncmpd 연결 안 됨' + (s.reason ? ' — ' + s.reason : ''));
   $('#shmName').textContent = s.shmName || '-';
   $('#shmMagic').textContent = s.magic || '-';
   $('#shmVer').textContent = s.version ?? '-';
@@ -115,6 +115,86 @@ async function refreshDetail() {
   } else {
     body.append(el('div', { className: 'muted small', textContent: '활성(비-FREE) 링 엔트리 없음' }));
   }
+
+  // last comm_thread <-> HSM exchange (raw + parsed)
+  await renderLastMsg(body, SEL);
+}
+
+/* ---- comm<->HSM last message (TX/RX) rendering ---- */
+const LM_CI = {0x0000:'NOP',0x0001:'RNG',0x0002:'DIGEST',0x0003:'GETMECHLIST',
+  0x0004:'DIGEST_INIT',0x0005:'DIGEST_UPDATE',0x0006:'DIGEST_FINAL',0x0009:'SHAKE_DERIVE',
+  0x0012:'AES_GCM',0x0013:'AES_CTR',0x0014:'AES_GCM_INIT',0x0015:'AES_GCM_UPDATE',
+  0x0016:'AES_GCM_FINAL',0x0017:'CTX_FREE',0x0020:'OPEN_SESSION',0x0021:'CLOSE_SESSION',
+  0x0030:'LOGIN',0x0031:'LOGOUT',0x0032:'INIT_PIN',0x0033:'SET_PIN',0x0034:'INIT_TOKEN',
+  0x0035:'GET_UTC_TIME',0x0036:'GET_TOKEN_PARAMS',0x0037:'SET_UTC_TIME',0x0038:'OBJECT_ADD',
+  0x0039:'OBJECT_SET_ATTR',0x0050:'MLDSA_KEYGEN',0x0051:'MLDSA_SIGN',0x0052:'MLDSA_VERIFY',
+  0x0053:'MLKEM_KEYGEN',0x0054:'MLKEM_ENCAPS',0x0055:'MLKEM_DECAPS',0x0101:'VD_MEM_WRITE',
+  0x0102:'VD_MEM_READ',0x0103:'VD_PING',0x0104:'VD_SELFTEST',0x0105:'VD_FW_INFO',
+  0x0106:'VD_MEM_FILL',0x0107:'VD_MEM_CRC',0x0108:'VD_TOKEN_INFO'};
+const LM_CKR = {0:'OK',5:'GENERAL_ERROR',6:'FUNCTION_FAILED',0x30:'DEVICE_ERROR',
+  0x50:'FUNCTION_CANCELED',0x54:'FUNCTION_NOT_SUPPORTED',0xA0:'PIN_INCORRECT',
+  0xB0:'SESSION_CLOSED',0xB3:'SESSION_HANDLE_INVALID'};
+const lmHx = (n, w) => '0x' + (n >>> 0).toString(16).toUpperCase().padStart(w || 0, '0');
+const lmCkr = (v) => LM_CKR[v] ? ('CKR_' + LM_CKR[v]) : ('CKR_0x' + (v >>> 0).toString(16).toUpperCase());
+function lmFmtHex(h) {
+  const b = (h.match(/.{1,2}/g) || []); let s = '';
+  for (let i = 0; i < b.length; i++) s += b[i] + ((i % 16 === 15) ? '\n' : ' ');
+  return s.trim() || '(empty)';
+}
+function lmBlock(label, f) {
+  const d = el('div', { className: 'frame' });
+  const trunc = f.cap < f.len;
+  d.append(el('div', { className: 'lbl', textContent:
+    `${label} — raw (Hex)` + (f.len ? (trunc ? ` · ${f.cap}/${f.len}B (truncated)` : ` · ${f.len}B`) : '') }));
+  d.append(el('pre', { className: 'hex', textContent: f.len ? lmFmtHex(f.hex || '') : '(없음)' }));
+  d.append(el('div', { className: 'lbl', textContent: label + ' — parsed' }));
+  if (f.parsed) {
+    const t = el('table', { className: 'pf' });
+    const row = (k, v) => t.append(el('tr', {}, el('td', { className: 'k', textContent: k }), el('td', { textContent: v })));
+    row('frame_len', String(f.frameLen));
+    row('session_id', `${f.sessionId} (${lmHx(f.sessionId)})`);
+    row('sequence_id', String(f.sequenceId));
+    row('command_id', `${lmHx(f.commandId, 4)}  ${LM_CI[f.commandId] || '?'}`);
+    row('ack', `${lmHx(f.ack)}  ${lmCkr(f.ack)}`);
+    row('payload_len', String(f.payloadLen));
+    for (const p of (f.params || [])) {
+      const note = p.truncated ? ` (표시 ${p.shown != null ? p.shown : (p.hex ? p.hex.length / 2 : 0)}B, 잘림)` : '';
+      row(`param[${p.idx}]`, `len ${p.len}${note} : ${p.hex || '(0)'}`);
+    }
+    if (!(f.params || []).length) row('params', '(없음)');
+    d.append(t);
+  } else {
+    d.append(el('div', { className: 'muted small', textContent: f.len ? '파싱 불가(헤더 미만 캡처)' : '(없음)' }));
+  }
+  return d;
+}
+async function renderLastMsg(body, slot) {
+  body.append(el('h3', { textContent: 'comm ↔ HSM 마지막 메시지 (TX/RX raw + parsed)' }));
+  let d;
+  try { d = await api('/api/lastmsg', { slot }); } catch { d = null; }
+  if (!d || d.error || d.connected === false) {
+    body.append(el('div', { className: 'muted small', textContent: '(없음)' }));
+    return;
+  }
+  const wrap = el('div', { className: 'frames2' });
+  wrap.append(lmBlock('송신(TX → HSM)', d.tx || { len: 0 }));
+  wrap.append(lmBlock('수신(RX ← HSM)', d.rx || { len: 0 }));
+  body.append(wrap);
+  /* Help the common "왜 비어 있나" case: a slot can be ONLINE yet have never
+   * exchanged a frame. The usual cause is that the session was opened via the
+   * Test App's "ID로 추가"(adopt) path, which does NOT send OPEN_SESSION to the
+   * token (it just reuses a wire session_id locally), so comm<->HSM has nothing
+   * to show until a real command is sent. A real "새 세션"(C_OpenSession) or any
+   * crypto/login call populates TX/RX here. */
+  const txLen = (d.tx && d.tx.len) || 0;
+  const rxLen = (d.rx && d.rx.len) || 0;
+  if (!txLen && !rxLen) {
+    body.append(el('div', { className: 'muted small', textContent:
+      '송신/수신이 비어 있음: 이 슬롯은 아직 토큰과 프레임을 주고받지 않았습니다. ' +
+      'Test App에서 "ID로 추가"(adopt)로 연 세션은 토큰에 OPEN_SESSION을 보내지 ' +
+      '않으므로 여기에 표시되지 않습니다 — 실제 통신을 보려면 "새 세션"(C_OpenSession) ' +
+      '또는 로그인·난수·암복호 등 명령을 보내세요.' }));
+  }
 }
 
 async function refreshAll() { await refreshStatus(); await refreshSlots(); await refreshDetail(); }
@@ -143,7 +223,7 @@ function wire() {
   $('#btnClearLog').onclick = () => { $('#log').textContent = ''; };
   $('#autoRefresh').onchange = (e) => setAuto(e.target.checked);
   $('#refreshSec').onchange = () => { if ($('#autoRefresh').checked) setAuto(true); };
-  $('#btnReconnect').onclick = async () => { const d = await api('/api/reconnect'); log('재연결: ' + (d.connected ? 'OK' : '실패')); refreshAll(); };
+  $('#btnReconnect').onclick = async () => { const d = await api('/api/reconnect'); log('재연결: ' + (d.connected ? 'OK' : ('실패' + (d.reason ? ' — ' + d.reason : '')))); refreshAll(); };
   refreshAll();
   setAuto($('#autoRefresh').checked);
   log('Debug App 준비 완료. ncmpd가 실행 중이어야 SHM이 보입니다. 자동 새로고침 기본 1초.');

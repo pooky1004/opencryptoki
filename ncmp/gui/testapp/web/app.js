@@ -29,12 +29,11 @@ let SESSIONS = [];               // [{handle, label, sid}] opened/adopted sessio
  * C_Initialize. */
 function applyDefaults() {
   const ut = $('#defUserType'), pin = $('#defPin'), soPin = $('#defSoPin');
-  const sid = $('#defSessionId'), rw = $('#defRw');
+  const rw = $('#defRw');
   if (!ut) return;
   if ($('#userType')) $('#userType').value = ut.value;
   // SO(0) uses SO PIN; User(1)/ContextSpecific(2) use the user PIN.
   if ($('#pin')) $('#pin').value = (ut.value === '0' ? soPin.value : pin.value);
-  if ($('#sessionId')) $('#sessionId').value = sid.value;
   if ($('#rwSession')) $('#rwSession').checked = rw.checked;
 }
 
@@ -69,11 +68,13 @@ function addSession(handle, label, meta = {}) {
     count: 0, lastCmd: '-', lastAt: null, lastOk: null, state: null,
   });
   CUR_SESSION = handle; renderSessionPickers(); setSessionText(); renderSessionsTab();
+  refreshSessMap();
 }
 function removeSession(handle) {
   SESSIONS = SESSIONS.filter((s) => s.handle !== handle);
   CUR_SESSION = SESSIONS.length ? SESSIONS[SESSIONS.length - 1].handle : null;
   renderSessionPickers(); setSessionText(); renderSessionsTab();
+  refreshSessMap();
 }
 /* Record the last command issued on a session (updates the 활성 세션 tab). */
 function touchSession(handle, cmd, ok) {
@@ -90,35 +91,67 @@ function fmtAgo(ms) {
   const m = Math.floor(s / 60); if (m < 60) return m + '분 ' + (s % 60) + '초';
   return Math.floor(m / 60) + '시간 ' + (m % 60) + '분';
 }
+const ROLE_NAME = { 1: 'User', 0: 'SO', 2: 'ContextSpecific' };
 function renderSessionsTab() {
   const tb = document.querySelector('#sessTable tbody'); if (!tb) return;
   tb.innerHTML = '';
-  for (const s of SESSIONS) {
+  const empty = $('#sessEmpty');
+  if (empty) empty.style.display = SESSIONS.length ? 'none' : '';
+  SESSIONS.forEach((s, i) => {
     const tr = el('tr', {});
+    if (s.handle === CUR_SESSION) tr.className = 'cur';
     const td = (v, cls) => el('td', cls ? { className: cls, textContent: String(v) } : { textContent: String(v) });
-    tr.append(td(s.handle === CUR_SESSION ? '●' : ''));
-    tr.append(td(s.handle));
-    tr.append(td(s.type));
-    tr.append(td(s.sid === null ? '-' : s.sid));
-    tr.append(td(s.slot === null ? '-' : s.slot));
-    tr.append(td(fmtTime(s.openedAt)));
-    tr.append(td(fmtAgo(s.openedAt)));
-    tr.append(td(s.count));
-    tr.append(td(s.lastCmd));
-    tr.append(td(s.lastOk === null ? '-' : (s.lastOk ? 'OK' : 'FAIL'), s.lastOk === null ? '' : (s.lastOk ? 'pass' : 'fail')));
-    tr.append(td(fmtTime(s.lastAt)));
-    tr.append(td(s.state === null ? '-' : s.state));
+    // No
+    tr.append(td(i + 1));
+    // 세션 ID: wire session_id when adopted, else the local handle (h<n>);
+    // include the slot since session ids may differ per slot.
+    const sidText = (s.sid !== null && s.sid !== undefined) ? String(s.sid) : ('h' + s.handle);
+    const slotText = (s.slot === null || s.slot === undefined) ? '' : ` · slot ${s.slot}`;
+    tr.append(td(sidText + slotText + (s.handle === CUR_SESSION ? ' ●' : '')));
+    // 역할: logged-in role, else 종류(open/adopt)
+    tr.append(td(s.role ? ROLE_NAME[s.role] || s.role : (s.type === '-' ? '-' : s.type)));
+    // 관리
     const act = el('td', {});
-    const bSel = el('button', { textContent: '선택' });
+    const bSel = el('button', { className: 'link', textContent: '선택' });
     bSel.onclick = () => { CUR_SESSION = s.handle; renderSessionPickers(); setSessionText(); renderSessionsTab(); };
-    const bClose = el('button', { textContent: '닫기' });
+    const bClose = el('button', { className: 'link', textContent: '닫기' });
     bClose.onclick = async () => { const d = await api('/api/session/close', 'POST', { session: s.handle }); log(`세션(handle ${s.handle}) 닫기: ${describe(d)}`); removeSession(s.handle); };
     act.append(bSel, ' ', bClose);
     tr.append(act);
     tb.append(tr);
-  }
+  });
   const sum = $('#sessSummary');
   if (sum) sum.textContent = `활성 세션 ${SESSIONS.length}개` + (CUR_SESSION !== null ? ` · 현재 handle ${CUR_SESSION}` : '');
+}
+/* Show the session map for the selected slot. Two sources merged:
+ *  - open   : ncmpd's live (pid, app_sid) -> hsm_sid map (C_OpenSession), read
+ *             from SHM via /api/sessmap;
+ *  - adopt  : local adopt sessions (NCMP_OpenSessionWithId) have no token OPEN,
+ *             so the wire sid is used directly (hsm_sid == app_sid). */
+async function refreshSessMap() {
+  const tb = document.querySelector('#sessMapTable tbody'); if (!tb) return;
+  tb.innerHTML = '';
+  const rows = [];
+  if (SELECTED_SLOT !== null) {
+    const d = await api('/api/sessmap', 'POST', { slot: SELECTED_SLOT });
+    if (d && d.ok && d.entries)
+      for (const e of d.entries)
+        rows.push({ kind: 'open', pid: e.pid, app: e.appSid, hsm: e.hsmSid });
+  }
+  /* Render numeric ids (pid, app_sid, hsm_sid) in hex (0x…). */
+  const hex = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? '0x' + (n >>> 0).toString(16).toUpperCase() : String(v);
+  };
+  for (const r of rows) {
+    tb.append(el('tr', {},
+      el('td', { textContent: r.kind }),
+      el('td', { textContent: hex(r.pid) }),
+      el('td', { textContent: hex(r.app) }),
+      el('td', { textContent: hex(r.hsm) })));
+  }
+  const empty = $('#sessMapEmpty');
+  if (empty) empty.style.display = rows.length ? 'none' : '';
 }
 async function refreshSessionStates() {
   for (const s of SESSIONS) {
@@ -180,6 +213,29 @@ function describe(d) {
 /* Status polling + daemon / facade lifecycle                         */
 /* ------------------------------------------------------------------ */
 
+/* Factory-default PINs differ by backend: the real token uses 12345678/87654321
+ * (reference firmware), the mock uses 1234/12345678. Keep the "명령 기본값" PINs
+ * in sync with the running transport unless the user set custom ones (i.e. the
+ * current pair still matches one of the known factory pairs). */
+const PIN_DEFAULTS = {
+  real: { user: '12345678', so: '87654321' },
+  mock: { user: '1234', so: '12345678' },
+};
+function syncPinDefaults(transport) {
+  const want = PIN_DEFAULTS[transport];
+  if (!want) return;
+  const dp = $('#defPin'), ds = $('#defSoPin');
+  if (!dp || !ds) return;
+  const isFactory = Object.values(PIN_DEFAULTS)
+    .some((p) => p.user === dp.value && p.so === ds.value);
+  if (!isFactory) return;                 /* user customised - leave as is */
+  if (dp.value === want.user && ds.value === want.so) return;
+  dp.value = want.user;
+  ds.value = want.so;
+  applyDefaults();                        /* propagate to the login tab inputs */
+  log(`PIN 기본값을 ${transport} 토큰 값으로 설정 (User ${want.user} / SO ${want.so})`);
+}
+
 async function refreshStatus() {
   try {
     const s = await api('/api/status');
@@ -188,6 +244,7 @@ async function refreshStatus() {
     $('#daemonText').textContent = on
       ? `ncmpd 실행 중 (${s.transport})`
       : 'ncmpd 정지됨';
+    if (s.transport) syncPinDefaults(s.transport);
     if (s.configPath !== undefined)
       $('#cfgInfo').textContent =
         `· cfg: ${s.configPath || '(none)'} · :${s.port}${s.authRequired ? ' · 🔒' : ''}`;
@@ -227,18 +284,14 @@ async function initialize() {
   log('C_Initialize: ' + describe(d));
   if (d.ok) {
     applyDefaults();   // seed command inputs from the 명령 기본값 panel
-    log('명령 기본값 적용: 사용자=' + $('#defUserType').value + ', 세션 ID=' + $('#defSessionId').value + ', R/W=' + $('#defRw').checked);
+    log('명령 기본값 적용: 사용자=' + $('#defUserType').value + ', R/W=' + $('#defRw').checked);
     const lib = await api('/api/library');
     if (lib.ok && lib.info)
       $('#libInfo').textContent =
         `Cryptoki ${lib.info.cryptokiVersion} · ${lib.info.manufacturer} · ${lib.info.libDescription} (v${lib.info.libVersion})`;
     await refreshSlots();
-    // Always include session ID 0 (system session) so every tab's selector can
-    // pick it right away.
-    if (SELECTED_SLOT !== null && !SESSIONS.some((s) => s.type === 'adopt' && s.sid === 0)) {
-      const a = await adoptSid(0);
-      if (a.ok) log('세션 ID 0(시스템 세션) 자동 추가 — 활성 세션에서 선택 가능');
-    }
+    // No session is opened automatically; use 세션 관리에서 "새 세션" 또는
+    // "ID로 추가"(세션 ID 0 포함)로 직접 연다.
   }
 }
 async function finalize() {
@@ -308,38 +361,13 @@ async function openSession() {
   setSessionText();
   log(`슬롯 ${SELECTED_SLOT}: C_OpenSession 요청…`);
   const d = await api('/api/session/open', 'POST', { slot: SELECTED_SLOT, rw: $('#rwSession').checked ? 1 : 0 });
-  if (!d.ok) return log('C_OpenSession 실패: ' + describe(d) + ' — 토큰 OPEN_SESSION 미응답이면 "ID로 세션 열기"를 사용하세요');
+  if (!d.ok) return log('C_OpenSession 실패: ' + describe(d) +
+    ' — ncmpd/FX3 연결과 데몬 상태를 먼저 확인하세요. (펌웨어가 OPEN_SESSION을 아예 미지원하는 경우에 한해 "ID로 추가"(adopt)로 우회 — 단 adopt는 토큰 통신이 없습니다.)');
   addSession(d.session, `열림(C_OpenSession)`, { type: 'open', slot: SELECTED_SLOT });
   await sessionInfo();
   log(`슬롯 ${SELECTED_SLOT}: 세션 ${d.session} 열림`);
 }
 
-// Adopt one wire session_id (core). Returns the API result; adds to the list on ok.
-async function adoptSid(sid) {
-  if (SELECTED_SLOT === null) return { ok: false, error: 'no slot' };
-  if (SESSIONS.some((s) => s.type === 'adopt' && s.sid === sid)) {
-    const ex = SESSIONS.find((s) => s.type === 'adopt' && s.sid === sid);
-    CUR_SESSION = ex.handle; renderSessionPickers(); setSessionText();
-    return { ok: true, session: ex.handle, dup: true };   // already present
-  }
-  const d = await api('/api/session/adopt', 'POST', { slot: SELECTED_SLOT, session: sid });
-  if (d.ok) addSession(d.session, `sid ${sid}`, { type: 'adopt', sid, slot: SELECTED_SLOT });
-  return d;
-}
-async function adoptSession() {
-  if (SELECTED_SLOT === null) return log('먼저 슬롯을 선택하세요');
-  let sid = Math.floor(Number($('#sessionId').value));
-  if (!Number.isFinite(sid) || sid < 0 || sid > 65535) return log('세션 ID는 0~65535 범위여야 합니다');
-  log(`슬롯 ${SELECTED_SLOT}: 세션 ID ${sid} 채택(adopt)…`);
-  const d = await adoptSid(sid);
-  if (!d.ok) {
-    if (d.error && d.error.includes('no such api'))
-      return log('세션 채택 실패: 서버(ncmp_web)에 adopt 엔드포인트가 없습니다 — ncmp_web을 재빌드·재시작하세요(정적 UI는 새로고침으로 반영되지만 서버 바이너리는 갱신 필요).');
-    return log('세션 채택 실패: ' + describe(d));
-  }
-  await sessionInfo();
-  log(`슬롯 ${SELECTED_SLOT}: 핸들 ${d.session} = wire session_id ${sid}${d.dup ? ' (이미 열림)' : ' 채택 완료'}`);
-}
 async function closeSession() {
   if (CUR_SESSION === null) return log('닫을 세션이 없습니다');
   const h = CUR_SESSION;
@@ -360,10 +388,14 @@ async function login() {
   const h = CUR_SESSION;
   $('#sessionInfo').textContent = `C_Login 전송 중… (handle ${h}) — 실 타겟은 수십 초 걸릴 수 있습니다`;
   log(`C_Login 전송(handle ${h})…`);
-  const d = await api('/api/login', 'POST', { session: h, userType: Number($('#userType').value), pin: $('#pin').value });
+  const role = Number($('#userType').value);
+  const d = await api('/api/login', 'POST', { session: h, userType: role, pin: $('#pin').value });
   touchSession(h, 'C_Login', d.ok);
   log('C_Login: ' + describe(d));
-  if (d.ok) { setSessionText(); sessionInfo(); } else { $('#sessionInfo').textContent = 'C_Login 실패: ' + describe(d); }
+  if (d.ok) {
+    const s = SESSIONS.find((x) => x.handle === h); if (s) s.role = role;
+    setSessionText(); sessionInfo(); renderSessionsTab();
+  } else { $('#sessionInfo').textContent = 'C_Login 실패: ' + describe(d); }
 }
 async function logout() {
   if (CUR_SESSION === null) { $('#sessionInfo').textContent = NO_SESS; return log('C_Logout: ' + NO_SESS); }
@@ -372,31 +404,119 @@ async function logout() {
   const d = await api('/api/logout', 'POST', { session: h });
   touchSession(h, 'C_Logout', d.ok);
   log('C_Logout: ' + describe(d));
-  if (d.ok) { setSessionText(); sessionInfo(); } else { $('#sessionInfo').textContent = 'C_Logout 실패: ' + describe(d); }
+  if (d.ok) {
+    const s = SESSIONS.find((x) => x.handle === h); if (s) s.role = null;
+    setSessionText(); sessionInfo(); renderSessionsTab();
+  } else { $('#sessionInfo').textContent = 'C_Logout 실패: ' + describe(d); }
 }
 async function genRandom() {
-  if (CUR_SESSION === null) { $('#cryptoOut').textContent = NO_SESS; return log('C_GenerateRandom: ' + NO_SESS); }
+  if (CUR_SESSION === null) { $('#rngOut').textContent = NO_SESS; return log('C_GenerateRandom: ' + NO_SESS); }
   const h = CUR_SESSION;
-  $('#cryptoOut').textContent = `C_GenerateRandom 전송 중… (handle ${h})`;
+  $('#rngOut').textContent = `C_GenerateRandom 전송 중… (handle ${h})`;
   const d = await api('/api/random', 'POST', { session: h, length: Number($('#randLen').value) });
   touchSession(h, 'C_GenerateRandom', d.ok);
-  $('#cryptoOut').textContent = d.ok ? `C_GenerateRandom(${d.length}) =\n${hexWrap(d.hex)}` : '오류: ' + describe(d);
+  $('#rngOut').textContent = d.ok ? `C_GenerateRandom(${d.length}) =\n${hexWrap(d.hex)}` : '오류: ' + describe(d);
 }
 async function doDigest() {
-  if (CUR_SESSION === null) { $('#cryptoOut').textContent = NO_SESS; return log('C_Digest: ' + NO_SESS); }
+  if (CUR_SESSION === null) { $('#hashOut').textContent = NO_SESS; return log('C_Digest: ' + NO_SESS); }
   const h = CUR_SESSION;
-  $('#cryptoOut').textContent = `C_Digest 전송 중… (handle ${h})`;
+  $('#hashOut').textContent = `C_Digest 전송 중… (handle ${h})`;
   const d = await api('/api/digest', 'POST', { session: h, mech: Number($('#digestMech').value), input: $('#digestInput').value });
   touchSession(h, 'C_Digest', d.ok);
-  $('#cryptoOut').textContent = d.ok ? `digest [${d.length}B] =\n${hexWrap(d.hex)}` : '오류: ' + describe(d);
+  $('#hashOut').textContent = d.ok ? `digest [${d.length}B] =\n${hexWrap(d.hex)}` : '오류: ' + describe(d);
 }
 async function gcmSelftest() {
-  if (CUR_SESSION === null) { $('#cryptoOut').textContent = NO_SESS; return log('AES-GCM: ' + NO_SESS); }
+  if (CUR_SESSION === null) { $('#gcmOut').textContent = NO_SESS; return log('AES-GCM: ' + NO_SESS); }
   const h = CUR_SESSION;
-  $('#cryptoOut').textContent = `AES-GCM 자가검증 전송 중… (handle ${h})`;
+  $('#gcmOut').textContent = `AES-GCM 자가검증 전송 중… (handle ${h})`;
   const d = await api('/api/gcm-selftest', 'POST', { session: h });
   touchSession(h, 'AES-GCM selftest', d.ok);
-  $('#cryptoOut').textContent = (d.ok ? 'AES-GCM 자가검증 OK — ' : '실패 — ') + (d.detail || describe(d));
+  $('#gcmOut').textContent = (d.ok ? 'AES-GCM 자가검증 OK — ' : '실패 — ') + (d.detail || describe(d));
+}
+/* Validate/normalise a hex string (whitespace allowed); throws on bad input. */
+function hexClean(s, label) {
+  const v = (s || '').replace(/\s+/g, '');
+  if (v.length % 2 || !/^[0-9a-fA-F]*$/.test(v)) throw new Error((label || 'Hex') + ' 형식을 확인하세요.');
+  return v.toLowerCase();
+}
+/* AES-CTR encrypt/decrypt via PKCS#11 (/api/encrypt algo=ctr). */
+async function doCtr() {
+  if (CUR_SESSION === null) { $('#ctrOut').textContent = NO_SESS; return log('AES-CTR: ' + NO_SESS); }
+  const h = CUR_SESSION;
+  let key, counter, data;
+  try {
+    key = hexClean($('#ctrKey').value, 'AES 키');
+    counter = hexClean($('#ctrCounter').value, 'Counter');
+    data = hexClean($('#ctrData').value, '입력');
+    if (![32, 48, 64].includes(key.length)) throw new Error('AES 키는 16/24/32바이트여야 합니다.');
+    if (counter.length !== 32) throw new Error('Counter는 16바이트여야 합니다.');
+  } catch (e) { $('#ctrOut').textContent = '오류: ' + e.message; return; }
+  const enc = Number($('#ctrDir').value);
+  $('#ctrOut').textContent = `AES-CTR ${enc ? '암호화' : '복호화'} 전송 중… (handle ${h})`;
+  const d = await api('/api/encrypt', 'POST', { session: h, algo: 'ctr', encrypt: enc, key, iv: counter, data });
+  touchSession(h, 'AES-CTR', d.ok);
+  $('#ctrOut').textContent = d.ok
+    ? `${enc ? '암호문' : '평문'} [${d.length}B] =\n${hexWrap(d.hex)}`
+    : '오류: ' + describe(d);
+  $('#ctrKey').value = '';
+}
+/* AES-GCM encrypt/decrypt via PKCS#11 (/api/encrypt algo=gcm). Encrypt output is
+ * ciphertext||tag (split for display); decrypt input is ciphertext||tag. */
+async function doGcm() {
+  if (CUR_SESSION === null) { $('#gcmOut').textContent = NO_SESS; return log('AES-GCM: ' + NO_SESS); }
+  const h = CUR_SESSION;
+  const enc = Number($('#gcmDir').value);
+  const tl = Number($('#gcmTagLen').value);
+  let key, iv, aad, data, tag;
+  try {
+    key = hexClean($('#gcmKey').value, 'AES 키');
+    iv = hexClean($('#gcmIv').value, 'IV');
+    aad = hexClean($('#gcmAad').value, 'AAD');
+    data = hexClean($('#gcmData').value, enc ? '평문' : '암호문');
+    if (![32, 48, 64].includes(key.length)) throw new Error('AES 키는 16/24/32바이트여야 합니다.');
+    if (iv.length < 2 || iv.length > 32) throw new Error('IV는 1–16바이트여야 합니다.');
+    if (!enc) {
+      tag = hexClean($('#gcmTag').value, '인증 태그');
+      if (tag.length !== tl * 2) throw new Error('태그 길이가 선택값과 다릅니다.');
+      data = data + tag;   /* decrypt input = ciphertext||tag */
+    }
+  } catch (e) { $('#gcmOut').textContent = '오류: ' + e.message; return; }
+  $('#gcmOut').textContent = `AES-GCM ${enc ? '암호화' : '복호화'} 전송 중… (handle ${h})`;
+  const d = await api('/api/encrypt', 'POST', { session: h, algo: 'gcm', encrypt: enc, key, iv, aad, tagBytes: tl, data });
+  touchSession(h, 'AES-GCM', d.ok);
+  if (!d.ok) { $('#gcmOut').textContent = '오류: ' + describe(d); $('#gcmKey').value = ''; return; }
+  if (enc) {
+    const ct = d.hex.slice(0, -tl * 2), tg = d.hex.slice(-tl * 2);
+    $('#gcmOut').textContent = `암호화 완료\n암호문 [${ct.length / 2}B] =\n${hexWrap(ct)}\n\n인증 태그 [${tl}B] =\n${hexWrap(tg)}`;
+  } else {
+    $('#gcmOut').textContent = `인증 성공\n평문 [${d.length}B] =\n${hexWrap(d.hex)}`;
+  }
+  $('#gcmKey').value = '';
+}
+function gcmDirToggle() {
+  const dec = Number($('#gcmDir').value) === 0;
+  $('#gcmDataLabel').firstChild.textContent = dec ? '암호문 Hex ' : '평문 Hex ';
+  $('#gcmTagRow').hidden = !dec;
+  $('#btnGcmNewIv').disabled = dec;
+}
+function newGcmIv() {
+  const b = crypto.getRandomValues(new Uint8Array(12));
+  $('#gcmIv').value = Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+}
+function clearGcm() {
+  for (const id of ['gcmKey', 'gcmIv', 'gcmAad', 'gcmData', 'gcmTag']) $('#' + id).value = '';
+  $('#gcmOut').textContent = '입력과 결과를 지웠습니다.';
+}
+/* "Ping" — verify the selected session is alive via C_GetSessionInfo. */
+async function ping() {
+  if (CUR_SESSION === null) { $('#sessionInfo').textContent = NO_SESS; return log('Ping: ' + NO_SESS); }
+  const h = CUR_SESSION;
+  $('#sessionInfo').textContent = `Ping(C_GetSessionInfo) 전송 중… (handle ${h})`;
+  const d = await api('/api/session/info', 'POST', { session: h });
+  touchSession(h, 'Ping(C_GetSessionInfo)', d.ok);
+  $('#sessionInfo').textContent = d.ok
+    ? `slot ${d.session.slot}, state ${d.session.state}, flags 0x${d.session.flags.toString(16)}, deviceError ${d.session.deviceError}`
+    : 'Ping 실패: ' + describe(d);
 }
 function hexWrap(hex) {
   return (hex.match(/.{1,32}/g) || []).map((r) => r.match(/.{1,2}/g).join(' ')).join('\n');
@@ -1015,12 +1135,18 @@ async function ciSend() {
 /* ------------------------------------------------------------------ */
 
 function switchTab(name) {
-  document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
+  document.querySelectorAll('.navitem').forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.tabpane').forEach((p) => p.classList.toggle('active', p.dataset.pane === name));
+  const it = document.querySelector('.navitem[data-tab="' + name + '"]');
+  if (it) {
+    const g = $('#crumbGroup'), c = $('#crumbItem');
+    if (g) g.textContent = it.dataset.group || '';
+    if (c) c.textContent = it.dataset.label || it.textContent.trim();
+  }
 }
 
 function wire() {
-  document.querySelectorAll('.tab').forEach((t) => (t.onclick = () => switchTab(t.dataset.tab)));
+  document.querySelectorAll('.navitem').forEach((t) => (t.onclick = () => switchTab(t.dataset.tab)));
 
   $('#btnDaemonStart').onclick = daemonStart;
   $('#btnDaemonStop').onclick = daemonStop;
@@ -1032,13 +1158,18 @@ function wire() {
 
   $('#btnTokenInfo').onclick = tokenInfo;
   $('#btnOpenSession').onclick = openSession;
-  $('#btnAdoptSession').onclick = adoptSession;
   $('#btnCloseSession').onclick = closeSession;
   $('#btnLogin').onclick = login;
   $('#btnLogout').onclick = logout;
+  $('#btnPing').onclick = ping;
   $('#btnRandom').onclick = genRandom;
   $('#btnDigest').onclick = doDigest;
-  $('#btnGcm').onclick = gcmSelftest;
+  $('#btnCtr').onclick = doCtr;
+  $('#btnGcm').onclick = doGcm;
+  $('#btnGcmSelf').onclick = gcmSelftest;
+  $('#btnGcmClear').onclick = clearGcm;
+  $('#btnGcmNewIv').onclick = newGcmIv;
+  $('#gcmDir').onchange = gcmDirToggle;
 
   $('#btnGenFile').onclick = genFile;
   $('#btnRefreshFiles').onclick = () => refreshFiles();
@@ -1066,7 +1197,7 @@ function wire() {
 
   initTheme();
   // Command-defaults panel: live-sync into the per-tab inputs.
-  ['#defUserType', '#defPin', '#defSoPin', '#defSessionId', '#defRw'].forEach((sel) => {
+  ['#defUserType', '#defPin', '#defSoPin', '#defRw'].forEach((sel) => {
     const e = $(sel); if (e) e.onchange = applyDefaults;
   });
   $('#btnApplyDefaults').onclick = () => { applyDefaults(); log('명령 기본값을 각 탭 입력칸에 적용'); };
@@ -1086,6 +1217,8 @@ function wire() {
   renderSessionsTab();
   $('#btnSessRefresh').onclick = renderSessionsTab;
   $('#btnSessRefreshAll').onclick = refreshSessionStates;
+  // Sync breadcrumb/content with the default-active nav item.
+  switchTab(document.querySelector('.navitem.active')?.dataset.tab || 'session');
   fillApiOpSelect();
   renderPalette();
   fillScenarioSelect();

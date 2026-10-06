@@ -68,3 +68,13 @@ table.rows th { color: var(--muted); font-weight: 600; }
 .log { background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; max-height: 140px; overflow: auto; margin: 0 16px 16px; }
 footer { padding: 0; }
 .row { display: flex; align-items: center; gap: 8px; }
+
+/* comm<->HSM last message (TX/RX raw + parsed) */
+.frames2 { display: flex; flex-wrap: wrap; gap: 12px; }
+.frames2 > .frame { flex: 1 1 0; min-width: 260px; }
+.frame { margin: 6px 0; }
+.frame .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-top: 6px; }
+.frame pre.hex { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-all; margin: 3px 0; max-height: 220px; overflow: auto; }
+.frame table.pf { border-collapse: collapse; font-size: 12px; margin: 3px 0; width: 100%; }
+.frame table.pf td { border: 1px solid var(--line); padding: 2px 8px; font-family: var(--mono); word-break: break-all; }
+.frame table.pf td.k { color: var(--muted); white-space: nowrap; }

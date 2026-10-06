@@ -18,6 +18,9 @@ typedef struct ncmp_client {
     void    *shm_base;  /**< Local SHM mapping base. */
     uint32_t slot_mask; /**< Bitmask of online slots reported by the daemon. */
     uint32_t seq;       /**< Monotonic request id source (atomic increment). */
+    uint32_t pid;       /**< Caller process id (getpid), stamped on each enqueue
+                         *   so ncmpd can key the (pid, app_sid)->hsm_sid session
+                         *   map. Set by ncmp_client_init(). */
     /**
      * Wire-header session_id applied to the next command(s). Set by the caller
      * (the STDLL facade sets it to the token-assigned session handle for a

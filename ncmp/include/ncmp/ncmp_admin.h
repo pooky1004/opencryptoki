@@ -91,14 +91,18 @@ unsigned long ncmp_admin_logout(ncmp_client_t *c, uint32_t slot);
  * returns the handle, which is stored in @p out_handle. The STDLL then applies
  * that handle (via c->active_session_id) to every subsequent command.
  *
- * @param c          Client handle.
- * @param slot       Physical slot.
- * @param flags      PKCS#11 session flags (CKF_SERIAL_SESSION | CKF_RW_SESSION).
- * @param out_handle Receives the token-assigned session handle (may be NULL).
+ * @param c        Client handle.
+ * @param slot     Physical slot.
+ * @param app_sid  Caller-chosen application session id (param1; identity key).
+ * @param flags    PKCS#11 session flags (CKF_SERIAL_SESSION | CKF_RW_SESSION).
+ * @param out_hsm  Receives the token-assigned hsm_sid (response param0; may be
+ *                 NULL). The STDLL keeps using app_sid in the wire header;
+ *                 ncmpd translates app_sid -> hsm_sid for later commands.
  * @return NCMP_CKR_OK, a token ack (e.g. CKR_SESSION_COUNT), or a transport error.
  */
 unsigned long ncmp_admin_open_session(ncmp_client_t *c, uint32_t slot,
-                                      uint32_t flags, uint32_t *out_handle);
+                                      uint32_t app_sid, uint32_t flags,
+                                      uint32_t *out_hsm);
 
 /**
  * @brief Close the session carried in c->active_session_id (NCMP_CMD_CLOSE_SESSION).

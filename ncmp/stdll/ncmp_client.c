@@ -34,6 +34,7 @@ int ncmp_client_init(ncmp_client_t *c, const char *sock_path)
 
     memset(c, 0, sizeof(*c));
     c->ipc_fd = -1;
+    c->pid = (uint32_t)getpid();
 
     rc = ncmp_ipc_connect(sock_path, &c->ipc_fd, &c->slot_mask);
     if (rc != NCMP_OK)
@@ -70,7 +71,7 @@ int ncmp_client_exec(ncmp_client_t *c, uint32_t slot_id,
 
     /* Enqueue (FREE->CLAIMED->POSTED); the slot's comm_thread consumes it. */
     rc = ncmp_slot_enqueue(c->shm_base, slot, req->header.session_id,
-                           req->header.sequence_id, req, &idx);
+                           c->pid, req->header.sequence_id, req, &idx);
     if (rc != NCMP_OK)
         return rc;
 

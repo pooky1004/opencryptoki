@@ -17,7 +17,8 @@
 
 /** Magic and version stamped into the SHM header for sanity checks. */
 #define NCMP_SHM_MAGIC 0x4E434D50u /* "NCMP" */
-#define NCMP_SHM_VERSION 2u /* v2 adds per-slot token identity + allocation. */
+#define NCMP_SHM_VERSION 4u /* v3: per-slot session map + ring pid.
+                             * v4: per-slot last comm<->HSM TX/RX capture. */
 
 #include "ncmp_cmd.h" /* NCMP_TI_* identity field sizes. */
 
@@ -62,6 +63,44 @@ typedef struct ncmp_token_identity {
 /** Sentinel bound_ck_slot meaning "physical slot not yet claimed". */
 #define NCMP_SLOT_UNBOUND (-1)
 
+/** Bytes captured from the last comm<->HSM frame (header + leading params; bulk
+ *  payloads are truncated to this cap for inspection). */
+#define NCMP_LASTMSG_CAP 4096u
+
+/**
+ * Snapshot of the last frame the slot's comm_thread sent to the token (TX) and
+ * the last frame it received (RX), on the wire (post session/ctx translation for
+ * TX, raw for RX). For live inspection via the Debug App. Written by the slot's
+ * single comm_thread (no lock); readers tolerate a brief torn read. POD in SHM.
+ */
+typedef struct ncmp_last_msg {
+    uint32_t tx_len;   /**< Full TX frame length on the wire. */
+    uint32_t tx_cap;   /**< Bytes captured in tx[] (<= NCMP_LASTMSG_CAP). */
+    uint32_t rx_len;   /**< Full RX frame length. */
+    uint32_t rx_cap;   /**< Bytes captured in rx[] (<= NCMP_LASTMSG_CAP). */
+    uint64_t tx_ms;    /**< Monotonic ms when the TX was sent (0 = none yet). */
+    uint64_t rx_ms;    /**< Monotonic ms when the RX was received (0 = none). */
+    uint8_t  tx[NCMP_LASTMSG_CAP];
+    uint8_t  rx[NCMP_LASTMSG_CAP];
+} NCMP_LastMsg;
+
+/**
+ * One entry of a slot's session map. ncmpd keys an application session by
+ * (pid, app_sid): the app (STDLL) picks its own app_sid and OPEN_SESSION returns
+ * the token's hsm_sid, which ncmpd records here. Every later command from the
+ * same process on that session arrives with wire session_id = app_sid, and
+ * ncmpd translates it to hsm_sid before sending to the token. Owned/written by
+ * the slot's single comm_thread (no lock); other processes may read for display.
+ * POD only (lives in SHM).
+ */
+typedef struct ncmp_sess_map {
+    uint8_t  in_use;   /**< Non-zero when this entry holds a live mapping. */
+    uint8_t  _pad[3];
+    uint32_t pid;      /**< Owning process id. */
+    uint32_t app_sid;  /**< App (STDLL) session id. */
+    uint32_t hsm_sid;  /**< Token-assigned session id (OPEN_SESSION response). */
+} NCMP_SessMap;
+
 /**
  * Per-slot in-flight tracking and statistics. Counters are updated by the
  * comm_thread around USB dispatch/receive.
@@ -101,6 +140,13 @@ typedef struct ncmp_slot {
      * single comm_thread consumes them. Waiting clients poll their entry's
      * state transition to DONE (the "waiting queue" is the DONE view). */
     NCMP_QEntry     ring[NCMP_QUEUE_DEPTH];
+
+    /* (pid, app_sid) -> hsm_sid map, filled on OPEN_SESSION and cleared on
+     * CLOSE_SESSION by this slot's comm_thread (single writer). */
+    NCMP_SessMap    sess_map[PKCS11_MAX_SESSION_PER_SLOT];
+
+    /* Last comm_thread<->HSM exchange (TX/RX) for Debug App inspection. */
+    NCMP_LastMsg    last_msg;
 
     uint64_t        buf_pool_off;  /**< SHM offset of this slot's scratch pool. */
     uint64_t        buf_pool_len;  /**< Byte length of the scratch pool. */

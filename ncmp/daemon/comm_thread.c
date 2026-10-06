@@ -13,10 +13,12 @@
  */
 #include "ncmpd.h"
 #include "ncmp/ncmp_queue.h"
+#include "ncmp/ncmp_slot.h"
 #include "ncmp/ncmp_wire.h"
 #include "ncmp/ncmp_transport.h"
 #include "ncmp/ncmp_errno.h"
 #include "ncmp/ncmp_ckr.h"
+#include "ncmp/ncmp_cmd.h"
 
 #include <sched.h>
 #include <stddef.h>
@@ -43,6 +45,8 @@ static uint64_t comm_now_ms(void)
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
 }
+
+/* Last comm<->HSM frame capture uses the shared ncmp_slot_lastmsg_tx/rx(). */
 
 #ifdef NCMP_HOST_MANAGED_CTX
 /*
@@ -355,6 +359,120 @@ static void comm_release_inflight(NCMP_Slot *slot)
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* Session-id translation: app_sid <-> hsm_sid (see ncmp_cmd.h).        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * @brief Pre-send transform of a request's wire session_id.
+ *   - OPEN_SESSION: zero param1 (sid) so the token allocates a fresh session.
+ *   - other opcodes: if the wire session_id (app_sid) maps to an hsm_sid for
+ *     this (pid, app_sid), rewrite the header session_id to hsm_sid.
+ * Always sets @p *out_sent_sid to the session_id actually placed on the wire
+ * (used to correlate the response). Returns 1 if @p txbuf holds a rewritten
+ * frame, 0 to send the original unchanged.
+ */
+static int sess_xform_request(ncmpd_slot_ctx_t *ctx, uint32_t pid,
+                              const uint8_t *req, uint32_t req_len,
+                              uint8_t *txbuf, size_t txcap, size_t *out_len,
+                              uint32_t *out_sent_sid)
+{
+    static _Thread_local uint8_t pay[NCMP_MAX_PAYLOAD_SIZE];
+    NCMP_Message m;
+    uint32_t op;
+
+    *out_sent_sid = 0;
+    m.payload = pay;
+    m.payload_cap = sizeof(pay);
+    if (ncmp_wire_decode(req, req_len, &m) != NCMP_OK)
+        return 0;
+    op = ncmp_cmd_opcode(m.header.command_id);
+
+    if (op == NCMP_CMD_OPEN_SESSION) {
+        /* The host request is [pid, app_sid, flags]; the token firmware expects
+         * OPEN_SESSION with a SINGLE param0 = flags and a zero header session_id
+         * (reference: server.py build_message(0, seq, OPEN, (flags,))). Rebuild
+         * the token frame as [flags] only. app_sid stays in the original request
+         * buffer for sess_apply_response() to key the (pid, app_sid)->hsm_sid map. */
+        const uint8_t *pf;
+        uint32_t lf, flags = 0;
+
+        if (ncmp_msg_param(&m, 2, &pf, &lf) == NCMP_OK && lf >= 4)
+            flags = ncmp_rd_u32le(pf);
+        ncmp_wr_u32le(pay, flags);
+        m.param_len[0] = 4;
+        for (int i = 1; i < NCMP_MAX_PARAM_COUNT; ++i)
+            m.param_len[i] = 0;
+        m.header.session_id = 0;
+        *out_sent_sid = 0;
+        if (ncmp_wire_encode(&m, txbuf, txcap, out_len) != NCMP_OK)
+            return 0;
+        return 1;
+    }
+
+    if (m.header.session_id != 0) {
+        uint32_t app_sid = m.header.session_id, hsm = 0;
+        if (ncmp_sess_map_lookup(ctx->slot, pid, app_sid, &hsm)) {
+            m.header.session_id = hsm;
+            *out_sent_sid = hsm;
+            if (ncmp_wire_encode(&m, txbuf, txcap, out_len) != NCMP_OK) {
+                *out_sent_sid = app_sid;
+                return 0;
+            }
+            return 1;
+        }
+        *out_sent_sid = app_sid;   /* unmapped: send as-is */
+        return 0;
+    }
+    return 0; /* sessionless (0) */
+}
+
+/**
+ * @brief Post-recv session-map maintenance.
+ *   - OPEN_SESSION ok: store map[(pid, app_sid)] = hsm_sid (resp param0).
+ *   - CLOSE_SESSION ok: remove the entry by hsm_sid (= the sent owner_sess).
+ * @p rx is the (final) response frame; @p e->req_off still holds the ORIGINAL
+ * request (the on-wire rewrite used a separate txbuf).
+ */
+static void sess_apply_response(ncmpd_slot_ctx_t *ctx, NCMP_QEntry *e,
+                                const uint8_t *rx, size_t rx_len)
+{
+    static _Thread_local uint8_t rpay[NCMP_MAX_PAYLOAD_SIZE];
+    static _Thread_local uint8_t qpay[NCMP_MAX_PAYLOAD_SIZE];
+    const uint8_t *req = (const uint8_t *)ncmp_shm_ptr(ctx->shm_base, e->req_off);
+    NCMP_Message rq;
+    uint32_t op;
+
+    rq.payload = rpay;
+    rq.payload_cap = sizeof(rpay);
+    if (ncmp_wire_decode(req, e->req_len, &rq) != NCMP_OK)
+        return;
+    op = ncmp_cmd_opcode(rq.header.command_id);
+
+    if (op == NCMP_CMD_OPEN_SESSION) {
+        NCMP_Message rs;
+        const uint8_t *p; uint32_t l, app_sid = 0, hsm_sid = 0;
+
+        rs.payload = qpay;
+        rs.payload_cap = sizeof(qpay);
+        if (ncmp_wire_decode(rx, rx_len, &rs) != NCMP_OK || rs.header.ack != NCMP_CKR_OK)
+            return;
+        if (ncmp_msg_param(&rq, 1, &p, &l) == NCMP_OK && l >= 4)
+            app_sid = ncmp_rd_u32le(p);
+        if (ncmp_msg_param(&rs, 0, &p, &l) == NCMP_OK && l >= 4)
+            hsm_sid = ncmp_rd_u32le(p);
+        if (hsm_sid != 0)
+            (void)ncmp_sess_map_store(ctx->slot, e->pid, app_sid, hsm_sid);
+        return;
+    }
+    if (op == NCMP_CMD_CLOSE_SESSION) {
+        NCMP_Header h;
+        if (ncmp_wire_decode_header(rx, rx_len, &h) == NCMP_OK &&
+            h.ack == NCMP_CKR_OK)
+            ncmp_sess_map_remove_hsm(ctx->slot, e->owner_sess);
+    }
+}
+
 /* Complete an entry with a 0-parameter error response (defined below). */
 static void comm_complete_error(ncmpd_slot_ctx_t *ctx, NCMP_QEntry *e,
                                 uint32_t ack);
@@ -403,12 +521,26 @@ static int comm_dispatch(ncmpd_slot_ctx_t *ctx)
         uint32_t send_len = e->req_len;
         int rc;
 
+        /* Translate the wire session_id (app_sid -> hsm_sid), or zero the OPEN
+         * sid param, before send. owner_sess becomes the session_id actually
+         * sent so the token's echoed response correlates to this entry. */
+        static _Thread_local uint8_t sessbuf[NCMP_MAX_FRAME_SIZE];
+        size_t ssl = 0;
+        uint32_t sent_sid = 0;
+
+        if (sess_xform_request(ctx, e->pid, send, send_len, sessbuf,
+                               sizeof(sessbuf), &ssl, &sent_sid)) {
+            send = sessbuf;
+            send_len = (uint32_t)ssl;
+        }
+        e->owner_sess = sent_sid;
+
 #ifdef NCMP_HOST_MANAGED_CTX
         /* Swap the STDLL context id for the stored context blob before send. */
         static _Thread_local uint8_t txbuf[NCMP_MAX_FRAME_SIZE];
         size_t txl = 0;
 
-        if (ctx_xform_request(ctx, req, e->req_len, txbuf, sizeof(txbuf),
+        if (ctx_xform_request(ctx, send, send_len, txbuf, sizeof(txbuf),
                               &txl)) {
             send = txbuf;
             send_len = (uint32_t)txl;
@@ -416,6 +548,10 @@ static int comm_dispatch(ncmpd_slot_ctx_t *ctx)
 #endif
 
         comm_reserve_inflight(slot);
+        ncmp_slot_lastmsg_tx(slot, send, send_len);  /* Debug App: capture the frame we
+                                                * send to the HSM, even if the
+                                                * transfer then fails (so a
+                                                * non-responding token is visible). */
         rc = ncmp_transport_send(ctx->transport, send, send_len);
         if (rc != NCMP_OK) {
             /* The transfer itself failed - typically the token did not drain
@@ -452,6 +588,7 @@ static int comm_drain(ncmpd_slot_ctx_t *ctx, uint8_t *rxbuf, size_t rxcap)
         return 0;
     if (ncmp_transport_recv(ctx->transport, rxbuf, rxcap, &rx_len) != NCMP_OK)
         return 0;
+    ncmp_slot_lastmsg_rx(slot, rxbuf, (uint32_t)rx_len);   /* Debug App: last RX (raw) */
     if (ncmp_wire_decode_header(rxbuf, rx_len, &hdr) != NCMP_OK)
         return 0;
 
@@ -475,6 +612,9 @@ static int comm_drain(ncmpd_slot_ctx_t *ctx, uint8_t *rxbuf, size_t rxcap)
         ctx_xform_response(ctx, req, e->req_len, rxbuf, &rx_len, rxcap);
     }
 #endif
+
+    /* Maintain the (pid, app_sid) -> hsm_sid map on OPEN/CLOSE responses. */
+    sess_apply_response(ctx, e, rxbuf, rx_len);
 
     memcpy(rsp, rxbuf, rx_len);
     e->rsp_len = (uint32_t)rx_len;

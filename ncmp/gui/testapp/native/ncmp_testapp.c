@@ -58,8 +58,12 @@ static CK_C_CreateObject      p_CreateObject;
 static CK_C_DestroyObject     p_DestroyObject;
 static CK_C_EncryptInit       p_EncryptInit;
 static CK_C_Encrypt           p_Encrypt;
+static CK_C_EncryptUpdate     p_EncryptUpdate;
+static CK_C_EncryptFinal      p_EncryptFinal;
 static CK_C_DecryptInit       p_DecryptInit;
 static CK_C_Decrypt           p_Decrypt;
+static CK_C_DecryptUpdate     p_DecryptUpdate;
+static CK_C_DecryptFinal      p_DecryptFinal;
 
 /* Every PKCS#11 entry point the facade exports (dlsym presence report). */
 static const char *ALL_FUNCS[] = {
@@ -145,8 +149,12 @@ int app_load(const char *module_path)
     SYM(p_DestroyObject,    CK_C_DestroyObject,    "C_DestroyObject");
     SYM(p_EncryptInit,      CK_C_EncryptInit,      "C_EncryptInit");
     SYM(p_Encrypt,          CK_C_Encrypt,          "C_Encrypt");
+    SYM(p_EncryptUpdate,    CK_C_EncryptUpdate,    "C_EncryptUpdate");
+    SYM(p_EncryptFinal,     CK_C_EncryptFinal,     "C_EncryptFinal");
     SYM(p_DecryptInit,      CK_C_DecryptInit,      "C_DecryptInit");
     SYM(p_Decrypt,          CK_C_Decrypt,          "C_Decrypt");
+    SYM(p_DecryptUpdate,    CK_C_DecryptUpdate,    "C_DecryptUpdate");
+    SYM(p_DecryptFinal,     CK_C_DecryptFinal,     "C_DecryptFinal");
     set_err("loaded %s", module_path);
     return 0;
 }
@@ -465,6 +473,10 @@ int app_digest_multipart(unsigned long session, unsigned long mech,
                             UNCONST(CK_BYTE_PTR, data + off), (CK_ULONG)part);
         if (rv != CKR_OK) {
             set_err("C_DigestUpdate(off=%ld) -> 0x%08lX", off, (unsigned long)rv);
+            /* Clear the now-active digest operation so the session is not left
+             * wedged (a later C_DigestInit would return CKR_OPERATION_ACTIVE). */
+            CK_ULONG dl = (CK_ULONG)cap;
+            (void)p_DigestFinal((CK_SESSION_HANDLE)session, out, &dl);
             return (int)rv;
         }
     }
@@ -600,6 +612,73 @@ int app_aes_gcm(unsigned long session, int encrypt,
     if (rv != CKR_OK) { set_err("%s -> 0x%08lX", encrypt ? "C_Encrypt" : "C_Decrypt", (unsigned long)rv); return (int)rv; }
     *io_len = (unsigned long)outlen;
     return 0;
+}
+
+/**
+ * @brief AES-GCM multipart (streaming) encrypt/decrypt via PKCS#11
+ *        (C_CreateObject + C_EncryptInit + C_EncryptUpdate×N + C_EncryptFinal).
+ *        Encrypt: @p in is plaintext; output is ciphertext||tag. Decrypt: @p in
+ *        is ciphertext||tag; output is the recovered plaintext (tag verified at
+ *        Final). @p chunk is the per-update feed size (<=0 => 32768).
+ * @return 0 on success (*io_len set to produced bytes) or CK_RV.
+ */
+int app_aes_gcm_multipart(unsigned long session, int encrypt,
+                          const unsigned char *key, unsigned long key_len,
+                          const unsigned char *iv, unsigned long iv_len,
+                          const unsigned char *aad, unsigned long aad_len,
+                          unsigned long tag_bytes,
+                          const unsigned char *in, unsigned long in_len,
+                          long chunk, unsigned char *out, unsigned long *io_len)
+{
+    CK_OBJECT_HANDLE hk = 0;
+    CK_GCM_PARAMS gcm;
+    CK_MECHANISM mg;
+    CK_ULONG cap, produced = 0;
+    CK_RV rv;
+
+    NEED(p_CreateObject); NEED(p_DestroyObject);
+    NEED(p_EncryptInit); NEED(p_EncryptUpdate); NEED(p_EncryptFinal);
+    NEED(p_DecryptInit); NEED(p_DecryptUpdate); NEED(p_DecryptFinal);
+    if (!io_len || (key_len != 16 && key_len != 24 && key_len != 32)) {
+        set_err("AES-GCM: key must be 16/24/32 bytes");
+        return APP_ERR_ARGS;
+    }
+    cap = *io_len;
+    if (chunk <= 0) chunk = 32768;
+
+    rv = app_make_aes_key((CK_SESSION_HANDLE)session, key, key_len, &hk);
+    if (rv != CKR_OK) { set_err("C_CreateObject -> 0x%08lX", (unsigned long)rv); return (int)rv; }
+
+    memset(&gcm, 0, sizeof(gcm));
+    gcm.pIv = (CK_BYTE_PTR)iv; gcm.ulIvLen = (CK_ULONG)iv_len; gcm.ulIvBits = (CK_ULONG)(iv_len * 8);
+    gcm.pAAD = (CK_BYTE_PTR)(aad_len ? aad : NULL); gcm.ulAADLen = (CK_ULONG)aad_len;
+    gcm.ulTagBits = (CK_ULONG)(tag_bytes * 8);
+    mg.mechanism = CKM_AES_GCM; mg.pParameter = &gcm; mg.ulParameterLen = sizeof(gcm);
+
+    rv = encrypt ? p_EncryptInit((CK_SESSION_HANDLE)session, &mg, hk)
+                 : p_DecryptInit((CK_SESSION_HANDLE)session, &mg, hk);
+    if (rv != CKR_OK) { set_err("C_%sInit -> 0x%08lX", encrypt ? "Encrypt" : "Decrypt", (unsigned long)rv); goto done; }
+
+    for (unsigned long off = 0; off < in_len; off += (unsigned long)chunk) {
+        CK_ULONG part = (CK_ULONG)((in_len - off) > (unsigned long)chunk ? (unsigned long)chunk : (in_len - off));
+        CK_ULONG got = (cap > produced) ? (cap - produced) : 0;
+        rv = encrypt
+             ? p_EncryptUpdate((CK_SESSION_HANDLE)session, UNCONST(CK_BYTE_PTR, in + off), part, out + produced, &got)
+             : p_DecryptUpdate((CK_SESSION_HANDLE)session, UNCONST(CK_BYTE_PTR, in + off), part, out + produced, &got);
+        if (rv != CKR_OK) { set_err("C_%sUpdate(off=%lu) -> 0x%08lX", encrypt ? "Encrypt" : "Decrypt", off, (unsigned long)rv); goto done; }
+        produced += got;
+    }
+    {
+        CK_ULONG got = (cap > produced) ? (cap - produced) : 0;
+        rv = encrypt ? p_EncryptFinal((CK_SESSION_HANDLE)session, out + produced, &got)
+                     : p_DecryptFinal((CK_SESSION_HANDLE)session, out + produced, &got);
+        if (rv != CKR_OK) { set_err("C_%sFinal -> 0x%08lX", encrypt ? "Encrypt" : "Decrypt", (unsigned long)rv); goto done; }
+        produced += got;
+    }
+    *io_len = (unsigned long)produced;
+done:
+    (void)p_DestroyObject((CK_SESSION_HANDLE)session, hk);
+    return (int)rv;
 }
 
 /**

@@ -96,6 +96,18 @@ int app_aes_gcm(unsigned long session, int encrypt,
                 const unsigned char *in, unsigned long in_len,
                 unsigned char *out, unsigned long *io_len);
 
+/** AES-GCM multipart (streaming) with a caller-supplied key: C_EncryptInit +
+ *  C_EncryptUpdate×N + C_EncryptFinal (or Decrypt*). Encrypt out = ct||tag;
+ *  decrypt in = ct||tag, out = plaintext. chunk = per-update feed (<=0 => 32768).
+ *  *io_len in=cap, out=produced. Returns 0/CK_RV. */
+int app_aes_gcm_multipart(unsigned long session, int encrypt,
+                          const unsigned char *key, unsigned long key_len,
+                          const unsigned char *iv, unsigned long iv_len,
+                          const unsigned char *aad, unsigned long aad_len,
+                          unsigned long tag_bytes,
+                          const unsigned char *in, unsigned long in_len,
+                          long chunk, unsigned char *out, unsigned long *io_len);
+
 /** AES-CTR one-shot with a caller-supplied key + 16-byte counter block. Returns
  *  0/CK_RV; *io_len in=cap, out=produced. */
 int app_aes_ctr(unsigned long session, int encrypt,

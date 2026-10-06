@@ -151,6 +151,8 @@ function lmBlock(label, f) {
   if (f.parsed) {
     const t = el('table', { className: 'pf' });
     const row = (k, v) => t.append(el('tr', {}, el('td', { className: 'k', textContent: k }), el('td', { textContent: v })));
+    /* Row whose value cell holds arbitrary nodes (e.g. a file-open button). */
+    const rowNode = (k, ...nodes) => t.append(el('tr', {}, el('td', { className: 'k', textContent: k }), el('td', {}, ...nodes)));
     row('frame_len', String(f.frameLen));
     row('session_id', `${f.sessionId} (${lmHx(f.sessionId)})`);
     row('sequence_id', String(f.sequenceId));
@@ -158,8 +160,20 @@ function lmBlock(label, f) {
     row('ack', `${lmHx(f.ack)}  ${lmCkr(f.ack)}`);
     row('payload_len', String(f.payloadLen));
     for (const p of (f.params || [])) {
-      const note = p.truncated ? ` (표시 ${p.shown != null ? p.shown : (p.hex ? p.hex.length / 2 : 0)}B, 잘림)` : '';
-      row(`param[${p.idx}]`, `len ${p.len}${note} : ${p.hex || '(0)'}`);
+      if (p.file) {
+        /* Oversized parameter (>512B): the server spilled its Hex to a text file
+         * served under /lmfile/. Show the name + a button that opens it in a new
+         * window/tab. */
+        const capNote = (p.captured != null && p.captured < p.len)
+          ? ` · 캡처 ${p.captured}B (프레임 캡처 잘림)` : '';
+        const name = el('span', { className: 'mono', textContent: p.file });
+        const btn = el('button', { className: 'link', textContent: '열기' });
+        btn.onclick = () => window.open('/lmfile/' + encodeURIComponent(p.file), '_blank', 'noopener');
+        rowNode(`param[${p.idx}]`, document.createTextNode(`len ${p.len}B${capNote} · Hex 파일 `), name, document.createTextNode(' '), btn);
+      } else {
+        const note = p.truncated ? ` (표시 ${p.shown != null ? p.shown : (p.hex ? p.hex.length / 2 : 0)}B, 잘림)` : '';
+        row(`param[${p.idx}]`, `len ${p.len}${note} : ${p.hex || '(0)'}`);
+      }
     }
     if (!(f.params || []).length) row('params', '(없음)');
     d.append(t);

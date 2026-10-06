@@ -31,6 +31,7 @@
 #include "ncmp/ncmp_client.h"
 
 #include <arpa/inet.h>
+#include <ctype.h>
 #include <errno.h>
 #include <netinet/in.h>
 #include <pthread.h>
@@ -51,6 +52,9 @@
 static char g_host[64] = "0.0.0.0";
 static int g_port = 8090;
 static char g_webroot[1024] = "web";
+/* Directory where oversized comm<->HSM parameters are spilled as Hex text files
+ * and served from under /lmfile/. Overridable with $NCMP_DBG_LMDIR. */
+static char g_lmdir[1024] = "/tmp/ncmp_dbg_lm";
 static char g_sock_path[1024] = "";   /* NCMP_SOCK_PATH for the handshake */
 static char g_token[256] = "";        /* bearer token; empty = auth off */
 static char g_config[1024] = "";
@@ -180,6 +184,71 @@ static void serve_static(int fd, const char *url)
     free(b);
 }
 
+/* Reject file names that are not a plain basename (no path separators / dotdot). */
+static int lm_name_ok(const char *name)
+{
+    if (!name || !*name || strstr(name, "..") || strchr(name, '/') ||
+        strchr(name, '\\'))
+        return 0;
+    for (const char *p = name; *p; ++p)
+        if (!(isalnum((unsigned char)*p) || *p == '_' || *p == '.' || *p == '-'))
+            return 0;
+    return 1;
+}
+
+/* Write one oversized parameter to g_lmdir/<name> as a Hex text file: a short
+ * header comment then the hex grouped 64 bytes (128 chars) per line. Overwritten
+ * on every refresh so the file always holds the latest capture. */
+static void lm_write_param_file(const char *name, const uint8_t *b, uint32_t n,
+                                uint32_t full_len, const char *dir,
+                                const char *idxlabel)
+{
+    char full[2200];
+    FILE *f;
+
+    (void)mkdir(g_lmdir, 0755);           /* best-effort; ignore EEXIST */
+    snprintf(full, sizeof(full), "%s/%s", g_lmdir, name);
+    f = fopen(full, "w");
+    if (!f)
+        return;
+    fprintf(f, "# NCMP comm<->HSM %s %s : param length %u bytes",
+            dir, idxlabel, full_len);
+    if (n < full_len)
+        fprintf(f, " (captured %u; frame capture truncated)", n);
+    fprintf(f, "\n");
+    for (uint32_t i = 0; i < n; i++) {
+        fprintf(f, "%02x", b[i]);
+        if ((i & 63u) == 63u)        /* 64 bytes (128 hex chars) per line */
+            fputc('\n', f);
+    }
+    if (n == 0 || (n & 63u) != 0)
+        fputc('\n', f);
+    fclose(f);
+}
+
+/* Serve a spilled parameter file (GET /lmfile/<name>) as plain text. */
+static void serve_lmfile(int fd, const char *name)
+{
+    char full[2200];
+    FILE *f;
+    long sz;
+    char *b;
+    size_t rd;
+
+    if (!lm_name_ok(name)) { send_json(fd, 400, "{\"error\":\"bad name\"}"); return; }
+    snprintf(full, sizeof(full), "%s/%s", g_lmdir, name);
+    f = fopen(full, "rb");
+    if (!f) { send_json(fd, 404, "{\"error\":\"not found\"}"); return; }
+    fseek(f, 0, SEEK_END); sz = ftell(f); fseek(f, 0, SEEK_SET);
+    if (sz < 0) sz = 0;
+    b = malloc((size_t)sz + 1);
+    if (!b) { fclose(f); send_json(fd, 500, "{\"error\":\"oom\"}"); return; }
+    rd = fread(b, 1, (size_t)sz, f);
+    fclose(f);
+    send_raw(fd, 200, "OK", "text/plain; charset=utf-8", b, rd);
+    free(b);
+}
+
 /* JSON-escape a (possibly NUL-padded) fixed field into out. */
 static void json_field(char *out, size_t cap, const char *src, size_t n)
 {
@@ -292,16 +361,17 @@ static uint32_t lm_rd32(const uint8_t *p)
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-/* Per-parameter hex output cap: a parameter larger than this is shown only up to
- * this many bytes (the real length is still reported, with truncated=true). */
-#define LM_PARAM_HEX_CAP 1024u
+/* A parameter larger than this (bytes) is NOT inlined as hex; its captured bytes
+ * are spilled to a Hex text file under /lmfile/ and the JSON carries "file". */
+#define LM_PARAM_FILE_THRESHOLD 512u
 
 /* Emit "key":{len,cap,ms,hex, [parsed header + params]} from a captured frame.
  * @p b holds @p caplen bytes of a @p fulllen-byte wire frame (may be truncated).
+ * @p slot and @p key ("tx"/"rx") name any spilled per-parameter files.
  * Wire layout: frame_len(4) hdr{sid,seq,cmd,ack,paylen}(20) param_len[8](32) params. */
 static int lm_emit(char *buf, int cap, int o, const char *key,
                    const uint8_t *b, uint32_t caplen, uint32_t fulllen,
-                   unsigned long long ms)
+                   unsigned long long ms, long slot)
 {
     o += snprintf(buf + o, cap - o,
                   "\"%s\":{\"len\":%u,\"cap\":%u,\"ms\":%llu,\"hex\":\"",
@@ -321,18 +391,28 @@ static int lm_emit(char *buf, int cap, int o, const char *key,
         for (int i = 0; i < 8; i++) {
             uint32_t plen = lm_rd32(b + 24 + i * 4);
             if (!plen) continue;
-            if (o < cap - 100) {
+            if (o < cap - 160) {
                 uint32_t avail = (off < caplen) ? (caplen - off) : 0;
                 if (avail > plen) avail = plen;
-                /* Cap a single parameter's hex output at 1024 bytes. */
-                uint32_t show = avail < LM_PARAM_HEX_CAP ? avail : LM_PARAM_HEX_CAP;
-                o += snprintf(buf + o, cap - o,
-                              "%s{\"idx\":%d,\"len\":%u,\"shown\":%u,\"truncated\":%s,\"hex\":\"",
-                              first ? "" : ",", i, plen, show,
-                              (show < plen) ? "true" : "false");
-                for (uint32_t k = 0; k < show && o < cap - 4; k++)
-                    o += snprintf(buf + o, cap - o, "%02x", b[off + k]);
-                o += snprintf(buf + o, cap - o, "\"}");
+                if (plen > LM_PARAM_FILE_THRESHOLD) {
+                    /* Oversized: spill the captured bytes to a Hex text file and
+                     * reference it instead of inlining the hex. */
+                    char fname[80], idxlabel[16];
+                    snprintf(fname, sizeof(fname), "slot%ld_%s_p%d.txt", slot, key, i);
+                    snprintf(idxlabel, sizeof(idxlabel), "param[%d]", i);
+                    lm_write_param_file(fname, b + off, avail, plen, key, idxlabel);
+                    o += snprintf(buf + o, cap - o,
+                                  "%s{\"idx\":%d,\"len\":%u,\"captured\":%u,\"file\":\"%s\"}",
+                                  first ? "" : ",", i, plen, avail, fname);
+                } else {
+                    o += snprintf(buf + o, cap - o,
+                                  "%s{\"idx\":%d,\"len\":%u,\"shown\":%u,\"truncated\":%s,\"hex\":\"",
+                                  first ? "" : ",", i, plen, avail,
+                                  (avail < plen) ? "true" : "false");
+                    for (uint32_t k = 0; k < avail && o < cap - 4; k++)
+                        o += snprintf(buf + o, cap - o, "%02x", b[off + k]);
+                    o += snprintf(buf + o, cap - o, "\"}");
+                }
                 first = 0;
             }
             off += plen;
@@ -471,10 +551,10 @@ static void route_api(int fd, const char *method, const char *path, const char *
             uint32_t rxc = lm.rx_cap > NCMP_LASTMSG_CAP ? NCMP_LASTMSG_CAP : lm.rx_cap;
             int o = snprintf(buf, BUF, "{\"connected\":true,\"slot\":%ld,", slot);
             o = lm_emit(buf, BUF, o, "tx", lm.tx, txc, lm.tx_len,
-                        (unsigned long long)lm.tx_ms);
+                        (unsigned long long)lm.tx_ms, slot);
             o += snprintf(buf + o, BUF - o, ",");
             o = lm_emit(buf, BUF, o, "rx", lm.rx, rxc, lm.rx_len,
-                        (unsigned long long)lm.rx_ms);
+                        (unsigned long long)lm.rx_ms, slot);
             snprintf(buf + o, BUF - o, "}");
             send_json(fd, 200, buf);
         }
@@ -541,6 +621,8 @@ static void *handle_client(void *arg)
             }
             route_api(fd, method, path, bodyp);
         }
+    } else if (!strcmp(method, "GET") && !strncmp(path, "/lmfile/", 8)) {
+        serve_lmfile(fd, path + 8);
     } else if (!strcmp(method, "GET")) {
         serve_static(fd, path);
     } else {
@@ -574,6 +656,8 @@ int main(int argc, char **argv)
     if ((e = getenv("NCMP_DBG_ROOT"))) snprintf(g_webroot, sizeof(g_webroot), "%s", e);
     if ((e = getenv("NCMP_DBG_TOKEN"))) snprintf(g_token, sizeof(g_token), "%s", e);
     if ((e = getenv("NCMP_SOCK_PATH"))) snprintf(g_sock_path, sizeof(g_sock_path), "%s", e);
+    if ((e = getenv("NCMP_DBG_LMDIR"))) snprintf(g_lmdir, sizeof(g_lmdir), "%s", e);
+    (void)mkdir(g_lmdir, 0755);   /* oversized-parameter spill dir */
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--config") && i + 1 < argc) { ++i; continue; }

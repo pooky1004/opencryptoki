@@ -293,6 +293,8 @@ static const char *mime_of(const char *path)
 }
 
 /* Serve a file under g_webroot. Rejects any path containing "..". */
+static int safe_name(const char *name);   /* defined later */
+
 static void serve_static(int fd, const char *url_path)
 {
     char rel[1024];
@@ -322,6 +324,27 @@ static void serve_static(int fd, const char *url_path)
     size_t rd = fread(body, 1, (size_t)sz, f);
     fclose(f);
     send_raw(fd, 200, "OK", mime_of(full), body, rd);
+    free(body);
+}
+
+/* Serve a generated test file (GET /files/<name>) from g_filedir as plain text
+ * so the UI can open Hex test/ciphertext/plaintext files in a new window. */
+static void serve_test_file(int fd, const char *name)
+{
+    if (!safe_name(name)) { send_json(fd, 400, "{\"error\":\"bad name\"}"); return; }
+    char full[2200];
+    snprintf(full, sizeof(full), "%s/%s", g_filedir, name);
+    FILE *f = fopen(full, "rb");
+    if (!f) { send_json(fd, 404, "{\"error\":\"not found\"}"); return; }
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz < 0) sz = 0;
+    char *body = malloc((size_t)sz + 1);
+    if (!body) { fclose(f); send_json(fd, 500, "{\"error\":\"oom\"}"); return; }
+    size_t rd = fread(body, 1, (size_t)sz, f);
+    fclose(f);
+    send_raw(fd, 200, "OK", "text/plain; charset=utf-8", body, rd);
     free(body);
 }
 
@@ -593,24 +616,66 @@ static void hex_of(const unsigned char *b, int n, char *out)
 static void ensure_filedir(void) { mkdir(g_filedir, 0755); }
 
 /* Generate a size-byte test file filled with a reproducible LCG pattern. */
-static int gen_test_file(const char *name, long size, unsigned seed)
+/* Generate a @p size-byte pseudo-random test file. With @p as_hex, the data is
+ * written as a Hex text file (a header comment, then hex grouped 64 bytes = 128
+ * chars per line) so large multipart inputs are human-readable; otherwise the
+ * raw bytes are written. The DATA is always @p size bytes either way. */
+static int gen_test_file(const char *name, long size, unsigned seed, int as_hex)
 {
     char full[2200];
     snprintf(full, sizeof(full), "%s/%s", g_filedir, name);
-    FILE *f = fopen(full, "wb");
+    FILE *f = fopen(full, as_hex ? "w" : "wb");
     if (!f)
         return -1;
     unsigned char buf[65536];
     uint32_t x = seed ? seed : 0x1234567u;
     long written = 0;
+    if (as_hex)
+        fprintf(f, "# NCMP test data : %ld bytes (Hex, 64 bytes per line)\n", size);
+    long line = 0;   /* bytes emitted on the current hex line */
     while (written < size) {
         size_t n = (size_t)((size - written) < (long)sizeof(buf) ? (size - written) : (long)sizeof(buf));
         for (size_t i = 0; i < n; i++) { x = x * 1103515245u + 12345u; buf[i] = (unsigned char)(x >> 24); }
-        if (fwrite(buf, 1, n, f) != n) { fclose(f); return -1; }
+        if (as_hex) {
+            for (size_t i = 0; i < n; i++) {
+                fprintf(f, "%02x", buf[i]);
+                if (++line == 64) { fputc('\n', f); line = 0; }
+            }
+        } else if (fwrite(buf, 1, n, f) != n) {
+            fclose(f); return -1;
+        }
         written += (long)n;
     }
+    if (as_hex && line != 0)
+        fputc('\n', f);
     fclose(f);
     return 0;
+}
+
+/* Write @p data as a Hex text file (header + 64 bytes/line) into g_filedir. */
+static int write_hex_file(const char *name, const unsigned char *data, long len)
+{
+    char full[2200];
+    snprintf(full, sizeof(full), "%s/%s", g_filedir, name);
+    FILE *f = fopen(full, "w");
+    if (!f)
+        return -1;
+    fprintf(f, "# NCMP data : %ld bytes (Hex, 64 bytes per line)\n", len);
+    for (long i = 0; i < len; i++) {
+        fprintf(f, "%02x", data[i]);
+        if ((i & 63) == 63) fputc('\n', f);
+    }
+    if (len == 0 || (len & 63) != 0) fputc('\n', f);
+    fclose(f);
+    return 0;
+}
+
+/* True if @p name looks like a Hex text file (.hex or .txt). */
+static int name_is_hex(const char *name)
+{
+    size_t n = strlen(name);
+    return (n > 4 && !strcasecmp(name + n - 4, ".hex")) ||
+           (n > 4 && !strcasecmp(name + n - 4, ".txt"));
 }
 
 /* Read a whole test file into a malloc'd buffer (<= NCMP_WEB_MAX_FILE). */
@@ -632,6 +697,44 @@ static unsigned char *read_test_file(const char *name, long *out_len)
     if (rd != sz) { free(buf); return NULL; }
     *out_len = sz;
     return buf;
+}
+
+/* Read a test file as raw DATA bytes: a .hex/.txt file is decoded from its Hex
+ * text (comment lines starting with '#' and all whitespace are skipped); any
+ * other file is returned as-is. Returns a malloc'd buffer; caller frees. */
+static unsigned char *read_test_file_data(const char *name, long *out_len)
+{
+    long raw_len = 0;
+    unsigned char *raw = read_test_file(name, &raw_len);
+    if (!raw)
+        return NULL;
+    if (!name_is_hex(name)) {
+        *out_len = raw_len;
+        return raw;
+    }
+    /* Decode hex, skipping '#' comment lines and whitespace. */
+    unsigned char *out = malloc((size_t)(raw_len / 2) + 1);
+    if (!out) { free(raw); return NULL; }
+    long n = 0;
+    int hi = -1, in_comment = 0;
+    for (long i = 0; i < raw_len; i++) {
+        unsigned char c = raw[i];
+        if (c == '\n') { in_comment = 0; continue; }
+        if (in_comment) continue;
+        if (c == '#') { in_comment = 1; continue; }
+        if (c == ' ' || c == '\t' || c == '\r') continue;
+        int v;
+        if (c >= '0' && c <= '9') v = c - '0';
+        else if (c >= 'a' && c <= 'f') v = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') v = c - 'A' + 10;
+        else { free(raw); free(out); return NULL; }   /* bad hex char */
+        if (hi < 0) hi = v;
+        else { out[n++] = (unsigned char)((hi << 4) | v); hi = -1; }
+    }
+    free(raw);
+    if (hi >= 0) { free(out); return NULL; }           /* odd hex nibble count */
+    *out_len = n;
+    return out;
 }
 
 /* ------------------------------------------------------------------ */
@@ -881,12 +984,14 @@ static int route_api(int fd, const char *method, const char *path, const char *b
     /* ---- test files (no token access: outside the API lock) ---- */
     if (!strcmp(path, "/api/genfile") && !strcmp(method, "POST")) {
         long size = 0, seed = 0;
-        char name[160] = "";
+        char name[160] = "", fmt[8] = "";
         json_long(body, "size", &size);
         json_long(body, "seed", &seed);
         json_str(body, "name", name, sizeof(name));
+        json_str(body, "format", fmt, sizeof(fmt));
+        int as_hex = !strcmp(fmt, "hex");
         if (!name[0])
-            snprintf(name, sizeof(name), "test_%ld.bin", size);
+            snprintf(name, sizeof(name), "test_%ld.%s", size, as_hex ? "hex" : "bin");
         if (!safe_name(name)) { send_result(fd, -4, "\"detail\":\"bad name\""); return 0; }
         if (size < 0 || size > NCMP_WEB_MAX_FILE) {
             snprintf(extra, sizeof(extra), "\"detail\":\"size out of range (0..%ld)\"", NCMP_WEB_MAX_FILE);
@@ -894,13 +999,13 @@ static int route_api(int fd, const char *method, const char *path, const char *b
             return 0;
         }
         ensure_filedir();
-        if (gen_test_file(name, size, (unsigned)seed) != 0) {
+        if (gen_test_file(name, size, (unsigned)seed, as_hex) != 0) {
             send_result(fd, -4, "\"detail\":\"write failed\"");
             return 0;
         }
-        /* report a SHA-256 (software) of the new file as a reference tag */
+        /* report a SHA-256 (software) of the DATA bytes as a reference tag */
         long flen = 0;
-        unsigned char *buf = read_test_file(name, &flen);
+        unsigned char *buf = read_test_file_data(name, &flen);
         char sha[65] = "";
         if (buf) {
             unsigned char dg[32]; unsigned int dl = 0;
@@ -1225,22 +1330,77 @@ static int route_api(int fd, const char *method, const char *path, const char *b
             free(keyh); free(ivh); free(aadh); free(datah);
             free(key); free(iv); free(aad); free(din); free(dout);
         }
+    } else if (!strcmp(path, "/api/encrypt-file") && !strcmp(method, "POST")) {
+        /* AES-GCM multipart (streaming) over a test file: read the input file's
+         * DATA bytes, run C_EncryptInit+Update×N+Final (or Decrypt*), and spill
+         * the result to a Hex text file (results are too large to inline). */
+        long h = 0, enc = 1, tagb = 16, chunk = 0;
+        char name[160] = "", outn[160] = "", keyh[160] = "", ivh[80] = "", aadh[600] = "";
+        json_long(body, "session", &h);
+        json_long(body, "encrypt", &enc);
+        json_long(body, "tagBytes", &tagb);
+        json_long(body, "chunk", &chunk);
+        json_str(body, "name", name, sizeof(name));
+        json_str(body, "outName", outn, sizeof(outn));
+        json_str(body, "key", keyh, sizeof(keyh));
+        json_str(body, "iv", ivh, sizeof(ivh));
+        json_str(body, "aad", aadh, sizeof(aadh));
+        uint8_t key[64], iv[64], aad[256];
+        int kl = ci_hex2bytes(keyh, key, sizeof(key));
+        int il = ci_hex2bytes(ivh, iv, sizeof(iv));
+        int al = aadh[0] ? ci_hex2bytes(aadh, aad, sizeof(aad)) : 0;
+        long flen = 0;
+        unsigned char *in = safe_name(name) ? read_test_file_data(name, &flen) : NULL;
+        if (!in) { rc = -4; snprintf(extra, sizeof(extra), "\"detail\":\"input file read/hex-decode failed\""); }
+        else if (kl < 0 || il < 0 || al < 0) { rc = APP_ERR_ARGS; free(in); app_set_last_error("bad hex in key/iv/aad"); }
+        else {
+            unsigned long ocap = (unsigned long)flen + 64, olen = ocap;
+            unsigned char *outbuf = malloc(ocap ? ocap : 1);
+            if (!outbuf) { rc = -4; free(in); }
+            else {
+                rc = app_aes_gcm_multipart((unsigned long)h, (int)enc, key, (unsigned long)kl,
+                                           iv, (unsigned long)il, aad, (unsigned long)al,
+                                           (unsigned long)tagb, in, (unsigned long)flen,
+                                           chunk, outbuf, &olen);
+                if (rc == 0) {
+                    if (!outn[0])
+                        snprintf(outn, sizeof(outn), "%s_%s.hex", name, enc ? "ct" : "pt");
+                    if (!safe_name(outn) || write_hex_file(outn, outbuf, (long)olen) != 0) {
+                        rc = -4; snprintf(extra, sizeof(extra), "\"detail\":\"output write failed\"");
+                    } else {
+                        unsigned char dg[32]; unsigned int dl = 0; char sha[65] = "";
+                        if (sw_digest(0x250, outbuf, (size_t)olen, dg, &dl) > 0) hex_of(dg, (int)dl, sha);
+                        long updates = flen > 0 ? (flen + (chunk > 0 ? chunk : 32768) - 1) / (chunk > 0 ? chunk : 32768) : 0;
+                        snprintf(extra, sizeof(extra),
+                                 "\"outName\":\"%s\",\"inBytes\":%ld,\"outBytes\":%lu,\"updates\":%ld,\"sha256\":\"%s\"",
+                                 outn, flen, olen, updates, sha);
+                    }
+                }
+                free(outbuf); free(in);
+            }
+        }
     } else if (!strcmp(path, "/api/digest-file") && !strcmp(method, "POST")) {
         /* Multipart (init/update/final) digest of a test file on the token. */
-        long h = 0, mech = 0x250;
+        long h = 0, mech = 0x250, chunk = 0;
         char name[160] = "";
         json_long(body, "session", &h);
         json_long(body, "mech", &mech);
+        json_long(body, "chunk", &chunk);
         json_str(body, "name", name, sizeof(name));
+        if (chunk <= 0) chunk = 3968;
+        if (chunk > 3968) chunk = 3968;   /* token per-update digest data limit */
         long flen = 0;
-        unsigned char *buf = safe_name(name) ? read_test_file(name, &flen) : NULL;
-        if (!buf) { rc = -4; snprintf(extra, sizeof(extra), "\"detail\":\"file read failed\""); }
+        unsigned char *buf = safe_name(name) ? read_test_file_data(name, &flen) : NULL;
+        if (!buf) { rc = -4; snprintf(extra, sizeof(extra), "\"detail\":\"file read/hex-decode failed\""); }
         else {
             unsigned char out[128]; int olen = 0;
-            rc = app_digest_multipart((unsigned long)h, (unsigned long)mech, buf, flen, 0, out, sizeof(out), &olen);
+            rc = app_digest_multipart((unsigned long)h, (unsigned long)mech, buf, flen, (int)chunk, out, sizeof(out), &olen);
             if (rc == 0) {
                 char hex[260]; hex_of(out, olen, hex);
-                snprintf(extra, sizeof(extra), "\"hex\":\"%s\",\"length\":%d,\"bytes\":%ld", hex, olen, flen);
+                long updates = flen > 0 ? (flen + chunk - 1) / chunk : 0;
+                snprintf(extra, sizeof(extra),
+                         "\"hex\":\"%s\",\"length\":%d,\"bytes\":%ld,\"chunk\":%ld,\"updates\":%ld",
+                         hex, olen, flen, chunk, updates);
             }
             free(buf);
         }
@@ -1252,8 +1412,8 @@ static int route_api(int fd, const char *method, const char *path, const char *b
         json_long(body, "mech", &mech);
         json_str(body, "name", name, sizeof(name));
         long flen = 0;
-        unsigned char *buf = safe_name(name) ? read_test_file(name, &flen) : NULL;
-        if (!buf) { rc = -4; snprintf(extra, sizeof(extra), "\"detail\":\"file read failed\""); }
+        unsigned char *buf = safe_name(name) ? read_test_file_data(name, &flen) : NULL;
+        if (!buf) { rc = -4; snprintf(extra, sizeof(extra), "\"detail\":\"file read/hex-decode failed\""); }
         else if (!md_of(mech)) { rc = -4; snprintf(extra, sizeof(extra), "\"detail\":\"mechanism has no SW reference\""); free(buf); }
         else {
             unsigned char tok[128]; int tlen = 0;
@@ -1352,6 +1512,8 @@ static void *handle_client(void *arg)
             req[len] = '\0';
         }
         route_api(fd, method, path, body);
+    } else if (!strcmp(method, "GET") && !strncmp(path, "/files/", 7)) {
+        serve_test_file(fd, path + 7);
     } else if (!strcmp(method, "GET")) {
         serve_static(fd, path);
     } else {

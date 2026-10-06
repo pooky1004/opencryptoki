@@ -493,6 +493,90 @@ async function doGcm() {
   }
   $('#gcmKey').value = '';
 }
+/* ---- Multipart digest over a large test-data file (Init/Update×N/Final) ---- */
+async function mdRefreshFiles() {
+  const sel = $('#mdFile'); if (!sel) return;
+  const d = await api('/api/files');
+  const cur = sel.value;
+  sel.innerHTML = '';
+  if (d.ok && d.files) {
+    for (const f of d.files) sel.append(el('option', { value: f.name, textContent: `${f.name} (${f.size}B)` }));
+    if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
+  }
+  if (!sel.options.length) sel.append(el('option', { value: '', textContent: '(시험 파일 없음 — 생성하세요)' }));
+}
+async function mdGen() {
+  const size = Math.max(0, Math.floor(Number($('#mdGenSize').value)));
+  $('#mdGenInfo').textContent = `${size}B Hex 시험파일 생성 중…`;
+  const d = await api('/api/genfile', 'POST', { size, format: 'hex' });
+  if (!d.ok) { $('#mdGenInfo').textContent = '생성 실패: ' + describe(d); return; }
+  $('#mdGenInfo').textContent = `${d.name} · ${d.size}B · SHA-256 ${d.sha256.slice(0, 16)}…`;
+  await mdRefreshFiles();
+  $('#mdFile').value = d.name;
+}
+async function mdRun() {
+  if (CUR_SESSION === null) { $('#mdOut').textContent = NO_SESS; return log('멀티파트 digest: ' + NO_SESS); }
+  const name = $('#mdFile').value;
+  if (!name) { $('#mdOut').textContent = '시험 파일을 생성하거나 선택하세요.'; return; }
+  const h = CUR_SESSION;
+  const mech = Number($('#mdMech').value);
+  let chunk = Math.max(1, Math.floor(Number($('#mdChunk').value)));
+  if (chunk > 3968) chunk = 3968;   /* token per-update digest data limit */
+  $('#mdOut').textContent = `멀티파트 digest 실행 중… (handle ${h}, 파일 ${name}, 청크 ${chunk}B)`;
+  const d = await api('/api/digest-file', 'POST', { session: h, mech, name, chunk });
+  touchSession(h, '멀티파트 digest', d.ok);
+  $('#mdOut').textContent = d.ok
+    ? `digest [${d.length}B] (데이터 ${d.bytes}B · update ${d.updates}회 · 청크 ${d.chunk}B) =\n${hexWrap(d.hex)}`
+    : '오류: ' + describe(d);
+}
+/* ---- Multipart AES-GCM over a large test-data file (Init/Update×N/Final) ---- */
+async function gmpRefreshFiles() {
+  const sel = $('#gmpFile'); if (!sel) return;
+  const d = await api('/api/files');
+  const cur = sel.value;
+  sel.innerHTML = '';
+  if (d.ok && d.files) {
+    for (const f of d.files) sel.append(el('option', { value: f.name, textContent: `${f.name} (${f.size}B)` }));
+    if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
+  }
+  if (!sel.options.length) sel.append(el('option', { value: '', textContent: '(시험 파일 없음 — 생성하세요)' }));
+}
+async function gmpGen() {
+  const size = Math.max(0, Math.floor(Number($('#gmpGenSize').value)));
+  $('#gmpGenInfo').textContent = `${size}B Hex 시험파일 생성 중…`;
+  const d = await api('/api/genfile', 'POST', { size, format: 'hex' });
+  if (!d.ok) { $('#gmpGenInfo').textContent = '생성 실패: ' + describe(d); return; }
+  $('#gmpGenInfo').textContent = `${d.name} · ${d.size}B`;
+  await gmpRefreshFiles(); $('#gmpFile').value = d.name;
+}
+async function gmpRun() {
+  if (CUR_SESSION === null) { $('#gmpOut').textContent = NO_SESS; return log('멀티파트 GCM: ' + NO_SESS); }
+  const name = $('#gmpFile').value;
+  if (!name) { $('#gmpOut').textContent = '입력 시험 파일을 생성하거나 선택하세요.'; return; }
+  const h = CUR_SESSION, enc = Number($('#gmpDir').value), tl = Number($('#gmpTagLen').value);
+  let key, iv, aad;
+  try {
+    key = hexClean($('#gmpKey').value, 'AES 키'); iv = hexClean($('#gmpIv').value, 'IV'); aad = hexClean($('#gmpAad').value, 'AAD');
+    if (![32, 48, 64].includes(key.length)) throw new Error('AES 키는 16/24/32바이트여야 합니다.');
+    if (iv.length < 2 || iv.length > 32) throw new Error('IV는 1–16바이트여야 합니다.');
+  } catch (e) { $('#gmpOut').textContent = '오류: ' + e.message; return; }
+  const chunk = Math.max(1, Math.floor(Number($('#gmpChunk').value)));
+  const outName = $('#gmpOutName').value.trim();
+  $('#gmpOut').textContent = `멀티파트 GCM ${enc ? '암호화' : '복호화'} 실행 중… (handle ${h}, 파일 ${name})`;
+  const d = await api('/api/encrypt-file', 'POST',
+    { session: h, encrypt: enc, key, iv, aad, tagBytes: tl, name, chunk, outName });
+  touchSession(h, '멀티파트 GCM', d.ok);
+  $('#gmpKey').value = '';
+  if (!d.ok) { $('#gmpOut').textContent = '오류: ' + describe(d); return; }
+  const body = $('#gmpOut');
+  body.textContent = `${enc ? '암호화' : '복호화'} 완료\n입력 ${d.inBytes}B → 출력 ${d.outBytes}B · update ${d.updates}회\n`
+    + `출력 파일: ${d.outName}\nSHA-256(출력): ${d.sha256}\n`;
+  const btn = el('button', { className: 'link', textContent: '출력 파일 열기' });
+  btn.onclick = () => window.open('/files/' + encodeURIComponent(d.outName), '_blank', 'noopener');
+  body.append(btn);
+  await gmpRefreshFiles();
+}
+function gmpNewIv() { $('#gmpIv').value = Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, '0')).join(''); }
 function gcmDirToggle() {
   const dec = Number($('#gcmDir').value) === 0;
   $('#gcmDataLabel').firstChild.textContent = dec ? '암호문 Hex ' : '평문 Hex ';
@@ -1165,11 +1249,18 @@ function wire() {
   $('#btnRandom').onclick = genRandom;
   $('#btnDigest').onclick = doDigest;
   $('#btnCtr').onclick = doCtr;
+  $('#btnMdGen').onclick = mdGen;
+  $('#btnMdFiles').onclick = mdRefreshFiles;
+  $('#btnMdRun').onclick = mdRun;
   $('#btnGcm').onclick = doGcm;
   $('#btnGcmSelf').onclick = gcmSelftest;
   $('#btnGcmClear').onclick = clearGcm;
   $('#btnGcmNewIv').onclick = newGcmIv;
   $('#gcmDir').onchange = gcmDirToggle;
+  $('#btnGmpGen').onclick = gmpGen;
+  $('#btnGmpFiles').onclick = gmpRefreshFiles;
+  $('#btnGmpRun').onclick = gmpRun;
+  $('#btnGmpNewIv').onclick = gmpNewIv;
 
   $('#btnGenFile').onclick = genFile;
   $('#btnRefreshFiles').onclick = () => refreshFiles();
@@ -1224,6 +1315,8 @@ function wire() {
   fillScenarioSelect();
   renderSteps();
   refreshFiles();
+  mdRefreshFiles().catch(() => {});
+  gmpRefreshFiles().catch(() => {});
   refreshStatus();
   setInterval(refreshStatus, 3000);
   log('웹 테스트 앱 준비 완료. 데몬 시작 → facade 로드 → C_Initialize 순으로 시작하세요.');

@@ -70,6 +70,12 @@ typedef struct p11_cipher {
     uint8_t  aad[256];
     uint32_t aad_len;
     uint32_t tag_len;
+    /* AES-GCM streaming (multipart) state, started lazily on the first
+     * C_EncryptUpdate/C_DecryptUpdate. One-shot C_Encrypt/C_Decrypt ignore it. */
+    int      streaming;    /* token GCM context started */
+    uint32_t ctx_id;       /* token-side GCM context id */
+    uint8_t  hold[16];     /* decrypt: trailing bytes held back (candidate tag) */
+    uint32_t hold_len;
 } p11_cipher_t;
 
 typedef struct p11_session {
@@ -740,12 +746,28 @@ CK_RV C_Digest(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pData, CK_ULONG ulDataLen
         *pulDigestLen = hsize;
         return CKR_BUFFER_TOO_SMALL;
     }
-    CK_RV rv = ncmp_crypto_digest(&g_client, s->slot, s->dig_mech,
-                                  pData, (uint32_t)ulDataLen,
-                                  pDigest, *pulDigestLen, (uint32_t *)pulDigestLen);
+    /* Drive the context allocated by C_DigestInit with UPDATE(s)+FINAL rather
+     * than the stateless one-shot DIGEST opcode: the token allows only one live
+     * digest operation per session, so a one-shot DIGEST issued while the INIT
+     * context is active returns CKR_OPERATION_ACTIVE. Chunk UPDATE to the token's
+     * per-call data limit. */
+    CK_RV rv = CKR_OK;
+    const uint32_t CHUNK = 3968;
+    for (CK_ULONG off = 0; off < ulDataLen; off += CHUNK) {
+        uint32_t part = (ulDataLen - off) > CHUNK ? CHUNK : (uint32_t)(ulDataLen - off);
+        rv = ncmp_crypto_digest_update(&g_client, s->slot, s->dig_ctx,
+                                       pData + off, part);
+        if (rv != CKR_OK)
+            break;
+    }
+    if (rv == CKR_OK)
+        rv = ncmp_crypto_digest_final(&g_client, s->slot, s->dig_ctx,
+                                      pDigest, *pulDigestLen,
+                                      (uint32_t *)pulDigestLen);
+    else
+        (void)ncmp_crypto_ctx_free(&g_client, s->slot, s->dig_ctx,
+                                   NCMP_CTX_KIND_DIGEST);
     s->dig_active = 0;
-    (void)ncmp_crypto_ctx_free(&g_client, s->slot, s->dig_ctx,
-                               NCMP_CTX_KIND_DIGEST);
     return rv;
 }
 
@@ -892,6 +914,139 @@ static CK_RV cipher_run(p11_session_t *s, p11_cipher_t *c, int encrypt,
     return rv;
 }
 
+/* Token per-call GCM data limit (reference: AES_GCM_UPDATE data <= 3968B). */
+#define GCM_TOK_CHUNK 3968u
+
+/* Lazily open the token GCM context on the first *Update (AES-GCM only). */
+static CK_RV cipher_stream_begin(p11_session_t *s, p11_cipher_t *c)
+{
+    if (c->streaming)
+        return CKR_OK;
+    if (c->mech != CKM_AES_GCM)
+        return CKR_FUNCTION_NOT_SUPPORTED;   /* only GCM supports multipart here */
+    CK_RV rv = ncmp_crypto_aes_gcm_init(&g_client, s->slot, c->encrypt,
+                                        c->key, c->key_len, c->iv, c->iv_len,
+                                        c->aad, c->aad_len, c->tag_len, &c->ctx_id);
+    if (rv == CKR_OK) {
+        c->streaming = 1;
+        c->hold_len = 0;
+    }
+    return rv;
+}
+
+/* Feed @p in[0..in_len) to the token GCM context in <=GCM_TOK_CHUNK sub-chunks,
+ * appending the cipher output to @p out at *io_off. */
+static CK_RV cipher_stream_feed(p11_session_t *s, p11_cipher_t *c,
+                                const uint8_t *in, uint32_t in_len,
+                                CK_BYTE_PTR out, CK_ULONG out_cap, CK_ULONG *io_off)
+{
+    for (uint32_t off = 0; off < in_len; off += GCM_TOK_CHUNK) {
+        uint32_t part = (in_len - off) > GCM_TOK_CHUNK ? GCM_TOK_CHUNK : (in_len - off);
+        uint32_t got = 0;
+        if (*io_off + part > out_cap)
+            return CKR_BUFFER_TOO_SMALL;
+        CK_RV rv = ncmp_crypto_aes_gcm_update(&g_client, s->slot, c->ctx_id,
+                                              in + off, part, out + *io_off,
+                                              (uint32_t)(out_cap - *io_off), &got);
+        if (rv != CKR_OK)
+            return rv;
+        *io_off += got;
+    }
+    return CKR_OK;
+}
+
+/* C_EncryptUpdate / C_DecryptUpdate for AES-GCM. */
+static CK_RV cipher_stream_update(p11_session_t *s, p11_cipher_t *c,
+                                  CK_BYTE_PTR in, CK_ULONG in_len,
+                                  CK_BYTE_PTR out, CK_ULONG_PTR out_len)
+{
+    if (!c->active)
+        return CKR_OPERATION_NOT_INITIALIZED;
+    if (!out_len)
+        return CKR_ARGUMENTS_BAD;
+
+    if (c->encrypt) {
+        /* GCM ciphertext length == plaintext length. */
+        if (!out) { *out_len = in_len; return CKR_OK; }
+        if (*out_len < in_len) { *out_len = in_len; return CKR_BUFFER_TOO_SMALL; }
+        CK_RV rv = cipher_stream_begin(s, c);
+        if (rv != CKR_OK) return rv;
+        CK_ULONG o = 0;
+        rv = cipher_stream_feed(s, c, in, (uint32_t)in_len, out, *out_len, &o);
+        if (rv == CKR_OK) *out_len = o;
+        return rv;
+    }
+
+    /* Decrypt: hold back the trailing tag_len bytes (the tag arrives last); only
+     * (held + new - tag_len) bytes are known-ciphertext and can be decrypted now. */
+    uint32_t tl = c->tag_len ? c->tag_len : 16;
+    unsigned long long total = (unsigned long long)c->hold_len + in_len;
+    uint32_t keep = (total < tl) ? (uint32_t)total : tl;
+    uint32_t process = (uint32_t)(total - keep);
+    if (!out) { *out_len = process; return CKR_OK; }
+    if (*out_len < process) { *out_len = process; return CKR_BUFFER_TOO_SMALL; }
+
+    CK_RV rv = cipher_stream_begin(s, c);
+    if (rv != CKR_OK) return rv;
+
+    CK_ULONG o = 0;
+    uint32_t from_hold = (process < c->hold_len) ? process : c->hold_len;
+    if (from_hold) {
+        rv = cipher_stream_feed(s, c, c->hold, from_hold, out, *out_len, &o);
+        if (rv != CKR_OK) return rv;
+    }
+    uint32_t from_in = process - from_hold;
+    if (from_in) {
+        rv = cipher_stream_feed(s, c, in, from_in, out, *out_len, &o);
+        if (rv != CKR_OK) return rv;
+    }
+    /* New hold = unprocessed tail = hold[from_hold..] ++ in[from_in..] (len==keep). */
+    uint8_t nh[16]; uint32_t n = 0;
+    for (uint32_t i = from_hold; i < c->hold_len && n < sizeof(nh); ++i) nh[n++] = c->hold[i];
+    for (uint32_t i = from_in; i < in_len && n < sizeof(nh); ++i) nh[n++] = in[i];
+    memcpy(c->hold, nh, n);
+    c->hold_len = n;
+    *out_len = o;
+    return CKR_OK;
+}
+
+/* C_EncryptFinal / C_DecryptFinal for AES-GCM. */
+static CK_RV cipher_stream_final(p11_session_t *s, p11_cipher_t *c,
+                                 CK_BYTE_PTR out, CK_ULONG_PTR out_len)
+{
+    if (!c->active)
+        return CKR_OPERATION_NOT_INITIALIZED;
+    if (!out_len)
+        return CKR_ARGUMENTS_BAD;
+    uint32_t tl = c->tag_len ? c->tag_len : 16;
+
+    CK_RV rv = cipher_stream_begin(s, c);   /* no-op if already streaming */
+    if (rv != CKR_OK) return rv;
+
+    if (c->encrypt) {
+        /* C_EncryptFinal yields the authentication tag. */
+        if (!out) { *out_len = tl; return CKR_OK; }
+        if (*out_len < tl) { *out_len = tl; return CKR_BUFFER_TOO_SMALL; }
+        uint32_t got = 0;
+        rv = ncmp_crypto_aes_gcm_final(&g_client, s->slot, c->ctx_id, 1,
+                                       NULL, 0, out, *out_len, &got);
+        if (rv == CKR_OK) *out_len = got;
+        c->active = 0; c->streaming = 0;
+        return rv;
+    }
+
+    /* Decrypt: the held-back bytes must be exactly the tag; the token verifies. */
+    if (out) *out_len = 0;   /* all plaintext already returned by updates */
+    if (c->hold_len != tl) {
+        c->active = 0; c->streaming = 0;
+        return CKR_ENCRYPTED_DATA_LEN_RANGE;
+    }
+    rv = ncmp_crypto_aes_gcm_final(&g_client, s->slot, c->ctx_id, 0,
+                                   c->hold, c->hold_len, NULL, 0, NULL);
+    c->active = 0; c->streaming = 0;
+    return rv;
+}
+
 CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pData, CK_ULONG ulDataLen,
                 CK_BYTE_PTR pEncryptedData, CK_ULONG_PTR pulEncryptedDataLen)
 {
@@ -981,16 +1136,39 @@ CK_RV C_GetObjectSize(CK_SESSION_HANDLE a, CK_OBJECT_HANDLE b, CK_ULONG_PTR c)
 CK_RV C_SetAttributeValue(CK_SESSION_HANDLE a, CK_OBJECT_HANDLE b,
                           CK_ATTRIBUTE_PTR c, CK_ULONG d)
 { (void)a;(void)b;(void)c;(void)d; return NS; }
-CK_RV C_EncryptUpdate(CK_SESSION_HANDLE a, CK_BYTE_PTR b, CK_ULONG c,
-                      CK_BYTE_PTR d, CK_ULONG_PTR e)
-{ (void)a;(void)b;(void)c;(void)d;(void)e; return NS; }
-CK_RV C_EncryptFinal(CK_SESSION_HANDLE a, CK_BYTE_PTR b, CK_ULONG_PTR c)
-{ (void)a;(void)b;(void)c; return NS; }
-CK_RV C_DecryptUpdate(CK_SESSION_HANDLE a, CK_BYTE_PTR b, CK_ULONG c,
-                      CK_BYTE_PTR d, CK_ULONG_PTR e)
-{ (void)a;(void)b;(void)c;(void)d;(void)e; return NS; }
-CK_RV C_DecryptFinal(CK_SESSION_HANDLE a, CK_BYTE_PTR b, CK_ULONG_PTR c)
-{ (void)a;(void)b;(void)c; return NS; }
+CK_RV C_EncryptUpdate(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pPart,
+                      CK_ULONG ulPartLen, CK_BYTE_PTR pEncryptedPart,
+                      CK_ULONG_PTR pulEncryptedPartLen)
+{
+    p11_session_t *s = sess_get(hSession);
+    if (!s) return CKR_SESSION_HANDLE_INVALID;
+    return cipher_stream_update(s, &s->enc, pPart, ulPartLen,
+                                pEncryptedPart, pulEncryptedPartLen);
+}
+CK_RV C_EncryptFinal(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pLastEncryptedPart,
+                     CK_ULONG_PTR pulLastEncryptedPartLen)
+{
+    p11_session_t *s = sess_get(hSession);
+    if (!s) return CKR_SESSION_HANDLE_INVALID;
+    return cipher_stream_final(s, &s->enc, pLastEncryptedPart,
+                               pulLastEncryptedPartLen);
+}
+CK_RV C_DecryptUpdate(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pEncryptedPart,
+                      CK_ULONG ulEncryptedPartLen, CK_BYTE_PTR pPart,
+                      CK_ULONG_PTR pulPartLen)
+{
+    p11_session_t *s = sess_get(hSession);
+    if (!s) return CKR_SESSION_HANDLE_INVALID;
+    return cipher_stream_update(s, &s->dec, pEncryptedPart, ulEncryptedPartLen,
+                                pPart, pulPartLen);
+}
+CK_RV C_DecryptFinal(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pLastPart,
+                     CK_ULONG_PTR pulLastPartLen)
+{
+    p11_session_t *s = sess_get(hSession);
+    if (!s) return CKR_SESSION_HANDLE_INVALID;
+    return cipher_stream_final(s, &s->dec, pLastPart, pulLastPartLen);
+}
 CK_RV C_DigestKey(CK_SESSION_HANDLE a, CK_OBJECT_HANDLE b)
 { (void)a;(void)b; return NS; }
 CK_RV C_SignInit(CK_SESSION_HANDLE a, CK_MECHANISM_PTR b, CK_OBJECT_HANDLE c)

@@ -226,6 +226,41 @@
           <h3>결과</h3>
           <pre id="ctrOut" class="out"></pre>
         </div>
+
+        <div class="card">
+          <h2>멀티파트 digest (대용량 · Init / Update×N / Final)</h2>
+          <p class="muted small">64KB 이상 데이터를 여러 번의 C_DigestUpdate로 나눠 처리합니다.
+            데이터는 <b>직접 입력</b>(위 "해시" 카드, 단발)하거나, <b>크기를 지정해 Hex 시험파일</b>
+            (64바이트/줄)을 만들거나, <b>기존 시험 파일을 선택</b>해 사용합니다.</p>
+          <div class="row">
+            <label><b>활성 세션</b> <select class="sessionPicker"></select></label>
+            <label>해시
+              <select id="mdMech">
+                <option value="592">SHA-256</option>
+                <option value="624">SHA-512</option>
+                <option value="693">SHA3-224</option>
+                <option value="688">SHA3-256</option>
+                <option value="704">SHA3-384</option>
+                <option value="720">SHA3-512</option>
+              </select>
+            </label>
+            <label>update 청크(bytes, ≤3968) <input type="number" id="mdChunk" value="3968" min="1" max="3968"></label>
+          </div>
+          <div class="row">
+            <label>데이터 크기(bytes) <input type="number" id="mdGenSize" value="65536" min="0" max="67108864"></label>
+            <button id="btnMdGen" class="ghost">Hex 시험파일 생성</button>
+            <span id="mdGenInfo" class="muted small"></span>
+          </div>
+          <div class="row">
+            <label style="flex:1">시험 파일 선택 <select id="mdFile"></select></label>
+            <button id="btnMdFiles" class="ghost">목록 새로고침</button>
+          </div>
+          <div class="row">
+            <button id="btnMdRun" class="primary">멀티파트 digest 실행 (선택 파일)</button>
+          </div>
+          <h3>결과</h3>
+          <pre id="mdOut" class="out"></pre>
+        </div>
       </div>
 
       <!-- AES-GCM -->
@@ -268,6 +303,42 @@
           <p class="muted small">AAD·본문 각각 ≤ 3968바이트. 같은 키로 암호화할 때 IV를 재사용하지 마세요. 키는 실행 후 입력란에서 지웁니다.</p>
           <h3>결과</h3>
           <pre id="gcmOut" class="out">실행 전</pre>
+        </div>
+
+        <div class="card">
+          <h2>멀티파트 AES-GCM (대용량 · Init / Update×N / Final)</h2>
+          <p class="muted small">64KB 이상 데이터를 여러 C_EncryptUpdate/C_DecryptUpdate로 처리합니다.
+            입력은 시험 파일(Hex)을 생성하거나 선택합니다. 암호화 결과는 <b>암호문+태그</b> 파일,
+            복호화는 <b>평문</b> 파일로 저장됩니다(복호화 입력은 암호문+태그 파일).</p>
+          <div class="row">
+            <label><b>활성 세션</b> <select class="sessionPicker"></select></label>
+            <label>동작 <select id="gmpDir"><option value="1">암호화</option><option value="0">복호화 및 태그 검증</option></select></label>
+            <label>update 청크(bytes) <input type="number" id="gmpChunk" value="32768" min="1" max="1048576"></label>
+          </div>
+          <div class="row">
+            <label>AES 키 Hex (16/24/32B) <input type="password" id="gmpKey" autocomplete="off" spellcheck="false"></label>
+            <label>IV Hex (1–16B) <input type="text" id="gmpIv" autocomplete="off" spellcheck="false"></label>
+            <button id="btnGmpNewIv" class="ghost">새 12B IV</button>
+          </div>
+          <div class="row">
+            <label style="flex:1">AAD Hex (선택) <input type="text" id="gmpAad" autocomplete="off" spellcheck="false"></label>
+            <label>태그 길이 <select id="gmpTagLen"><option value="16">16B</option><option value="15">15B</option><option value="14">14B</option><option value="13">13B</option><option value="12">12B</option></select></label>
+          </div>
+          <div class="row">
+            <label>입력 데이터 크기(bytes) <input type="number" id="gmpGenSize" value="65536" min="0" max="67108864"></label>
+            <button id="btnGmpGen" class="ghost">Hex 시험파일 생성</button>
+            <span id="gmpGenInfo" class="muted small"></span>
+          </div>
+          <div class="row">
+            <label style="flex:1">입력 파일 선택 <select id="gmpFile"></select></label>
+            <button id="btnGmpFiles" class="ghost">목록 새로고침</button>
+          </div>
+          <div class="row">
+            <label style="flex:1">출력 파일명(선택) <input type="text" id="gmpOutName" placeholder="비우면 자동(<입력>_ct/pt.hex)"></label>
+            <button id="btnGmpRun" class="primary">멀티파트 GCM 실행</button>
+          </div>
+          <h3>결과</h3>
+          <pre id="gmpOut" class="out"></pre>
         </div>
       </div>
 

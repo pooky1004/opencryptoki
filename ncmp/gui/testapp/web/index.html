@@ -57,7 +57,6 @@
       </div>
       <div class="navgroup">
         <div class="navhead">장치 관리</div>
-        <button class="navitem" type="button" data-tab="token"   data-group="장치 관리" data-label="장치 현황 · SRAM">장치 현황 · SRAM</button>
         <button class="navitem active" type="button" data-tab="session" data-group="장치 관리" data-label="세션 관리">세션 관리</button>
       </div>
       <div class="navgroup">
@@ -83,38 +82,6 @@
 
     <!-- Right: content -->
     <section class="content">
-      <!-- 장치 현황 · SRAM -->
-      <div class="tabpane" data-pane="token">
-        <div class="card">
-          <div class="card-head">
-            <h2>토큰 정보</h2>
-            <button id="btnTokenInfo">조회 (C_GetTokenInfo + MechanismList)</button>
-          </div>
-          <p class="muted small">왼쪽 "활성 슬롯"에서 선택한 슬롯을 대상으로 조회합니다.</p>
-          <pre id="tokenInfo" class="out"></pre>
-          <h3>지원 메커니즘</h3>
-          <ul id="mechList" class="mechs"></ul>
-        </div>
-        <details id="cmdDefaults" class="defaults card">
-          <summary title="여기서 지정한 값이 로그인·세션 명령의 기본값으로 쓰입니다(C_Initialize 시 적용). 각 탭에서 개별 수정 가능">명령 기본값 (PIN · 사용자 · R/W)</summary>
-          <div class="row">
-            <label>사용자
-              <select id="defUserType">
-                <option value="1">User</option>
-                <option value="0">SO</option>
-                <option value="2">ContextSpecific</option>
-              </select>
-            </label>
-            <label title="실 토큰 User PIN 12345678 / mock 1234 (transport에 맞춰 자동 설정)">User PIN <input type="password" id="defPin" value="12345678" size="10"></label>
-            <button type="button" class="eye" data-target="defPin" title="표시/숨김">👁</button>
-            <label title="실 토큰 SO PIN 87654321 / mock 12345678 (transport에 맞춰 자동 설정)">SO PIN <input type="password" id="defSoPin" value="87654321" size="12"></label>
-            <button type="button" class="eye" data-target="defSoPin" title="표시/숨김">👁</button>
-            <label><input type="checkbox" id="defRw" checked> R/W</label>
-            <button id="btnApplyDefaults" type="button" title="지금 각 탭 입력칸에 반영">적용</button>
-          </div>
-        </details>
-      </div>
-
       <!-- 세션 관리 (Sessions + Authentication) -->
       <div class="tabpane active" data-pane="session">
         <div class="cards2">
@@ -178,6 +145,36 @@
             <pre id="sessionInfo" class="out"></pre>
           </div>
         </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h2>토큰 정보</h2>
+            <button id="btnTokenInfo">조회 (C_GetTokenInfo + MechanismList)</button>
+          </div>
+          <p class="muted small">왼쪽 "활성 슬롯"에서 선택한 슬롯을 대상으로 실 타겟에서 조회합니다.</p>
+          <pre id="tokenInfo" class="out"></pre>
+          <h3>지원 메커니즘</h3>
+          <ul id="mechList" class="mechs"></ul>
+        </div>
+
+        <details id="cmdDefaults" class="defaults card">
+          <summary title="여기서 지정한 값이 로그인·세션 명령의 기본값으로 쓰입니다(C_Initialize 시 적용). 각 탭에서 개별 수정 가능">명령 기본값 (PIN · 사용자 · R/W)</summary>
+          <div class="row">
+            <label>사용자
+              <select id="defUserType">
+                <option value="1">User</option>
+                <option value="0">SO</option>
+                <option value="2">ContextSpecific</option>
+              </select>
+            </label>
+            <label title="실 토큰 User PIN 12345678 / mock 1234 (transport에 맞춰 자동 설정)">User PIN <input type="password" id="defPin" value="12345678" size="10"></label>
+            <button type="button" class="eye" data-target="defPin" title="표시/숨김">👁</button>
+            <label title="실 토큰 SO PIN 87654321 / mock 12345678 (transport에 맞춰 자동 설정)">SO PIN <input type="password" id="defSoPin" value="87654321" size="12"></label>
+            <button type="button" class="eye" data-target="defSoPin" title="표시/숨김">👁</button>
+            <label><input type="checkbox" id="defRw" checked> R/W</label>
+            <button id="btnApplyDefaults" type="button" title="지금 각 탭 입력칸에 반영">적용</button>
+          </div>
+        </details>
       </div>
 
       <!-- AES / SHA3 (hash + AES-CTR) -->
@@ -347,7 +344,7 @@
         <div class="card">
           <h2>ML-DSA / ML-KEM (PQC)</h2>
           <p class="muted">이 웹앱이 로드하는 standalone facade(mode-2)에는 ML-DSA/ML-KEM
-            연산이 구현되어 있지 않습니다(스텁). 광고 메커니즘 목록은 "장치 현황 · SRAM"의
+            연산이 구현되어 있지 않습니다(스텁). 광고 메커니즘 목록은 "세션 관리"의
             토큰 정보 조회에서 확인할 수 있습니다. PQC 전체 기능은 opencryptoki full 빌드의
             mode-1 STDLL에서 제공됩니다(<code>ncmp_specific.c</code>).</p>
         </div>

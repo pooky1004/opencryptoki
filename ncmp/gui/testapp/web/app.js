@@ -590,6 +590,20 @@ function gmpNewIv() { $('#gmpIv').value = Array.from(crypto.getRandomValues(new 
 /* ---- PEM CI 콘솔 (PEM 슬롯 선택 시) ---- */
 const PEM_TUNNEL_CMD = 0x01F0;               // ncmpd PEM backend generic CI tunnel
 const PEM_DIAG = { capabilities:0x0001, echo:0x0002, key_table:0x0024, perf_query:0x00F0 };
+const PEM_MLDSA = { 44:{cmd_kg:0x50,cmd_sg:0x51,cmd_vf:0x52,pub:1312,sec:2560,sig:2420},
+                    65:{cmd_kg:0x50,cmd_sg:0x51,cmd_vf:0x52,pub:1952,sec:4032,sig:3309},
+                    87:{cmd_kg:0x50,cmd_sg:0x51,cmd_vf:0x52,pub:2592,sec:4896,sig:4627} };
+const PEM_MLKEM = { 512:{cmd_kg:0x53,cmd_en:0x54,cmd_de:0x55,pub:800, sec:1632,ct:768 },
+                    768:{cmd_kg:0x53,cmd_en:0x54,cmd_de:0x55,pub:1184,sec:2400,ct:1088},
+                    1024:{cmd_kg:0x53,cmd_en:0x54,cmd_de:0x55,pub:1568,sec:3168,ct:1568} };
+function pemFixedPad(hex){ return pemPad8(hex); }
+/* The active session's wire id (app_sid) for session-scoped tunnel commands. */
+async function pemSessionWire() {
+  if (SELECTED_SLOT === null) return 0;
+  try { const d = await api('/api/sessmap', 'POST', { slot: SELECTED_SLOT });
+    if (d && d.ok && d.entries && d.entries.length) return d.entries[0].appSid || 0; } catch {}
+  return 0;
+}
 function pemU32le(n){ const b=[]; for(let i=0;i<4;i++){b.push((n>>>(8*i))&0xff);} return b.map(x=>x.toString(16).padStart(2,'0')).join(''); }
 function pemU64le(n){ let h=''; let v=BigInt(n); for(let i=0;i<8;i++){h+=Number(v&0xffn).toString(16).padStart(2,'0'); v>>=8n;} return h; }
 function pemPad8(hex){ const nb=hex.length/2, pad=((8-(nb%8))%8); return hex + '00'.repeat(pad); }
@@ -600,14 +614,30 @@ function pemIsDiag(op){ return op in PEM_DIAG; }
 function pemVisibility() {
   const op = $('#pemOp') ? $('#pemOp').value : 'capabilities';
   const sha = op.startsWith('sha3'), gcm = op.startsWith('gcm'), dec = op.endsWith('_dec');
+  const mldsa = op.startsWith('mldsa'), mlkem = op.startsWith('mlkem'), ml = mldsa || mlkem;
+  const sign = op === 'mldsa_sign', verify = op === 'mldsa_verify';
   const show = {
-    data: sha || gcm || op.startsWith('ctr') || op === 'echo' || op === 'perf_query',
+    data: sha || gcm || op.startsWith('ctr') || op === 'echo' || op === 'perf_query' || sign || verify,
     key: gcm || op.startsWith('ctr'), iv: gcm || op.startsWith('ctr'),
     aad: gcm, tag: gcm && dec,
+    profile: ml,
+    pk: op === 'mldsa_verify' || op === 'mlkem_encaps',
+    sk: op === 'mldsa_sign' || op === 'mlkem_decaps',
+    sig: op === 'mldsa_verify',
+    ct: op === 'mlkem_decaps',
   };
   document.querySelectorAll('#pemFields [data-pf]').forEach((e) => { e.style.display = show[e.dataset.pf] ? '' : 'none'; });
+  const prof = $('#pemProfile');
+  if (prof && ml) {
+    const want = mldsa ? [44,65,87] : [512,768,1024];
+    if (prof.dataset.kind !== (mldsa?'dsa':'kem')) {
+      prof.innerHTML = want.map(v=>`<option value="${v}">${mldsa?'ML-DSA-':'ML-KEM-'}${v}</option>`).join('');
+      prof.dataset.kind = mldsa?'dsa':'kem';
+    }
+  }
   const hint = $('#pemDataHint'), ivl = $('#pemIvLabel');
   if (hint) hint.textContent = op === 'echo' ? '(반향할 UTF-8 문자열)' : op === 'perf_query' ? '(대상 hSession 10진수)'
+    : (sign || verify) ? '(메시지 · UTF-8 문자열)'
     : sha ? '(UTF-8 문자열)' : dec ? '(암호문 Hex)' : '(평문 Hex)';
   if (ivl) ivl.textContent = op.startsWith('ctr') ? 'Counter Hex (16바이트)' : 'IV Hex (12/16바이트)';
 }
@@ -660,6 +690,73 @@ async function pemRun() {
         $('#pemOut').textContent = `PERF_QUERY [${r.out.length/2}B]\n${hexWrap(r.out.slice(0, 160))}…`;
         return;
       }
+    }
+    /* --- PQC ML-DSA / ML-KEM via the PEM CI tunnel (session-scoped) --- */
+    if (op.startsWith('mldsa') || op.startsWith('mlkem')) {
+      if (SELECTED_SLOT === null) { $('#pemOut').textContent = '먼저 PEM 슬롯을 선택하세요.'; return; }
+      const sid = await pemSessionWire();
+      if (!sid) { $('#pemOut').textContent = '먼저 "세션 관리"에서 세션을 여세요(PQC는 세션 필요).'; return; }
+      const prof = Number($('#pemProfile').value);
+      const mldsa = op.startsWith('mldsa');
+      const spec = (mldsa ? PEM_MLDSA : PEM_MLKEM)[prof];
+      const u64 = pemU64le(prof);
+      const tun = async (cmd, args, exp) => {
+        const d = await api('/api/ci', 'POST', { slot: SELECTED_SLOT, command: PEM_TUNNEL_CMD, session: sid,
+          p0: pemU32le(cmd), p1: args || '', p2: pemU32le(exp || 4096) });
+        if (!d.ok) throw new Error(describe(d));
+        return { ack: d.response ? d.response.ack : -1,
+                 out: (d.response && d.response.params && d.response.params[0]) ? (d.response.params[0].hex||'') : '' };
+      };
+      try {
+        if (op === 'mldsa_keygen' || op === 'mlkem_keygen') {
+          const exp = 16 + spec.pub + spec.sec;
+          const r = await tun(mldsa?0x50:0x53, u64, exp);
+          if (r.ack !== 0) { $('#pemOut').textContent = 'ack ' + r.ack; return; }
+          const pk = r.out.slice(0, spec.pub*2), sk = r.out.slice(spec.pub*2, (spec.pub+spec.sec)*2);
+          $('#pemPk').value = pk; $('#pemSk').value = sk;
+          $('#pemOut').textContent = `KEYGEN 완료\npublic_key [${spec.pub}B], secret_key [${spec.sec}B] 를 입력란에 채웠습니다.`;
+          return;
+        }
+        if (op === 'mldsa_sign') {
+          const msg = pemTextHex($('#pemData').value), sk = hexClean($('#pemSk').value, 'secret key');
+          if (sk.length !== spec.sec*2) throw new Error(`secret key는 ${spec.sec}바이트여야 합니다.`);
+          const args = u64 + pemVarHex(msg) + sk;
+          const r = await tun(0x51, args, 16 + pemPad8('00'.repeat(spec.sig)).length/2*0 + ((spec.sig+7)&~7));
+          if (r.ack !== 0) { $('#pemOut').textContent = 'ack ' + r.ack; return; }
+          const sig = r.out.slice(0, spec.sig*2); $('#pemSig').value = sig;
+          $('#pemOut').textContent = `SIGN 완료\nsignature [${spec.sig}B] =\n${hexWrap(sig)}`;
+          return;
+        }
+        if (op === 'mldsa_verify') {
+          const msg = pemTextHex($('#pemData').value);
+          const sig = hexClean($('#pemSig').value, 'signature'), pk = hexClean($('#pemPk').value, 'public key');
+          if (sig.length !== spec.sig*2) throw new Error(`signature는 ${spec.sig}바이트여야 합니다.`);
+          if (pk.length !== spec.pub*2) throw new Error(`public key는 ${spec.pub}바이트여야 합니다.`);
+          const args = u64 + pemVarHex(msg) + pemFixedPad(sig) + pk;
+          const r = await tun(0x52, args, 16);
+          $('#pemOut').textContent = r.ack === 0 ? '검증 성공: 서명이 유효합니다.' : `검증 실패 (ack ${r.ack})`;
+          return;
+        }
+        if (op === 'mlkem_encaps') {
+          const pk = hexClean($('#pemPk').value, 'public key');
+          if (pk.length !== spec.pub*2) throw new Error(`public key는 ${spec.pub}바이트여야 합니다.`);
+          const r = await tun(0x54, u64 + pk, 16 + spec.ct + 32);
+          if (r.ack !== 0) { $('#pemOut').textContent = 'ack ' + r.ack; return; }
+          const ct = r.out.slice(0, spec.ct*2), ss = r.out.slice(spec.ct*2, spec.ct*2+64);
+          $('#pemCt').value = ct;
+          $('#pemOut').textContent = `ENCAPS 완료\nciphertext [${spec.ct}B] 를 입력란에 채웠습니다.\nshared_secret [32B] =\n${hexWrap(ss)}`;
+          return;
+        }
+        if (op === 'mlkem_decaps') {
+          const ct = hexClean($('#pemCt').value, 'ciphertext'), sk = hexClean($('#pemSk').value, 'secret key');
+          if (ct.length !== spec.ct*2) throw new Error(`ciphertext는 ${spec.ct}바이트여야 합니다.`);
+          if (sk.length !== spec.sec*2) throw new Error(`secret key는 ${spec.sec}바이트여야 합니다.`);
+          const r = await tun(0x55, u64 + ct + sk, 16 + 32);
+          if (r.ack !== 0) { $('#pemOut').textContent = 'ack ' + r.ack; return; }
+          $('#pemOut').textContent = `DECAPS 완료\nshared_secret [32B] =\n${hexWrap(r.out.slice(0,64))}`;
+          return;
+        }
+      } catch (e) { $('#pemOut').textContent = '오류: ' + e.message; return; }
     }
     /* --- crypto unit functions via the PKCS#11 facade (needs a session) --- */
     if (CUR_SESSION === null) { $('#pemOut').textContent = NO_SESS; return log('PEM CI: ' + NO_SESS); }

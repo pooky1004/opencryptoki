@@ -199,6 +199,12 @@
                 <option value="gcm_dec">AES-256 GCM · 복호화</option>
                 <option value="ctr_enc">AES-256 CTR · 암호화</option>
                 <option value="ctr_dec">AES-256 CTR · 복호화</option>
+                <option value="mldsa_keygen">ML-DSA · KEYGEN</option>
+                <option value="mldsa_sign">ML-DSA · SIGN</option>
+                <option value="mldsa_verify">ML-DSA · VERIFY</option>
+                <option value="mlkem_keygen">ML-KEM · KEYGEN</option>
+                <option value="mlkem_encaps">ML-KEM · ENCAPS</option>
+                <option value="mlkem_decaps">ML-KEM · DECAPS</option>
               </select>
             </label>
           </div>
@@ -216,6 +222,16 @@
             </div>
             <label data-pf="aad" style="display:block">AAD Hex (선택)
               <input type="text" id="pemAad" style="width:100%"></label>
+            <label data-pf="profile">프로파일
+              <select id="pemProfile"></select></label>
+            <label data-pf="pk" style="display:block">Public key Hex
+              <textarea id="pemPk" rows="2" spellcheck="false" style="width:100%"></textarea></label>
+            <label data-pf="sk" style="display:block">Secret key Hex
+              <textarea id="pemSk" rows="2" spellcheck="false" style="width:100%"></textarea></label>
+            <label data-pf="sig" style="display:block">Signature Hex
+              <textarea id="pemSig" rows="2" spellcheck="false" style="width:100%"></textarea></label>
+            <label data-pf="ct" style="display:block">Ciphertext Hex
+              <textarea id="pemCt" rows="2" spellcheck="false" style="width:100%"></textarea></label>
           </div>
           <div class="row">
             <button id="pemRun" class="primary">실행</button>

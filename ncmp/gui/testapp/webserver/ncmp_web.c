@@ -871,9 +871,11 @@ static void handle_ci(int fd, const char *body)
     uint32_t plen[NCMP_MAX_PARAM_COUNT] = {0};
     size_t poff = 0;
     int bad = 0;
+    /* Large enough for one full-size parameter as hex (PQC blobs reach ~4.9 KB,
+     * and the PEM CI tunnel packs combined args into a single param). */
+    static _Thread_local char hv[2 * NCMP_MAX_PARAM_SIZE + 1];
     for (int i = 0; i < NCMP_MAX_PARAM_COUNT; i++) {
         char key[4]; snprintf(key, sizeof(key), "p%d", i);
-        char hv[8192];
         if (json_str(body, key, hv, sizeof(hv)) && hv[0]) {
             int n = ci_hex2bytes(hv, payload + poff, (int)(NCMP_MAX_PAYLOAD_SIZE - poff));
             if (n < 0) { bad = 1; break; }

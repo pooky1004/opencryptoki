@@ -16,6 +16,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 /*
@@ -24,6 +25,27 @@
  * surfaces as NCMP_ERR_TIMEOUT instead of hanging a PKCS#11 caller forever.
  */
 #define NCMP_CLIENT_SPIN_BUDGET 200000000ull
+
+/*
+ * When the slot's SHM ring has no FREE entry, ncmp_slot_enqueue() returns
+ * NCMP_ERR_FULL ("message queue allocation failed"). Under many concurrent
+ * clients on one token this is transient - the comm_thread drains entries back
+ * to FREE continuously - so retry the enqueue a few times with a short backoff
+ * before surfacing the error to the PKCS#11 caller.
+ */
+#ifndef NCMP_CLIENT_ENQUEUE_RETRIES
+#define NCMP_CLIENT_ENQUEUE_RETRIES 3        /* extra attempts after the first */
+#endif
+#define NCMP_CLIENT_ENQUEUE_BACKOFF_US 200   /* grows linearly per retry */
+
+/** Sleep @p usec microseconds (best-effort; ignores EINTR). */
+static void ncmp_client_backoff(unsigned usec)
+{
+    struct timespec ts;
+    ts.tv_sec = (time_t)(usec / 1000000u);
+    ts.tv_nsec = (long)(usec % 1000000u) * 1000L;
+    (void)nanosleep(&ts, NULL);
+}
 
 int ncmp_client_init(ncmp_client_t *c, const char *sock_path)
 {
@@ -69,9 +91,19 @@ int ncmp_client_exec(ncmp_client_t *c, uint32_t slot_id,
     if (!slot)
         return NCMP_ERR_INVAL;
 
-    /* Enqueue (FREE->CLAIMED->POSTED); the slot's comm_thread consumes it. */
+    /* Enqueue (FREE->CLAIMED->POSTED); the slot's comm_thread consumes it.
+     * Retry a full ring (NCMP_ERR_FULL) up to NCMP_CLIENT_ENQUEUE_RETRIES times
+     * with a short, growing backoff: with several apps sharing one token the
+     * ring fills transiently and drains again within microseconds. */
     rc = ncmp_slot_enqueue(c->shm_base, slot, req->header.session_id,
                            c->pid, req->header.sequence_id, req, &idx);
+    for (int attempt = 1;
+         rc == NCMP_ERR_FULL && attempt <= NCMP_CLIENT_ENQUEUE_RETRIES;
+         ++attempt) {
+        ncmp_client_backoff((unsigned)NCMP_CLIENT_ENQUEUE_BACKOFF_US * (unsigned)attempt);
+        rc = ncmp_slot_enqueue(c->shm_base, slot, req->header.session_id,
+                               c->pid, req->header.sequence_id, req, &idx);
+    }
     if (rc != NCMP_OK)
         return rc;
 

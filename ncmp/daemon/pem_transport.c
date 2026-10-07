@@ -37,6 +37,14 @@ static int pem_dbg(void) { static int v = -1; if (v < 0) v = getenv("NCMP_PEM_DE
 #define PEM_REQ_ACK 0x0000FFFFu     /* CI v4 request ack sentinel */
 #define PEM_MAXBUF  (CIFX_CI_V4_RESPONSE_MAX_BYTES + 16u)
 
+/* Generic PEM CI tunnel opcode (PEM slots only; unused in the NCMP opcode space).
+ * Lets the Web Test App drive any PEM-native CI command through /api/ci:
+ *   param0 = PEM CI command (u32 LE), param1 = raw PEM args (already PEM-encoded),
+ *   param2 = expected response message bytes (u32 LE, optional hint).
+ * The response's PEM args (bytes after the 16-byte CI header) are returned as
+ * NCMP response param0. Used for CAPABILITIES/ECHO/KEY_TABLE_INFO/PERF_QUERY. */
+#define PEM_RAW_CMD 0x000001F0u
+
 struct ncmp_transport {
     uint32_t  slot_id;
     CI_USB   *usb;
@@ -341,6 +349,19 @@ static int pem_be_send(ncmp_transport_t *t, const uint8_t *frame, size_t len)
             }
         }
         return build_rsp(t, &m.header, ack, outd, total);
+    }
+    case PEM_RAW_CMD: {   /* generic PEM CI tunnel (param0=cmd, param1=args, param2=exp) */
+        uint32_t pemcmd = 0, exp = 4096;
+        const uint8_t *a = NULL; uint32_t al = 0;
+        if (!P(0, p0, l0) || l0 < 4)
+            return build_rsp(t, &m.header, NCMP_CKR_ARGUMENTS_BAD, NULL, 0);
+        pemcmd = rd_u32le(p0);
+        if (P(1, p1, l1)) { a = p1; al = l1; }
+        if (P(2, p2, l2) && l2 >= 4) exp = rd_u32le(p2);
+        if (pem_exchange(t, m.header.session_id, pemcmd, a, al, exp,
+                         resp, sizeof(resp), &rlen) != NCMP_OK) return NCMP_ERR_USB;
+        ack = rd_u32le(resp + 12);
+        return build_rsp(t, &m.header, ack, resp + 16, (uint32_t)(rlen > 16 ? rlen - 16 : 0));
     }
     default:
         /* RNG, PQC, object/admin and other opcodes: not yet ported to PEM. */

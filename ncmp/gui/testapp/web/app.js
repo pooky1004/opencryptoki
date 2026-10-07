@@ -588,20 +588,82 @@ async function gmpRun() {
 }
 function gmpNewIv() { $('#gmpIv').value = Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, '0')).join(''); }
 /* ---- PEM CI 콘솔 (PEM 슬롯 선택 시) ---- */
+const PEM_TUNNEL_CMD = 0x01F0;               // ncmpd PEM backend generic CI tunnel
+const PEM_DIAG = { capabilities:0x0001, echo:0x0002, key_table:0x0024, perf_query:0x00F0 };
+function pemU32le(n){ const b=[]; for(let i=0;i<4;i++){b.push((n>>>(8*i))&0xff);} return b.map(x=>x.toString(16).padStart(2,'0')).join(''); }
+function pemU64le(n){ let h=''; let v=BigInt(n); for(let i=0;i<8;i++){h+=Number(v&0xffn).toString(16).padStart(2,'0'); v>>=8n;} return h; }
+function pemPad8(hex){ const nb=hex.length/2, pad=((8-(nb%8))%8); return hex + '00'.repeat(pad); }
+function pemVarHex(dataHex){ const nb=dataHex.length/2; return pemU64le(nb)+pemPad8(dataHex); }
+function pemTextHex(t){ return Array.from(new TextEncoder().encode(t),b=>b.toString(16).padStart(2,'0')).join(''); }
+function pemIsDiag(op){ return op in PEM_DIAG; }
+
 function pemVisibility() {
-  const op = $('#pemOp') ? $('#pemOp').value : 'sha3_256';
+  const op = $('#pemOp') ? $('#pemOp').value : 'capabilities';
   const sha = op.startsWith('sha3'), gcm = op.startsWith('gcm'), dec = op.endsWith('_dec');
-  const show = { data:true, key:!sha, iv:!sha, aad:gcm, tag:gcm&&dec };
+  const show = {
+    data: sha || gcm || op.startsWith('ctr') || op === 'echo' || op === 'perf_query',
+    key: gcm || op.startsWith('ctr'), iv: gcm || op.startsWith('ctr'),
+    aad: gcm, tag: gcm && dec,
+  };
   document.querySelectorAll('#pemFields [data-pf]').forEach((e) => { e.style.display = show[e.dataset.pf] ? '' : 'none'; });
   const hint = $('#pemDataHint'), ivl = $('#pemIvLabel');
-  if (hint) hint.textContent = sha ? '(UTF-8 문자열)' : dec ? '(암호문 Hex)' : '(평문 Hex)';
+  if (hint) hint.textContent = op === 'echo' ? '(반향할 UTF-8 문자열)' : op === 'perf_query' ? '(대상 hSession 10진수)'
+    : sha ? '(UTF-8 문자열)' : dec ? '(암호문 Hex)' : '(평문 Hex)';
   if (ivl) ivl.textContent = op.startsWith('ctr') ? 'Counter Hex (16바이트)' : 'IV Hex (12/16바이트)';
 }
+
+/* Run a PEM-native command through the ncmpd PEM CI tunnel (/api/ci). */
+async function pemTunnel(pemCmd, argsHex, expBytes) {
+  const d = await api('/api/ci', 'POST', {
+    slot: SELECTED_SLOT, command: PEM_TUNNEL_CMD, session: 0,
+    p0: pemU32le(pemCmd), p1: argsHex || '', p2: pemU32le(expBytes || 4096),
+  });
+  if (!d.ok) throw new Error(describe(d));
+  const ackName = d.response ? (d.response.ackName || ('ack ' + d.response.ack)) : '';
+  const ack = d.response ? d.response.ack : -1;
+  const out = (d.response && d.response.params && d.response.params[0]) ? d.response.params[0].hex || '' : '';
+  return { ack, ackName, out };
+}
+
 async function pemRun() {
-  if (CUR_SESSION === null) { $('#pemOut').textContent = NO_SESS; return log('PEM CI: ' + NO_SESS); }
-  const h = CUR_SESSION, op = $('#pemOp').value;
-  $('#pemOut').textContent = `실행 중… (handle ${h}, ${op})`;
+  const op = $('#pemOp').value;
+  $('#pemOut').textContent = '실행 중…';
   try {
+    /* --- PEM-native diagnostic/info commands via the CI tunnel (session0) --- */
+    if (pemIsDiag(op)) {
+      if (SELECTED_SLOT === null) { $('#pemOut').textContent = '먼저 PEM 슬롯을 선택하세요.'; return; }
+      let args = '', exp = 4096, r;
+      if (op === 'capabilities') { exp = 40; r = await pemTunnel(PEM_DIAG.capabilities, '', exp);
+        if (r.ack !== 0) { $('#pemOut').textContent = 'ack ' + r.ack; return; }
+        const api_v = parseInt(r.out.slice(0,16).match(/../g).reverse().join(''),16);
+        const slots = parseInt(r.out.slice(16,32).match(/../g).reverse().join(''),16);
+        const mask  = r.out.slice(32,48);
+        $('#pemOut').textContent = `CAPABILITIES\napi_version : ${api_v}\nslots       : ${slots}\nmask        : 0x${mask.match(/../g).reverse().join('')}`;
+        return;
+      }
+      if (op === 'echo') { const dh = pemTextHex($('#pemData').value); args = pemVarHex(dh);
+        exp = 16 + 8 + pemPad8(dh).length/2; r = await pemTunnel(PEM_DIAG.echo, args, exp);
+        if (r.ack !== 0) { $('#pemOut').textContent = 'ack ' + r.ack; return; }
+        const n = parseInt(r.out.slice(0,16).match(/../g).reverse().join(''),16);
+        $('#pemOut').textContent = `ECHO [${n}B] =\n${hexWrap(r.out.slice(16, 16 + n*2))}`;
+        return;
+      }
+      if (op === 'key_table') { exp = 984; r = await pemTunnel(PEM_DIAG.key_table, '', exp);
+        if (r.ack !== 0) { $('#pemOut').textContent = 'ack ' + r.ack; return; }
+        const n = parseInt(r.out.slice(0,16).match(/../g).reverse().join(''),16);
+        $('#pemOut').textContent = `KEY_TABLE_INFO · records ${n}B (30 × 32B 공개 메타데이터)\n${hexWrap(r.out.slice(16, 16 + Math.min(n,320)*2))}${n>320?'\n…':''}`;
+        return;
+      }
+      if (op === 'perf_query') { const tgt = Math.floor(Number($('#pemData').value)) || 0;
+        args = pemU64le(tgt) + pemU64le(0xffffffff); exp = 320; r = await pemTunnel(PEM_DIAG.perf_query, args, exp);
+        if (r.ack !== 0) { $('#pemOut').textContent = '성능 모니터 빌드에서만 지원 · ack ' + r.ack; return; }
+        $('#pemOut').textContent = `PERF_QUERY [${r.out.length/2}B]\n${hexWrap(r.out.slice(0, 160))}…`;
+        return;
+      }
+    }
+    /* --- crypto unit functions via the PKCS#11 facade (needs a session) --- */
+    if (CUR_SESSION === null) { $('#pemOut').textContent = NO_SESS; return log('PEM CI: ' + NO_SESS); }
+    const h = CUR_SESSION;
     if (op.startsWith('sha3')) {
       const mech = op === 'sha3_384' ? 704 : op === 'sha3_512' ? 720 : 688;
       const d = await api('/api/digest', 'POST', { session: h, mech, input: $('#pemData').value });
@@ -616,8 +678,7 @@ async function pemRun() {
     if (key.length !== 64) throw new Error('PEM AES는 32바이트(AES-256) 키만 지원합니다.');
     const body = { session: h, algo: gcm ? 'gcm' : 'ctr', encrypt: enc, key, iv, data };
     if (gcm) {
-      body.aad = hexClean($('#pemAad').value, 'AAD');
-      body.tagBytes = 16;
+      body.aad = hexClean($('#pemAad').value, 'AAD'); body.tagBytes = 16;
       if (!enc) { const tag = hexClean($('#pemTag').value, 'Tag'); if (tag.length !== 32) throw new Error('Tag는 16바이트여야 합니다.'); body.data = data + tag; }
     }
     const d = await api('/api/encrypt', 'POST', body);

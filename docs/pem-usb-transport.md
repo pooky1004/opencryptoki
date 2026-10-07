@@ -34,8 +34,9 @@ PEM 보드(USB `04b4:5054`)의 USB 포트로 데이터를 보내는 방식을 �
 
 소스: `ci/ci_usb_lib.c`, API: `ci/ci_usb_lib.h`.
 
-### 2.1 디바이스 접근 — **usbfs 직접(ioctl)**
-- libusb를 쓰지 않고 **커널 usbfs를 직접** 연다.
+### 2.1 디바이스 접근 — **usbfs 직접(ioctl)** (기본 백엔드)
+- 기본 빌드는 libusb 없이 **커널 usbfs를 직접** 연다(컴파일 플래그로 libusb 선택 가능,
+  §2.4).
 - **디바이스 탐색**(`find_device`): `/sys/bus/usb/devices/*`를 순회하며 `idVendor`/
   `idProduct`가 `04b4:5054`인 노드를 찾고, `busnum`/`devnum`으로
   `/dev/bus/usb/BBB/DDD` 경로를 만든다. VID/PID가 **2개 이상이면 `ERR_MULTIPLE`**.
@@ -69,6 +70,66 @@ PEM 보드(USB `04b4:5054`)의 USB 포트로 데이터를 보내는 방식을 �
 - **특수 복구 없음**: 타임아웃 시 "연결 상태 불확실" 오류만 반환(디바이스 reset 없음).
 - **백엔드 추상화**: `CI_USB_Backend` 콜백으로 대체 transport/테스트 더블 주입 가능
   (`CI_USB_CreateBackend`).
+
+### 2.4 USB 백엔드 선택 — usbfs ioctl ↔ libusb-1.0 (컴파일 플래그)
+
+`ci_usb_lib.c`는 **동일한 전송 절차(OUT → [ZLP] → IN)** 를 두 가지 하위 백엔드로
+구현하며, **컴파일 타임 매크로 `CI_USB_USE_LIBUSB`** 로 하나를 고른다. 선택은
+`CI_USB_Open()` 내부에서만 갈리고, 프레임 검증·타이밍·트레이스·에러 매핑 등 상위
+로직(`CI_USB_Exchange` 등)은 두 백엔드가 공유한다.
+
+| 항목 | 기본 (usbfs ioctl) | `-DCI_USB_USE_LIBUSB` (libusb-1.0) |
+|------|--------------------|-------------------------------------|
+| 매크로 | 미정의 | `CI_USB_USE_LIBUSB` 정의 |
+| 디바이스 탐색 | `/sys/bus/usb/devices` 순회 + sysfs `descriptors` | `libusb_get_device_list` + 활성 config 디스크립터 |
+| `device_path` 매칭 | sysfs `busnum`/`devnum` → `/dev/bus/usb/BBB/DDD` | `libusb_get_bus_number`/`_device_address` → 동일 경로 문자열 |
+| OUT max packet | sysfs 디스크립터의 EP `0x01` wMaxPacketSize | 활성 config EP `0x01` wMaxPacketSize |
+| 오픈/클레임 | `open(O_RDWR)` + `ioctl(USBDEVFS_CLAIMINTERFACE,0)` | `libusb_open` + `set_auto_detach_kernel_driver` + `claim_interface(0)` |
+| 벌크 전송 | `ioctl(USBDEVFS_BULK)` (`bulk_until`) | `libusb_bulk_transfer` (`ci_libusb_bulk`) |
+| ZLP 규칙 | 요청이 max packet 배수면 길이 0 OUT | 동일 |
+| 외부 의존성 | 없음(커널 usbfs) | libusb-1.0 |
+
+- **ZLP·IN 규칙 동일**: 요청이 max-packet 배수일 때 OUT ZLP 1회, IN은 기대 길이 1회
+  읽기(펌웨어 IN ZLP 없음). 두 백엔드 출력은 실 보드에서 **바이트 단위로 동일**함을
+  확인(SHA3/AES-GCM·CTR 단발·멀티파트·저장 키 ID 교차검증).
+- **빌드 선택**:
+  - CMake : `cmake -S ncmp -B build -DENABLE_PEM_LIBUSB=ON` (OFF=usbfs 기본).
+    ON이면 libusb가 **필수**가 되고 `ci_usb_lib.c`를 컴파일하는 모든 타깃
+    (ncmpd, hsm_bridge)이 libusb를 링크한다.
+  - 스탠드얼론 스크립트 : `CI_USB_USE_LIBUSB=1 bash ncmp/gui/build_standalone_p11.sh`
+    (미설정=usbfs 기본). ncmpd는 실 FX3 경로 때문에 어느 쪽이든 libusb를 링크하므로
+    컴파일 플래그만 바뀐다.
+- 타임아웃 의미는 미세하게 다르다: usbfs는 OUT+ZLP+IN **전체 데드라인**, libusb는
+  **전송 단위** 타임아웃(기본 10 s). 운용상 차이는 없다.
+
+### 2.5 컨테이너 파이프라인 — OUT/IN 분리와 3-deep in-flight
+
+PEM 보드는 요청 컨테이너가 **3개**다. 이를 활용해 ncmpd의 comm_thread가 **최대 3개를
+동시에 in-flight** 로 둔다: POSTED 요청을 **누적 송신이 3이 되거나 보낼 것이 없을 때까지
+OUT(dispatch)** 하고, 그다음 **IN 응답을 수집(drain)** 한다. 이는 comm_thread의 기존
+파이프라인 정책(`slot->max_inflight`)이며, PEM 슬롯은 `max_inflight =
+NCMP_PEM_CONTAINER_COUNT(3)` 로 설정된다(`daemon/main.c`).
+
+이를 위해 CI_USB 와 PEM 백엔드의 교환을 **OUT 전용/IN 전용으로 분리**한다:
+- `CI_USB_Send`(OUT+조건부 ZLP) / `CI_USB_Recv`(IN) 를 추가(usbfs·libusb 공통).
+  기존 `CI_USB_Exchange` = Send+Recv.
+- `daemon/pem_transport.c`:
+  - `pem_be_send()` 는 NCMP 요청을 CI v4 로 **번역해 OUT만** 보내고, 응답을 어떻게
+    NCMP 로 shaping할지(`pem_rsp_kind_t` + req 헤더 + 기대 크기)를 **대기 FIFO**
+    (`NCMP_PEM_CONTAINER_COUNT` 깊이)에 넣는다. 번역 단계 오류는 OUT 없이 ack-only 로
+    FIFO에 적재(`PEM_RK_LOCAL`).
+  - `pem_be_recv()` 는 FIFO 선두를 꺼내 **IN 1프레임을 읽고** `pem_shape()` 로 NCMP
+    응답을 만든다(local 항목은 IN 없이 ack-only 반환).
+- **응답 상관**: PEM CI v4 응답 헤더에는 sequence_id 가 없으므로, 백엔드는 보드가
+  **제출(FIFO) 순서대로 응답**함을 이용해 FIFO 선두와 대응시키고, NCMP 응답에 그 요청의
+  session/sequence_id 를 실어 comm_thread 의 `(session_id, sequence_id)` 상관을 만족시킨다.
+  실 보드에서 **서로 다른 세션의 동시 one-shot 3건**(AES-GCM)을 실행해 각 스레드가
+  자기 입력의 python AES-256-GCM 결과와 바이트 일치함을 확인(= 순서/상관 정확).
+- **상태형 멀티파트 주의**: 토큰의 SHA3/AES-GCM 멀티파트 컨텍스트는 토큰 측에서
+  공유될 수 있어, **서로 다른 응용이 멀티파트를 동시에 교차** 진행하면 컨텍스트가 섞일
+  수 있다(토큰 특성; in-flight 수와 무관하게 프레임 교차로 발생 가능). 단일 응용의
+  멀티파트 스트림은 facade 가 단계마다 응답을 기다리므로 자연히 depth 1 로 직렬화되어
+  영향이 없다.
 
 ---
 

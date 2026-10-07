@@ -210,16 +210,19 @@ int main(int argc, char **argv)
             backend = NCMP_BACKEND_SOCKET;
         else if (!strcmp(tsel, "real"))
             backend = NCMP_BACKEND_REAL;
+        else if (!strcmp(tsel, "pem"))
+            backend = NCMP_BACKEND_PEM;
         else {
             fprintf(stderr, "ncmpd: unknown --transport '%s' "
-                    "(use real|mock|socket)\n", tsel);
+                    "(use real|mock|socket|pem)\n", tsel);
             return 2;
         }
     }
     ncmp_transport_set_backend(backend);
     fprintf(stderr, "ncmpd: transport = %s\n",
             backend == NCMP_BACKEND_MOCK ? "mock" :
-            backend == NCMP_BACKEND_SOCKET ? "socket" : "real");
+            backend == NCMP_BACKEND_SOCKET ? "socket" :
+            backend == NCMP_BACKEND_PEM ? "pem" : "real");
 
     /* Refuse to start if another ncmpd already runs (single device/SHM owner).
      * The lock fd is intentionally held for the process lifetime. */
@@ -258,6 +261,15 @@ int main(int argc, char **argv)
          * Mock/socket keep the pipelined default. */
         if (backend == NCMP_BACKEND_REAL)
             slot->max_inflight = 1;
+
+        /* Tag the slot's HSM type so clients/Debug/Web distinguish tokens. PEM
+         * uses usbfs CI v4 and is also strictly one-at-a-time per exchange. */
+        if (backend == NCMP_BACKEND_PEM) {
+            slot->hsm_type = NCMP_HSM_TYPE_PEM;
+            slot->max_inflight = 1;
+        } else {
+            slot->hsm_type = NCMP_HSM_TYPE_NCMP;
+        }
 
         if (ncmp_transport_open(s, &slots[s].transport) != NCMP_OK) {
             fprintf(stderr, "ncmpd: slot %u transport open failed "

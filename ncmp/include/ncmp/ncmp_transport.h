@@ -89,6 +89,7 @@ typedef enum ncmp_backend_kind {
     NCMP_BACKEND_REAL   = 0, /**< Real FX3 over libusb (default). */
     NCMP_BACKEND_MOCK   = 1, /**< In-process software emulator. */
     NCMP_BACKEND_SOCKET = 2, /**< TCP to a frame server (GUI mock_server). */
+    NCMP_BACKEND_PEM    = 3, /**< PEM token: NCMP<->CI v4 translating usbfs transport. */
 } ncmp_backend_kind;
 
 /** Per-backend operation table (one instance exported by each backend). */
@@ -104,6 +105,7 @@ typedef struct ncmp_transport_ops {
 extern const ncmp_transport_ops ncmp_usb_ops;     /**< usb_transport.c */
 extern const ncmp_transport_ops ncmp_mock_ops;    /**< mock_backend.c */
 extern const ncmp_transport_ops ncmp_socket_ops;  /**< socket_transport.c */
+extern const ncmp_transport_ops ncmp_pem_ops;     /**< pem_transport.c */
 
 /**
  * @brief Select the active transport backend. Call once before the first

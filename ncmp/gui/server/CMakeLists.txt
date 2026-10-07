@@ -32,11 +32,14 @@ if(ENABLE_GUI_SERVER)
         ${CMAKE_SOURCE_DIR}/daemon/transport.c
         ${CMAKE_SOURCE_DIR}/daemon/usb_transport.c
         ${CMAKE_SOURCE_DIR}/daemon/socket_transport.c
+        ${CMAKE_SOURCE_DIR}/daemon/pem_transport.c
+        ${CMAKE_SOURCE_DIR}/pem/cifx_protocol.c
+        ${CMAKE_SOURCE_DIR}/pem/ci_usb_lib.c
         ${CMAKE_SOURCE_DIR}/daemon/mock_backend.c
         ${CMAKE_SOURCE_DIR}/mock/mcu_scheduler.c
         ${CMAKE_SOURCE_DIR}/mock/container.c
         ${CMAKE_SOURCE_DIR}/mock/fx3_dma.c)
-    target_include_directories(hsm_bridge PRIVATE ${CMAKE_SOURCE_DIR}/mock)
+    target_include_directories(hsm_bridge PRIVATE ${CMAKE_SOURCE_DIR}/mock ${CMAKE_SOURCE_DIR}/pem)
     target_link_libraries(hsm_bridge PRIVATE ncmp_frame_server)
     find_package(LibUSB QUIET)
     if(LibUSB_FOUND OR TARGET LibUSB::LibUSB)

@@ -21,6 +21,7 @@ int ncmp_transport_set_backend(ncmp_backend_kind kind)
     case NCMP_BACKEND_REAL:   g_ops = &ncmp_usb_ops;    return NCMP_OK;
     case NCMP_BACKEND_MOCK:   g_ops = &ncmp_mock_ops;   return NCMP_OK;
     case NCMP_BACKEND_SOCKET: g_ops = &ncmp_socket_ops; return NCMP_OK;
+    case NCMP_BACKEND_PEM:    g_ops = &ncmp_pem_ops;    return NCMP_OK;
     default:                  return NCMP_ERR_INVAL;
     }
 }

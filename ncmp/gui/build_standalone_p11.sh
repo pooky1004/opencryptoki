@@ -37,10 +37,12 @@ gcc $CFLAGS -shared -fPIC \
 
 echo "building $OUT/ncmpd (all backends; pick at runtime with --transport)"
 gcc -std=gnu11 -D_GNU_SOURCE -O2 -Wall \
-    -I"$ROOT/ncmp/include" -I"$ROOT/ncmp/mock" \
+    -I"$ROOT/ncmp/include" -I"$ROOT/ncmp/mock" -I"$ROOT/ncmp/pem" \
     "$ROOT/ncmp/daemon/main.c" "$ROOT/ncmp/daemon/conn_thread.c" \
     "$ROOT/ncmp/daemon/comm_thread.c" "$ROOT/ncmp/daemon/transport.c" \
     "$ROOT/ncmp/daemon/usb_transport.c" "$ROOT/ncmp/daemon/socket_transport.c" \
+    "$ROOT/ncmp/daemon/pem_transport.c" \
+    "$ROOT/ncmp/pem/cifx_protocol.c" "$ROOT/ncmp/pem/ci_usb_lib.c" \
     "$ROOT/ncmp/daemon/mock_backend.c" \
     "$ROOT/ncmp/mock/mcu_scheduler.c" "$ROOT/ncmp/mock/container.c" \
     "$ROOT/ncmp/mock/fx3_dma.c" \

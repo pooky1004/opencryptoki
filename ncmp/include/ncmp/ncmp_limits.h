@@ -94,6 +94,14 @@
 #define NCMP_DEV_CONTAINER_SIZE (64 * 1024)
 
 /**
+ * PEM token container count. The PEM board holds 3 request containers, so its
+ * comm_thread may keep up to 3 commands in flight (dispatch up to 3 OUTs, then
+ * drain the IN responses). Bounds the PEM slot's in-flight window and the PEM
+ * backend's pending-exchange FIFO depth.
+ */
+#define NCMP_PEM_CONTAINER_COUNT 3
+
+/**
  * Default per-slot in-flight ceiling. Bounded by the number of device
  * containers so the host never dispatches more work than the mover can hold.
  * A slot may lower this via its runtime metadata but never exceed it.

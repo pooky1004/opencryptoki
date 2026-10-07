@@ -262,11 +262,15 @@ int main(int argc, char **argv)
         if (backend == NCMP_BACKEND_REAL)
             slot->max_inflight = 1;
 
-        /* Tag the slot's HSM type so clients/Debug/Web distinguish tokens. PEM
-         * uses usbfs CI v4 and is also strictly one-at-a-time per exchange. */
+        /* Tag the slot's HSM type so clients/Debug/Web distinguish tokens. The
+         * PEM board has NCMP_PEM_CONTAINER_COUNT (3) request containers, so its
+         * comm_thread may keep up to 3 commands in flight: it dispatches OUTs
+         * until 3 are outstanding (or nothing is left to send), then drains the
+         * IN responses. The PEM backend decouples bulk-OUT (send) from bulk-IN
+         * (recv) with a matching 3-deep pending FIFO. */
         if (backend == NCMP_BACKEND_PEM) {
             slot->hsm_type = NCMP_HSM_TYPE_PEM;
-            slot->max_inflight = 1;
+            slot->max_inflight = NCMP_PEM_CONTAINER_COUNT;
         } else {
             slot->hsm_type = NCMP_HSM_TYPE_NCMP;
         }

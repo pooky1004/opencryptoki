@@ -58,6 +58,7 @@
       <div class="navgroup">
         <div class="navhead">장치 관리</div>
         <button class="navitem active" type="button" data-tab="session" data-group="장치 관리" data-label="세션 관리">세션 관리</button>
+        <button class="navitem" type="button" data-tab="pemci" data-group="장치 관리" data-label="PEM CI 콘솔" id="navPemci" hidden>PEM CI 콘솔</button>
       </div>
       <div class="navgroup">
         <div class="navhead">암호 서비스</div>
@@ -175,6 +176,51 @@
             <button id="btnApplyDefaults" type="button" title="지금 각 탭 입력칸에 반영">적용</button>
           </div>
         </details>
+      </div>
+
+      <!-- PEM CI 콘솔 (PEM 슬롯 선택 시 표시) -->
+      <div class="tabpane" data-pane="pemci">
+        <div class="card">
+          <h2>PEM CI 콘솔 <span class="pill">PEM · usbfs 04b4:5054</span></h2>
+          <p class="muted small">선택한 <b>PEM 슬롯</b>에서 PKCS#11 API를 통해 단위 기능을 실행합니다
+            (facade → ncmpd PEM 백엔드 → <b>CI v4</b> → USB). 먼저 "세션 관리"에서 세션을 여세요.</p>
+          <div class="row">
+            <label><b>활성 세션</b> <select class="sessionPicker"></select></label>
+            <label>명령
+              <select id="pemOp">
+                <option value="sha3_256">SHA3-256</option>
+                <option value="sha3_384">SHA3-384</option>
+                <option value="sha3_512">SHA3-512</option>
+                <option value="gcm_enc">AES-256 GCM · 암호화</option>
+                <option value="gcm_dec">AES-256 GCM · 복호화</option>
+                <option value="ctr_enc">AES-256 CTR · 암호화</option>
+                <option value="ctr_dec">AES-256 CTR · 복호화</option>
+              </select>
+            </label>
+          </div>
+          <div id="pemFields">
+            <label data-pf="data" style="display:block">데이터 <span id="pemDataHint" class="muted small"></span>
+              <input type="text" id="pemData" value="PEM CI test" style="width:100%"></label>
+            <label data-pf="key" style="display:block">AES 키 Hex (32바이트)
+              <input type="password" id="pemKey" autocomplete="off"
+                value="000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f" style="width:100%"></label>
+            <div class="row">
+              <label data-pf="iv"><span id="pemIvLabel">IV Hex</span>
+                <input type="text" id="pemIv" value="101112131415161718191a1b"></label>
+              <label data-pf="tag">Tag Hex (복호화)
+                <input type="text" id="pemTag" placeholder="복호화 시 암호문 뒤 16바이트"></label>
+            </div>
+            <label data-pf="aad" style="display:block">AAD Hex (선택)
+              <input type="text" id="pemAad" style="width:100%"></label>
+          </div>
+          <div class="row">
+            <button id="pemRun" class="primary">실행</button>
+          </div>
+          <h3>결과</h3>
+          <pre id="pemOut" class="out"></pre>
+          <p class="muted small">현재 지원: SESSION(세션 관리) · SHA3-256/384/512 · AES-256 GCM/CTR 단발.
+            CAPABILITIES·ECHO·KEY_TABLE·ML-DSA/ML-KEM·멀티파트는 다음 단계에서 추가됩니다.</p>
+        </div>
       </div>
 
       <!-- AES / SHA3 (hash + AES-CTR) -->

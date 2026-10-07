@@ -21,6 +21,7 @@ const el = (tag, props = {}, ...kids) => {
 };
 
 let SELECTED_SLOT = null;
+let SLOT_TYPES = {};   // slot id -> hsm_type (0=NCMP,1=PEM)
 let CUR_SESSION = null;          // local facade handle of the active session
 let SESSIONS = [];               // [{handle, label, sid}] opened/adopted sessions
 
@@ -319,14 +320,17 @@ async function refreshSlots() {
   ul.innerHTML = '';
   if (!d.ok) { log('슬롯 조회 실패: ' + describe(d)); return; }
   log(`활성 슬롯 ${d.slots.length}개: [${d.slots.join(', ')}]`);
+  SLOT_TYPES = d.slotTypes || {};
   for (const id of d.slots) {
-    const li = el('li', { textContent: `Slot ${id}` });
+    const pem = Number(SLOT_TYPES[id]) === 1;
+    const li = el('li', { textContent: `Slot ${id}` + (pem ? ' \u00b7 PEM' : '') });
     li.onclick = () => selectSlot(id, li);
     ul.append(li);
   }
   if (d.slots.length) ul.firstChild.click();
 }
 
+function slotIsPem(id) { return Number(SLOT_TYPES[id]) === 1; }
 function selectSlot(id, li) {
   SELECTED_SLOT = id;
   /* Sessions are facade-global; keep them across slot selection. */
@@ -335,6 +339,12 @@ function selectSlot(id, li) {
   // keep the API tester's slot field in sync
   const sf = document.querySelector('#apiParams [data-pk="slot"]');
   if (sf) sf.value = id;
+  /* PEM slot -> reveal + switch to the PEM CI console; NCMP slot -> hide it. */
+  const pem = slotIsPem(id);
+  const nav = $('#navPemci');
+  if (nav) nav.hidden = !pem;
+  if (pem) { pemVisibility(); switchTab('pemci'); }
+  else if (document.querySelector('.navitem[data-tab="pemci"].active')) switchTab('session');
 }
 
 async function tokenInfo() {
@@ -577,6 +587,51 @@ async function gmpRun() {
   await gmpRefreshFiles();
 }
 function gmpNewIv() { $('#gmpIv').value = Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, '0')).join(''); }
+/* ---- PEM CI 콘솔 (PEM 슬롯 선택 시) ---- */
+function pemVisibility() {
+  const op = $('#pemOp') ? $('#pemOp').value : 'sha3_256';
+  const sha = op.startsWith('sha3'), gcm = op.startsWith('gcm'), dec = op.endsWith('_dec');
+  const show = { data:true, key:!sha, iv:!sha, aad:gcm, tag:gcm&&dec };
+  document.querySelectorAll('#pemFields [data-pf]').forEach((e) => { e.style.display = show[e.dataset.pf] ? '' : 'none'; });
+  const hint = $('#pemDataHint'), ivl = $('#pemIvLabel');
+  if (hint) hint.textContent = sha ? '(UTF-8 문자열)' : dec ? '(암호문 Hex)' : '(평문 Hex)';
+  if (ivl) ivl.textContent = op.startsWith('ctr') ? 'Counter Hex (16바이트)' : 'IV Hex (12/16바이트)';
+}
+async function pemRun() {
+  if (CUR_SESSION === null) { $('#pemOut').textContent = NO_SESS; return log('PEM CI: ' + NO_SESS); }
+  const h = CUR_SESSION, op = $('#pemOp').value;
+  $('#pemOut').textContent = `실행 중… (handle ${h}, ${op})`;
+  try {
+    if (op.startsWith('sha3')) {
+      const mech = op === 'sha3_384' ? 704 : op === 'sha3_512' ? 720 : 688;
+      const d = await api('/api/digest', 'POST', { session: h, mech, input: $('#pemData').value });
+      touchSession(h, 'PEM ' + op, d.ok);
+      $('#pemOut').textContent = d.ok ? `digest [${d.length}B] =\n${hexWrap(d.hex)}` : '오류: ' + describe(d);
+      return;
+    }
+    const gcm = op.startsWith('gcm'), enc = op.endsWith('_enc') ? 1 : 0;
+    const key = hexClean($('#pemKey').value, 'AES 키');
+    const iv = hexClean($('#pemIv').value, gcm ? 'IV' : 'Counter');
+    let data = hexClean($('#pemData').value, enc ? '평문' : '암호문');
+    if (key.length !== 64) throw new Error('PEM AES는 32바이트(AES-256) 키만 지원합니다.');
+    const body = { session: h, algo: gcm ? 'gcm' : 'ctr', encrypt: enc, key, iv, data };
+    if (gcm) {
+      body.aad = hexClean($('#pemAad').value, 'AAD');
+      body.tagBytes = 16;
+      if (!enc) { const tag = hexClean($('#pemTag').value, 'Tag'); if (tag.length !== 32) throw new Error('Tag는 16바이트여야 합니다.'); body.data = data + tag; }
+    }
+    const d = await api('/api/encrypt', 'POST', body);
+    touchSession(h, 'PEM ' + op, d.ok);
+    $('#pemKey').value = '';
+    if (!d.ok) { $('#pemOut').textContent = '오류: ' + describe(d); return; }
+    if (gcm && enc) {
+      const ct = d.hex.slice(0, -32), tg = d.hex.slice(-32);
+      $('#pemOut').textContent = `암호화 완료\n암호문 [${ct.length/2}B] =\n${hexWrap(ct)}\n\n태그 [16B] =\n${hexWrap(tg)}`;
+    } else {
+      $('#pemOut').textContent = `${enc ? '암호문' : '평문'} [${d.length}B] =\n${hexWrap(d.hex)}`;
+    }
+  } catch (e) { $('#pemOut').textContent = '오류: ' + e.message; }
+}
 function gcmDirToggle() {
   const dec = Number($('#gcmDir').value) === 0;
   $('#gcmDataLabel').firstChild.textContent = dec ? '암호문 Hex ' : '평문 Hex ';
@@ -1261,6 +1316,8 @@ function wire() {
   $('#btnGmpFiles').onclick = gmpRefreshFiles;
   $('#btnGmpRun').onclick = gmpRun;
   $('#btnGmpNewIv').onclick = gmpNewIv;
+  if ($('#pemRun')) $('#pemRun').onclick = pemRun;
+  if ($('#pemOp')) $('#pemOp').onchange = pemVisibility;
 
   $('#btnGenFile').onclick = genFile;
   $('#btnRefreshFiles').onclick = () => refreshFiles();

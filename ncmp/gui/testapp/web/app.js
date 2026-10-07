@@ -343,7 +343,7 @@ function selectSlot(id, li) {
   const pem = slotIsPem(id);
   const nav = $('#navPemci');
   if (nav) nav.hidden = !pem;
-  if (pem) { pemVisibility(); switchTab('pemci'); }
+  if (pem) { pemVisibility(); pemMpRefresh(); switchTab('pemci'); }
   else if (document.querySelector('.navitem[data-tab="pemci"].active')) switchTab('session');
 }
 
@@ -589,6 +589,7 @@ async function gmpRun() {
 function gmpNewIv() { $('#gmpIv').value = Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, '0')).join(''); }
 /* ---- PEM CI 콘솔 (PEM 슬롯 선택 시) ---- */
 const PEM_TUNNEL_CMD = 0x01F0;               // ncmpd PEM backend generic CI tunnel
+const PEM_AES_KEY_ID = 0x0118;               // AES one-shot with a stored key/IV (key_id)
 const PEM_DIAG = { capabilities:0x0001, echo:0x0002, key_table:0x0024, perf_query:0x00F0 };
 const PEM_MLDSA = { 44:{cmd_kg:0x50,cmd_sg:0x51,cmd_vf:0x52,pub:1312,sec:2560,sig:2420},
                     65:{cmd_kg:0x50,cmd_sg:0x51,cmd_vf:0x52,pub:1952,sec:4032,sig:3309},
@@ -613,13 +614,16 @@ function pemIsDiag(op){ return op in PEM_DIAG; }
 
 function pemVisibility() {
   const op = $('#pemOp') ? $('#pemOp').value : 'capabilities';
-  const sha = op.startsWith('sha3'), gcm = op.startsWith('gcm'), dec = op.endsWith('_dec');
+  const sha = op.startsWith('sha3'), mp = op.startsWith('gcm_mp');
+  const gcm = op.startsWith('gcm') && !mp, ctr = op.startsWith('ctr'), dec = op.endsWith('_dec');
+  const aes = gcm || ctr;
   const mldsa = op.startsWith('mldsa'), mlkem = op.startsWith('mlkem'), ml = mldsa || mlkem;
   const sign = op === 'mldsa_sign', verify = op === 'mldsa_verify';
   const show = {
-    data: sha || gcm || op.startsWith('ctr') || op === 'echo' || op === 'perf_query' || sign || verify,
-    key: gcm || op.startsWith('ctr'), iv: gcm || op.startsWith('ctr'),
-    aad: gcm, tag: gcm && dec,
+    data: sha || aes || op === 'echo' || op === 'perf_query' || sign || verify,
+    keyid: aes, mpfile: mp,
+    key: aes || mp, iv: aes || mp,
+    aad: gcm || mp, tag: gcm && dec,
     profile: ml,
     pk: op === 'mldsa_verify' || op === 'mlkem_encaps',
     sk: op === 'mldsa_sign' || op === 'mlkem_decaps',
@@ -642,10 +646,33 @@ function pemVisibility() {
   if (ivl) ivl.textContent = op.startsWith('ctr') ? 'Counter Hex (16바이트)' : 'IV Hex (12/16바이트)';
 }
 
+/* Refresh the PEM multipart input-file picker from the server's test files. */
+async function pemMpRefresh() {
+  const sel = $('#pemMpFile'); if (!sel) return;
+  const cur = sel.value;
+  const d = await api('/api/files');
+  sel.innerHTML = '';
+  if (d.ok && d.files && d.files.length) {
+    for (const f of d.files) sel.append(el('option', { value: f.name, textContent: `${f.name} (${f.size}B)` }));
+    if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
+  } else {
+    sel.append(el('option', { value: '', textContent: '(시험 파일 없음 — 생성하세요)' }));
+  }
+}
+/* Generate a Hex test file for PEM multipart input. */
+async function pemMpGen() {
+  const size = Math.max(1, Math.floor(Number($('#pemMpGenSize').value) || 0));
+  $('#pemOut').textContent = `${size}B Hex 시험파일 생성 중…`;
+  const d = await api('/api/genfile', 'POST', { size, format: 'hex' });
+  if (!d.ok) { $('#pemOut').textContent = '생성 실패: ' + describe(d); return; }
+  await pemMpRefresh(); if ($('#pemMpFile')) $('#pemMpFile').value = d.name;
+  $('#pemOut').textContent = `생성됨: ${d.name} · ${d.size}B`;
+}
+
 /* Run a PEM-native command through the ncmpd PEM CI tunnel (/api/ci). */
-async function pemTunnel(pemCmd, argsHex, expBytes) {
+async function pemTunnel(pemCmd, argsHex, expBytes, sid) {
   const d = await api('/api/ci', 'POST', {
-    slot: SELECTED_SLOT, command: PEM_TUNNEL_CMD, session: 0,
+    slot: SELECTED_SLOT, command: PEM_TUNNEL_CMD, session: sid || 0,
     p0: pemU32le(pemCmd), p1: argsHex || '', p2: pemU32le(expBytes || 4096),
   });
   if (!d.ok) throw new Error(describe(d));
@@ -761,6 +788,64 @@ async function pemRun() {
     /* --- crypto unit functions via the PKCS#11 facade (needs a session) --- */
     if (CUR_SESSION === null) { $('#pemOut').textContent = NO_SESS; return log('PEM CI: ' + NO_SESS); }
     const h = CUR_SESSION;
+    /* AES-GCM multipart over a test file: C_Encrypt/DecryptInit+Update*N+Final,
+     * translated by the ncmpd PEM backend to AES_GCM_INIT/UPDATE/FINAL. */
+    if (op.startsWith('gcm_mp')) {
+      const enc = op.endsWith('_enc') ? 1 : 0;
+      const name = $('#pemMpFile') ? $('#pemMpFile').value : '';
+      if (!name) { $('#pemOut').textContent = '입력 시험 파일을 생성/선택하세요.'; return; }
+      const key = hexClean($('#pemKey').value, 'AES 키');
+      if (key.length !== 64) throw new Error('PEM AES는 32바이트(AES-256) 키만 지원합니다.');
+      const iv = hexClean($('#pemIv').value, 'IV');
+      const aad = hexClean($('#pemAad').value, 'AAD');
+      const chunk = Math.max(1, Math.floor(Number($('#pemMpChunk').value)) || 16384);
+      const outName = $('#pemMpOut').value.trim();
+      $('#pemOut').textContent = `멀티파트 GCM ${enc ? '암호화' : '복호화'} 실행 중… (handle ${h}, 파일 ${name})`;
+      const d = await api('/api/encrypt-file', 'POST',
+        { session: h, encrypt: enc, key, iv, aad, tagBytes: 16, name, chunk, outName });
+      touchSession(h, 'PEM ' + op, d.ok);
+      $('#pemKey').value = '';
+      if (!d.ok) { $('#pemOut').textContent = '오류: ' + describe(d); return; }
+      const out = $('#pemOut');
+      out.textContent = `${enc ? '암호화' : '복호화'} 완료\n입력 ${d.inBytes}B → 출력 ${d.outBytes}B · update ${d.updates}회\n`
+        + `출력 파일: ${d.outName}\nSHA-256(출력): ${d.sha256}\n`;
+      const btn = el('button', { className: 'link', textContent: '출력 파일 열기' });
+      btn.onclick = () => window.open('/files/' + encodeURIComponent(d.outName), '_blank', 'noopener');
+      out.append(btn);
+      if (enc && $('#pemMpFile')) await pemMpRefresh();
+      return;
+    }
+    /* AES single-shot with a STORED key/IV (key_id>0): PEM-native, via the tunnel. */
+    {
+      const kid = Math.floor(Number($('#pemKeyId') ? $('#pemKeyId').value : 0)) || 0;
+      if (kid > 0 && (op.startsWith('gcm') || op.startsWith('ctr'))) {
+        const gcm = op.startsWith('gcm'), enc = op.endsWith('_enc') ? 1 : 0;
+        const sid = await pemSessionWire();
+        let data = hexClean($('#pemData').value, enc ? '평문' : '암호문');
+        let args = pemU64le(gcm ? 1 : 0) + pemU64le(enc ? 0 : 1) + pemU64le(kid);
+        if (gcm) args += pemVarHex(hexClean($('#pemAad').value, 'AAD'));
+        if (gcm && !enc) {
+          const tag = hexClean($('#pemTag').value, 'Tag');
+          if (tag.length !== 32) throw new Error('Tag는 16바이트여야 합니다.');
+          args += pemVarHex(data) + tag;
+        } else {
+          args += pemVarHex(data);
+        }
+        const dl = data.length / 2;
+        const exp = 16 + 8 + ((dl + 7) & ~7) + (gcm && enc ? 16 : 0);
+        const r = await pemTunnel(PEM_AES_KEY_ID, args, exp, sid);
+        if (r.ack !== 0) { $('#pemOut').textContent = `저장 키 ID ${kid} · ack ${r.ack} (${r.ackName})\n키가 프로비저닝되지 않았을 수 있습니다.`; return; }
+        const n = parseInt(r.out.slice(0, 16).match(/../g).reverse().join(''), 16);
+        const outHex = r.out.slice(16, 16 + n * 2);
+        if (gcm && enc) {
+          const tg = r.out.slice(16 + ((n + 7) & ~7) * 2, 16 + ((n + 7) & ~7) * 2 + 32);
+          $('#pemOut').textContent = `[저장 키 ID ${kid}] 암호화 완료\n암호문 [${n}B] =\n${hexWrap(outHex)}\n\n태그 [16B] =\n${hexWrap(tg)}`;
+        } else {
+          $('#pemOut').textContent = `[저장 키 ID ${kid}] ${enc ? '암호문' : '평문'} [${n}B] =\n${hexWrap(outHex)}`;
+        }
+        return;
+      }
+    }
     if (op.startsWith('sha3')) {
       const mech = op === 'sha3_384' ? 704 : op === 'sha3_512' ? 720 : 688;
       const d = await api('/api/digest', 'POST', { session: h, mech, input: $('#pemData').value });
@@ -1476,6 +1561,7 @@ function wire() {
   $('#btnGmpNewIv').onclick = gmpNewIv;
   if ($('#pemRun')) $('#pemRun').onclick = pemRun;
   if ($('#pemOp')) $('#pemOp').onchange = pemVisibility;
+  if ($('#pemMpGen')) $('#pemMpGen').onclick = pemMpGen;
 
   $('#btnGenFile').onclick = genFile;
   $('#btnRefreshFiles').onclick = () => refreshFiles();

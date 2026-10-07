@@ -199,6 +199,8 @@
                 <option value="gcm_dec">AES-256 GCM · 복호화</option>
                 <option value="ctr_enc">AES-256 CTR · 암호화</option>
                 <option value="ctr_dec">AES-256 CTR · 복호화</option>
+                <option value="gcm_mp_enc">AES-256 GCM 멀티파트(파일) · 암호화</option>
+                <option value="gcm_mp_dec">AES-256 GCM 멀티파트(파일) · 복호화</option>
                 <option value="mldsa_keygen">ML-DSA · KEYGEN</option>
                 <option value="mldsa_sign">ML-DSA · SIGN</option>
                 <option value="mldsa_verify">ML-DSA · VERIFY</option>
@@ -211,7 +213,9 @@
           <div id="pemFields">
             <label data-pf="data" style="display:block">데이터 <span id="pemDataHint" class="muted small"></span>
               <input type="text" id="pemData" value="PEM CI test" style="width:100%"></label>
-            <label data-pf="key" style="display:block">AES 키 Hex (32바이트)
+            <label data-pf="keyid" style="display:block">저장 키 ID <span class="muted small">(0 = 입력 키 사용 · CTR 홀수 1–19 / GCM 짝수 2–20)</span>
+              <input type="number" id="pemKeyId" value="0" min="0" max="20" style="width:120px"></label>
+            <label data-pf="key" style="display:block">AES 키 Hex (32바이트) <span class="muted small">(저장 키 ID&gt;0이면 무시)</span>
               <input type="password" id="pemKey" autocomplete="off"
                 value="000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f" style="width:100%"></label>
             <div class="row">
@@ -222,6 +226,19 @@
             </div>
             <label data-pf="aad" style="display:block">AAD Hex (선택)
               <input type="text" id="pemAad" style="width:100%"></label>
+            <div data-pf="mpfile">
+              <div class="row">
+                <label>입력 파일 <select id="pemMpFile"></select></label>
+                <label>생성 크기(B) <input type="number" id="pemMpGenSize" value="65536" min="1" style="width:140px"></label>
+                <button id="pemMpGen" type="button">Hex 파일 생성</button>
+              </div>
+              <div class="row">
+                <label>update당 청크(B) <input type="number" id="pemMpChunk" value="16384" min="1" style="width:140px"></label>
+                <label>출력 파일명 <input type="text" id="pemMpOut" placeholder="(자동)" style="width:220px"></label>
+              </div>
+              <p class="muted small">C_EncryptInit → C_EncryptUpdate×N → C_EncryptFinal 경로를 PEM
+                AES_GCM_INIT/UPDATE/FINAL(0x0133/34/35)로 변환합니다. 64KB 이상 입력 권장.</p>
+            </div>
             <label data-pf="profile">프로파일
               <select id="pemProfile"></select></label>
             <label data-pf="pk" style="display:block">Public key Hex
@@ -238,8 +255,9 @@
           </div>
           <h3>결과</h3>
           <pre id="pemOut" class="out"></pre>
-          <p class="muted small">현재 지원: SESSION(세션 관리) · SHA3-256/384/512 · AES-256 GCM/CTR 단발.
-            CAPABILITIES·ECHO·KEY_TABLE·ML-DSA/ML-KEM·멀티파트는 다음 단계에서 추가됩니다.</p>
+          <p class="muted small">지원: SESSION · CAPABILITIES·ECHO·KEY_TABLE·PERF_QUERY ·
+            SHA3-256/384/512 · AES-256 GCM/CTR 단발 · AES 저장 키 ID · AES-GCM 멀티파트(파일) ·
+            ML-DSA/ML-KEM(KEYGEN/SIGN·VERIFY/ENCAPS·DECAPS).</p>
         </div>
       </div>
 

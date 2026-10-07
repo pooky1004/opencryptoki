@@ -350,6 +350,61 @@ static int pem_be_send(ncmp_transport_t *t, const uint8_t *frame, size_t len)
         }
         return build_rsp(t, &m.header, ack, outd, total);
     }
+    case NCMP_CMD_AES_GCM_INIT: {   /* [flags|key|iv|aad|taglen] -> PEM AES_GCM_INIT; resp ctx=0 */
+        if (!P(0, p0, l0) || !P(1, p1, l1) || !P(2, p2, l2))
+            return build_rsp(t, &m.header, NCMP_CKR_ARGUMENTS_BAD, NULL, 0);
+        if (l1 != 32)   /* PEM multipart GCM is AES-256 only (32-byte key) */
+            return build_rsp(t, &m.header, NCMP_CKR_MECHANISM_INVALID, NULL, 0);
+        uint32_t enc = (rd_u32le(p0) & NCMP_AES_FLAG_ENCRYPT) ? 1u : 0u;
+        const uint8_t *aad = NULL; uint32_t aadl = 0;
+        if (P(3, p3, l3)) { aad = p3; aadl = l3; }
+        alen = 0;
+        alen = arg_u64(args, alen, 0u);            /* key_id = 0 (input key/IV) */
+        alen = arg_u64(args, alen, enc ? 0u : 1u); /* direction: 0=enc, 1=dec */
+        alen = arg_fixed(args, alen, p1, 32);      /* key */
+        alen = arg_var(args, alen, p2, l2);        /* iv (len-prefixed) */
+        alen = arg_var(args, alen, aad, aadl);     /* aad (len-prefixed, may be 0) */
+        if (pem_exchange(t, m.header.session_id, CIFX_CI_COMMAND_AES_GCM_INIT, args, alen, 16,
+                         resp, sizeof(resp), &rlen) != NCMP_OK) return NCMP_ERR_USB;
+        ack = rd_u32le(resp + 12);
+        if (ack != NCMP_CKR_OK) return build_rsp(t, &m.header, ack, NULL, 0);
+        uint8_t ctx[4]; ncmp_wr_u32le(ctx, 0u);    /* single input-key context id */
+        return build_rsp(t, &m.header, ack, ctx, 4);
+    }
+    case NCMP_CMD_AES_GCM_UPDATE: {  /* [ctx|data] -> PEM AES_GCM_UPDATE -> out */
+        if (!P(1, p1, l1)) { p1 = NULL; l1 = 0; }
+        alen = 0;
+        alen = arg_u64(args, alen, 0u);            /* key_id = 0 */
+        alen = arg_var(args, alen, p1, l1);        /* data (len-prefixed) */
+        if (pem_exchange(t, m.header.session_id, CIFX_CI_COMMAND_AES_GCM_UPDATE, args, alen,
+                         (size_t)24 + pad8(l1), resp, sizeof(resp), &rlen) != NCMP_OK)
+            return NCMP_ERR_USB;
+        ack = rd_u32le(resp + 12);
+        if (ack != NCMP_CKR_OK) return build_rsp(t, &m.header, ack, NULL, 0);
+        if (rlen < 16 + 8) return build_rsp(t, &m.header, NCMP_CKR_FUNCTION_FAILED, NULL, 0);
+        uint32_t outl = rd_u32le(resp + 16);       /* data_len (low 32) */
+        return build_rsp(t, &m.header, ack, resp + 24, outl);
+    }
+    case NCMP_CMD_AES_GCM_FINAL: {   /* enc:[ctx]->tag ; dec:[ctx|tag]->ack */
+        /* Decrypt carries the expected tag as a non-empty param1; encrypt has
+         * only the ctx param (param1 absent/empty — msg_param may still report
+         * OK with len 0, so gate on the length). */
+        int dec = (P(1, p1, l1) && l1 > 0);
+        alen = 0;
+        alen = arg_u64(args, alen, 0u);            /* key_id = 0 */
+        if (dec) {
+            if (l1 != 16) return build_rsp(t, &m.header, NCMP_CKR_ARGUMENTS_BAD, NULL, 0);
+            alen = arg_fixed(args, alen, p1, 16);  /* expected tag */
+        }
+        if (pem_exchange(t, m.header.session_id, CIFX_CI_COMMAND_AES_GCM_FINAL, args, alen,
+                         dec ? 16u : 32u, resp, sizeof(resp), &rlen) != NCMP_OK)
+            return NCMP_ERR_USB;
+        ack = rd_u32le(resp + 12);
+        if (ack != NCMP_CKR_OK) return build_rsp(t, &m.header, ack, NULL, 0);
+        if (dec) return build_rsp(t, &m.header, ack, NULL, 0);   /* decrypt: ack only */
+        if (rlen < 16 + 16) return build_rsp(t, &m.header, NCMP_CKR_FUNCTION_FAILED, NULL, 0);
+        return build_rsp(t, &m.header, ack, resp + 16, 16);      /* encrypt: tag(16B) */
+    }
     case PEM_RAW_CMD: {   /* generic PEM CI tunnel (param0=cmd, param1=args, param2=exp) */
         uint32_t pemcmd = 0, exp = 4096;
         const uint8_t *a = NULL; uint32_t al = 0;

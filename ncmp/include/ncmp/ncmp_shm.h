@@ -63,6 +63,15 @@ typedef struct ncmp_token_identity {
 /** Sentinel bound_ck_slot meaning "physical slot not yet claimed". */
 #define NCMP_SLOT_UNBOUND (-1)
 
+/**
+ * HSM(토큰) 타입 — 한 ncmpd가 서로 다른 종류의 물리 토큰을 슬롯별로 구별한다.
+ * 기본값 0 = 기존 NCMP 토큰(FX3 Slave-FIFO, 04b4:00f1)이므로, 0으로 초기화된
+ * 기존 슬롯은 자동으로 NCMP 타입이다(기존 코드/레이아웃 불변). PEM 토큰
+ * (CI v4, usbfs 04b4:5054)은 1로 표시한다.
+ */
+#define NCMP_HSM_TYPE_NCMP 0u   /**< 기존 NCMP 토큰 (FX3). 기본값. */
+#define NCMP_HSM_TYPE_PEM  1u   /**< PEM 토큰 (CI v4 over usbfs). */
+
 /** Bytes captured from the last comm<->HSM frame (header + leading params; bulk
  *  payloads are truncated to this cap for inspection). */
 #define NCMP_LASTMSG_CAP 4096u
@@ -134,7 +143,7 @@ typedef struct ncmp_slot {
      * slots claim distinct tokens. The mapping persists for the daemon's life. */
     NCMP_TokenIdentity token;      /**< Cached identity (daemon fills at boot). */
     int32_t         bound_ck_slot; /**< Claiming CK slot id, or NCMP_SLOT_UNBOUND. */
-    uint32_t        _bind_pad;
+    uint32_t        hsm_type;      /**< NCMP_HSM_TYPE_* (0=NCMP 기본, 1=PEM). 과거 _bind_pad 자리. */
 
     /* MPSC command ring (pending queue). Producers CAS entries; the slot's
      * single comm_thread consumes them. Waiting clients poll their entry's

@@ -1184,7 +1184,19 @@ static int route_api(int fd, const char *method, const char *path, const char *b
             int o = snprintf(extra, sizeof(extra), "\"slots\":[");
             for (int i = 0; i < n; i++)
                 o += snprintf(extra + o, sizeof(extra) - o, "%s%lu", i ? "," : "", ids[i]);
-            snprintf(extra + o, sizeof(extra) - o, "]");
+            o += snprintf(extra + o, sizeof(extra) - o, "],\"slotTypes\":{");
+            /* Per-slot HSM type from SHM (0=NCMP, 1=PEM): lets the UI switch the
+             * right panel to the PEM CI console for PEM slots. */
+            pthread_mutex_lock(&g_ci_lock);
+            if (ci_ensure()) {
+                for (int i = 0; i < n; i++) {
+                    NCMP_Slot *sl = ncmp_shm_slot(g_ci_cli.shm_base, (uint32_t)ids[i]);
+                    o += snprintf(extra + o, sizeof(extra) - o, "%s\"%lu\":%u",
+                                  i ? "," : "", ids[i], sl ? sl->hsm_type : 0u);
+                }
+            }
+            pthread_mutex_unlock(&g_ci_lock);
+            snprintf(extra + o, sizeof(extra) - o, "}");
         }
     } else if (!strcmp(path, "/api/token") && !strcmp(method, "POST")) {
         long slot = 0;

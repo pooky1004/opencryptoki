@@ -337,9 +337,11 @@ static int emit_slot_summary(char *buf, int cap, int o, NCMP_Slot *s)
     json_field(label, sizeof(label), s->token.label, NCMP_TI_LABEL_LEN);
     int w = snprintf(buf + o, (size_t)(cap - o),
         "{\"slot\":%u,\"state\":%d,\"stateName\":\"%s\",\"boundCkSlot\":%d,"
+        "\"hsmType\":%u,\"hsmTypeName\":\"%s\","
         "\"curSessions\":%u,\"maxInflight\":%u,\"inFlight\":%u,\"maxInFlightSeen\":%u,"
         "\"totalSent\":%llu,\"tokenValid\":%u,\"tokenLabel\":\"%s\"}",
         s->slot_id, s->state, state_name(s->state), s->bound_ck_slot,
+        s->hsm_type, s->hsm_type == NCMP_HSM_TYPE_PEM ? "PEM" : "NCMP",
         s->cur_sessions, s->max_inflight,
         (unsigned)s->stats.in_flight_cnt, s->stats.stats_max_in_flight,
         (unsigned long long)s->stats.stats_total_sent_cmds,

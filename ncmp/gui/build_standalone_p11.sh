@@ -35,8 +35,19 @@ gcc $CFLAGS -shared -fPIC \
     "$ROOT/ncmp/common/ncmp_slotmap.c" \
     -lpthread -lrt -o "$OUT/libpkcs11_ncmp_p11.so"
 
+# PEM USB transport backend: default usbfs ioctl; set CI_USB_USE_LIBUSB=1 to
+# route ncmp/pem/ci_usb_lib.c through libusb-1.0 (libusb is linked either way
+# below for the real FX3 path, so only the compile flag changes).
+PEM_USB_FLAG=""
+if [ -n "${CI_USB_USE_LIBUSB:-}" ]; then
+    PEM_USB_FLAG="-DCI_USB_USE_LIBUSB"
+    echo "  PEM USB transport: libusb-1.0 (CI_USB_USE_LIBUSB)"
+else
+    echo "  PEM USB transport: usbfs ioctl (default; set CI_USB_USE_LIBUSB=1 for libusb)"
+fi
+
 echo "building $OUT/ncmpd (all backends; pick at runtime with --transport)"
-gcc -std=gnu11 -D_GNU_SOURCE -O2 -Wall \
+gcc -std=gnu11 -D_GNU_SOURCE -O2 -Wall $PEM_USB_FLAG \
     -I"$ROOT/ncmp/include" -I"$ROOT/ncmp/mock" -I"$ROOT/ncmp/pem" \
     "$ROOT/ncmp/daemon/main.c" "$ROOT/ncmp/daemon/conn_thread.c" \
     "$ROOT/ncmp/daemon/comm_thread.c" "$ROOT/ncmp/daemon/transport.c" \

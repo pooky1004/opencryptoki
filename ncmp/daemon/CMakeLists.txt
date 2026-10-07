@@ -11,9 +11,10 @@ add_executable(ncmpd
     transport.c                 # runtime dispatcher (ncmp_transport_*)
     usb_transport.c             # ncmp_usb_ops   (real; libusb or stub)
     socket_transport.c          # ncmp_socket_ops
-    pem_transport.c             # ncmp_pem_ops   (PEM token: NCMP<->CI v4, usbfs)
+    pem_transport.c             # ncmp_pem_ops   (PEM token: NCMP<->CI v4)
     ${CMAKE_SOURCE_DIR}/pem/cifx_protocol.c   # PEM CI v4 codec
-    ${CMAKE_SOURCE_DIR}/pem/ci_usb_lib.c      # PEM usbfs transport (no libusb)
+    ${CMAKE_SOURCE_DIR}/pem/ci_usb_lib.c      # PEM USB transport (usbfs ioctl, or
+                                              # libusb with -DENABLE_PEM_LIBUSB)
     mock_backend.c              # ncmp_mock_ops  (uses the emulator below)
     # emulator sources for the mock backend (NOT ncmp_mock, which would also
     # export the public ncmp_transport_* and clash with the dispatcher):

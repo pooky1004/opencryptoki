@@ -38,6 +38,22 @@ endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
+# PEM token USB transport (ncmp/pem/ci_usb_lib.c): OFF drives the device with
+# direct usbfs ioctl (USBDEVFS_BULK, no libusb); ON routes it through
+# libusb-1.0. Selected at compile time via the CI_USB_USE_LIBUSB macro; when ON,
+# libusb is required and every target that compiles ci_usb_lib.c links it (the
+# ncmpd / hsm_bridge targets already link libusb when found).
+option(ENABLE_PEM_LIBUSB
+       "Drive the PEM token over libusb-1.0 instead of direct usbfs ioctl"
+       OFF)
+if(ENABLE_PEM_LIBUSB)
+    add_compile_definitions(CI_USB_USE_LIBUSB)
+    find_package(LibUSB REQUIRED)
+    message(STATUS "Token NCMP: PEM USB transport = libusb-1.0 (CI_USB_USE_LIBUSB)")
+else()
+    message(STATUS "Token NCMP: PEM USB transport = usbfs ioctl (default)")
+endif()
+
 # Public headers shared by every target.
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 

@@ -60,6 +60,17 @@ typedef int (*CI_USB_Backend)(void *context,
 typedef void (*CI_USB_BackendDestroy)(void *context);
 typedef void (*CI_USB_TraceCallback)(void *context, const CI_USB_Trace *trace);
 
+/* Split OUT-only / IN-only operations for pipelined transports (fill several
+ * device containers before draining). Available only on a real CI_USB_Open()
+ * connection (usbfs or libusb); a CI_USB_CreateBackend() exchange-only
+ * connection returns CI_USB_ERR_UNSUPPORTED. The caller is responsible for
+ * matching each CI_USB_Send to exactly one later CI_USB_Recv in FIFO order. */
+typedef int (*CI_USB_SendFn)(void *context, const uint8_t *request,
+                             size_t request_len, CI_USB_Timing *timing);
+typedef int (*CI_USB_RecvFn)(void *context, uint8_t *response,
+                             size_t expected_response_len, size_t *response_len,
+                             CI_USB_Timing *timing);
+
 void CI_USB_DefaultOptions(CI_USB_Options *options);
 int CI_USB_Open(const CI_USB_Options *options, CI_USB **connection);
 int CI_USB_CreateBackend(CI_USB_Backend exchange, void *context,
@@ -69,6 +80,13 @@ int CI_USB_Exchange(CI_USB *connection,
                     const uint8_t *request, size_t request_len,
                     uint8_t *response, size_t expected_response_len,
                     size_t *response_len, CI_USB_Timing *timing);
+/* Bulk OUT only (request frame + conditional ZLP). */
+int CI_USB_Send(CI_USB *connection, const uint8_t *request, size_t request_len,
+                CI_USB_Timing *timing);
+/* Bulk IN only (one response frame). */
+int CI_USB_Recv(CI_USB *connection, uint8_t *response,
+                size_t expected_response_len, size_t *response_len,
+                CI_USB_Timing *timing);
 void CI_USB_SetTrace(CI_USB *connection, CI_USB_TraceCallback callback,
                      void *context);
 /* Borrowed diagnostic text; read it between exchanges, without concurrent

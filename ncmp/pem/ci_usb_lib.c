@@ -9,7 +9,14 @@
 #include <string.h>
 #include <time.h>
 
-#ifdef __linux__
+/* USB backend selection (compile-time):
+ *   - default: direct usbfs ioctl (USBDEVFS_BULK) on Linux, no libusb needed.
+ *   - -DCI_USB_USE_LIBUSB: drive the device through libusb-1.0 instead.
+ * Both implement the same bulk OUT -> (ZLP if max-packet multiple) -> IN
+ * exchange behind CI_USB_CreateBackend(); the rest of the file is shared. */
+#if defined(CI_USB_USE_LIBUSB)
+#include <libusb-1.0/libusb.h>
+#elif defined(__linux__)
 #include <dirent.h>
 #include <fcntl.h>
 #include <linux/usbdevice_fs.h>
@@ -19,6 +26,8 @@
 
 struct CI_USB {
     CI_USB_Backend exchange;
+    CI_USB_SendFn send;             /* OUT-only (real backends); NULL otherwise */
+    CI_USB_RecvFn recv;             /* IN-only  (real backends); NULL otherwise */
     CI_USB_BackendDestroy destroy;
     void *backend_context;
     CI_USB_TraceCallback trace;
@@ -142,6 +151,70 @@ int CI_USB_Exchange(CI_USB *connection,
     return result;
 }
 
+int CI_USB_Send(CI_USB *connection, const uint8_t *request, size_t request_len,
+                CI_USB_Timing *timing)
+{
+    int result;
+    if (connection == NULL || request == NULL || request_len < 16u ||
+        request_len > 65504u || request_len % 4u != 0u)
+        return CI_USB_ERR_ARGUMENT;
+    if (timing != NULL) memset(timing, 0, sizeof(*timing));
+    (void)pthread_mutex_lock(&connection->lock);
+    if (connection->send == NULL) {
+        (void)pthread_mutex_unlock(&connection->lock);
+        return CI_USB_ERR_UNSUPPORTED;
+    }
+    if (connection->poisoned) {
+        (void)pthread_mutex_unlock(&connection->lock);
+        return CI_USB_ERR_STATE;
+    }
+    result = connection->send(connection->backend_context, request, request_len,
+                              timing);
+    if (result != CI_USB_OK) {
+        connection->poisoned = 1;
+        (void)snprintf(connection->error, sizeof(connection->error), "%s",
+                       CI_USB_StrError(result));
+    }
+    (void)pthread_mutex_unlock(&connection->lock);
+    return result;
+}
+
+int CI_USB_Recv(CI_USB *connection, uint8_t *response,
+                size_t expected_response_len, size_t *response_len,
+                CI_USB_Timing *timing)
+{
+    int result;
+    if (connection == NULL || response == NULL || response_len == NULL ||
+        expected_response_len < 16u || expected_response_len > 65520u ||
+        expected_response_len % 4u != 0u)
+        return CI_USB_ERR_ARGUMENT;
+    *response_len = 0;
+    if (timing != NULL) memset(timing, 0, sizeof(*timing));
+    (void)pthread_mutex_lock(&connection->lock);
+    if (connection->recv == NULL) {
+        (void)pthread_mutex_unlock(&connection->lock);
+        return CI_USB_ERR_UNSUPPORTED;
+    }
+    if (connection->poisoned) {
+        (void)pthread_mutex_unlock(&connection->lock);
+        return CI_USB_ERR_STATE;
+    }
+    result = connection->recv(connection->backend_context, response,
+                              expected_response_len, response_len, timing);
+    if (result == CI_USB_OK && (*response_len > expected_response_len ||
+                                *response_len < 16u || *response_len % 4u != 0u)) {
+        *response_len = 0;
+        result = CI_USB_ERR_SHORT;
+    }
+    if (result != CI_USB_OK) {
+        connection->poisoned = 1;
+        (void)snprintf(connection->error, sizeof(connection->error), "%s",
+                       CI_USB_StrError(result));
+    }
+    (void)pthread_mutex_unlock(&connection->lock);
+    return result;
+}
+
 const char *CI_USB_LastError(const CI_USB *connection)
 {
     return connection == NULL ? "no USB connection" : connection->error;
@@ -155,7 +228,7 @@ void CI_USB_Close(CI_USB *connection)
     free(connection);
 }
 
-#ifdef __linux__
+#if defined(__linux__) && !defined(CI_USB_USE_LIBUSB)
 struct usbfs_backend { int fd; uint32_t timeout_ms; uint16_t max_packet; };
 
 static int read_number(const char *path, int base, unsigned int *number)
@@ -253,9 +326,9 @@ static int bulk_until(struct usbfs_backend *backend, uint8_t endpoint,
     return ioctl(backend->fd, USBDEVFS_BULK, &transfer);
 }
 
-static int usbfs_exchange(void *context, const uint8_t *request, size_t request_len,
-                           uint8_t *response, size_t expected, size_t *actual,
-                           CI_USB_Timing *timing)
+/* Bulk OUT only: request frame + conditional ZLP (fills one device container). */
+static int usbfs_send(void *context, const uint8_t *request, size_t request_len,
+                      CI_USB_Timing *timing)
 {
     struct usbfs_backend *backend = context;
     uint64_t deadline;
@@ -271,6 +344,16 @@ static int usbfs_exchange(void *context, const uint8_t *request, size_t request_
         bulk_until(backend, 0x01u, NULL, 0u, deadline) != 0)
         return errno == ETIMEDOUT ? CI_USB_ERR_TIMEOUT : CI_USB_ERR_IO;
     timing->out_end_ns = monotonic_ns();
+    return CI_USB_OK;
+}
+
+/* Bulk IN only: one response frame (firmware short-packets at the true length). */
+static int usbfs_recv(void *context, uint8_t *response, size_t expected,
+                      size_t *actual, CI_USB_Timing *timing)
+{
+    struct usbfs_backend *backend = context;
+    uint64_t deadline;
+    int n;
     timing->in_start_ns = monotonic_ns();
     deadline = timing->in_start_ns + (uint64_t)backend->timeout_ms * 1000000u;
     /* Request exact success length: firmware does not append an IN ZLP.
@@ -282,6 +365,15 @@ static int usbfs_exchange(void *context, const uint8_t *request, size_t request_
     return CI_USB_OK;
 }
 
+static int usbfs_exchange(void *context, const uint8_t *request, size_t request_len,
+                           uint8_t *response, size_t expected, size_t *actual,
+                           CI_USB_Timing *timing)
+{
+    int rc = usbfs_send(context, request, request_len, timing);
+    if (rc != CI_USB_OK) return rc;
+    return usbfs_recv(context, response, expected, actual, timing);
+}
+
 static void usbfs_destroy(void *context)
 {
     struct usbfs_backend *backend = context;
@@ -290,7 +382,147 @@ static void usbfs_destroy(void *context)
     close(backend->fd);
     free(backend);
 }
-#endif
+#endif /* __linux__ && !CI_USB_USE_LIBUSB */
+
+#if defined(CI_USB_USE_LIBUSB)
+struct ci_libusb_backend {
+    libusb_context *ctx;
+    libusb_device_handle *handle;
+    uint32_t timeout_ms;
+    uint16_t max_packet;
+};
+
+/* Enumerate, match VID/PID (and device_path = /dev/bus/usb/BBB/DDD when set),
+ * read the OUT endpoint (0x01) max packet size, then open + claim interface 0. */
+static int ci_libusb_find_open(const CI_USB_Options *options,
+                               struct ci_libusb_backend *be)
+{
+    libusb_device **list = NULL;
+    libusb_device *found = NULL;
+    struct libusb_config_descriptor *cfg = NULL;
+    ssize_t count, i;
+    unsigned int matches = 0;
+    uint16_t mp = 0;
+    int rc;
+
+    count = libusb_get_device_list(be->ctx, &list);
+    if (count < 0) return CI_USB_ERR_IO;
+    for (i = 0; i < count; ++i) {
+        struct libusb_device_descriptor dd;
+        if (libusb_get_device_descriptor(list[i], &dd) != 0) continue;
+        if (dd.idVendor != options->vendor_id || dd.idProduct != options->product_id)
+            continue;
+        if (options->device_path != NULL) {
+            char cand[64];
+            unsigned int bus = libusb_get_bus_number(list[i]);
+            unsigned int addr = libusb_get_device_address(list[i]);
+            if (snprintf(cand, sizeof(cand), "/dev/bus/usb/%03u/%03u", bus, addr) >=
+                (int)sizeof(cand) || strcmp(cand, options->device_path) != 0)
+                continue;
+        }
+        if (++matches > 1u) { libusb_free_device_list(list, 1); return CI_USB_ERR_MULTIPLE; }
+        found = list[i];
+    }
+    if (found == NULL) { libusb_free_device_list(list, 1); return CI_USB_ERR_NOT_FOUND; }
+
+    if (libusb_get_active_config_descriptor(found, &cfg) == 0 && cfg != NULL) {
+        for (int ii = 0; ii < cfg->bNumInterfaces && mp == 0u; ++ii) {
+            const struct libusb_interface *itf = &cfg->interface[ii];
+            for (int a = 0; a < itf->num_altsetting && mp == 0u; ++a) {
+                const struct libusb_interface_descriptor *id = &itf->altsetting[a];
+                if (id->bInterfaceNumber != 0 || id->bAlternateSetting != 0) continue;
+                for (int e = 0; e < id->bNumEndpoints; ++e) {
+                    const struct libusb_endpoint_descriptor *ep = &id->endpoint[e];
+                    if (ep->bEndpointAddress == 0x01u)
+                        mp = (uint16_t)(ep->wMaxPacketSize & 0x7ffu);
+                }
+            }
+        }
+        libusb_free_config_descriptor(cfg);
+    }
+    if (mp == 0u) { libusb_free_device_list(list, 1); return CI_USB_ERR_UNSUPPORTED; }
+    be->max_packet = mp;
+
+    rc = libusb_open(found, &be->handle);
+    libusb_free_device_list(list, 1);
+    if (rc != 0) return CI_USB_ERR_IO;
+    (void)libusb_set_auto_detach_kernel_driver(be->handle, 1);
+    if (libusb_claim_interface(be->handle, 0) != 0) {
+        libusb_close(be->handle); be->handle = NULL;
+        return CI_USB_ERR_IO;
+    }
+    return CI_USB_OK;
+}
+
+static int ci_libusb_bulk(struct ci_libusb_backend *be, unsigned char endpoint,
+                          unsigned char *data, int length, int *transferred)
+{
+    int rc = libusb_bulk_transfer(be->handle, endpoint, data, length,
+                                  transferred, be->timeout_ms);
+    if (rc == LIBUSB_ERROR_TIMEOUT) return CI_USB_ERR_TIMEOUT;
+    if (rc != 0) return CI_USB_ERR_IO;
+    return CI_USB_OK;
+}
+
+/* Bulk OUT only: request frame + conditional ZLP (fills one device container). */
+static int ci_libusb_send(void *context, const uint8_t *request, size_t request_len,
+                          CI_USB_Timing *timing)
+{
+    struct ci_libusb_backend *be = context;
+    int transferred = 0, rc;
+    timing->out_start_ns = monotonic_ns();
+    rc = ci_libusb_bulk(be, 0x01u, (unsigned char *)(uintptr_t)request,
+                        (int)request_len, &transferred);
+    if (rc != CI_USB_OK) return rc;
+    if ((size_t)transferred != request_len) return CI_USB_ERR_SHORT;
+    /* AUTO DMA needs a short-packet boundary: send an explicit OUT ZLP when the
+     * request is exactly a max-packet multiple (same rule as the usbfs path). */
+    if (request_len % be->max_packet == 0u) {
+        transferred = 0;
+        rc = ci_libusb_bulk(be, 0x01u, (unsigned char *)(uintptr_t)request, 0, &transferred);
+        if (rc != CI_USB_OK) return rc;
+    }
+    timing->out_end_ns = monotonic_ns();
+    return CI_USB_OK;
+}
+
+/* Bulk IN only: one response frame (firmware short-packets at the true length). */
+static int ci_libusb_recv(void *context, uint8_t *response, size_t expected,
+                          size_t *actual, CI_USB_Timing *timing)
+{
+    struct ci_libusb_backend *be = context;
+    int transferred = 0, rc;
+    timing->in_start_ns = monotonic_ns();
+    /* Request the exact success length; firmware does not append an IN ZLP. A
+     * short 16-byte CI error frame is accepted for protocol-layer validation. */
+    rc = ci_libusb_bulk(be, 0x81u, response, (int)expected, &transferred);
+    timing->in_end_ns = monotonic_ns();
+    if (rc != CI_USB_OK) return rc;
+    *actual = (size_t)transferred;
+    return CI_USB_OK;
+}
+
+static int ci_libusb_exchange(void *context, const uint8_t *request, size_t request_len,
+                              uint8_t *response, size_t expected, size_t *actual,
+                              CI_USB_Timing *timing)
+{
+    int rc = ci_libusb_send(context, request, request_len, timing);
+    if (rc != CI_USB_OK) return rc;
+    return ci_libusb_recv(context, response, expected, actual, timing);
+}
+
+static void ci_libusb_destroy(void *context)
+{
+    struct ci_libusb_backend *be = context;
+    if (be == NULL) return;
+    if (be->handle != NULL) {
+        (void)libusb_release_interface(be->handle, 0);
+        libusb_close(be->handle);
+    }
+    if (be->ctx != NULL) libusb_exit(be->ctx);
+    free(be);
+}
+#endif /* CI_USB_USE_LIBUSB */
 
 int CI_USB_Open(const CI_USB_Options *options, CI_USB **connection)
 {
@@ -302,7 +534,27 @@ int CI_USB_Open(const CI_USB_Options *options, CI_USB **connection)
         return CI_USB_ERR_UNSUPPORTED;
     if (options->timeout_ms == 0u || options->timeout_ms > 60000u)
         return CI_USB_ERR_ARGUMENT;
-#ifdef __linux__
+#if defined(CI_USB_USE_LIBUSB)
+    {
+        struct ci_libusb_backend *be;
+        int result;
+        be = calloc(1, sizeof(*be));
+        if (be == NULL) return CI_USB_ERR_MEMORY;
+        be->timeout_ms = options->timeout_ms;
+        if (libusb_init(&be->ctx) != 0) { free(be); return CI_USB_ERR_IO; }
+        result = ci_libusb_find_open(options, be);
+        if (result != CI_USB_OK) {
+            if (be->ctx != NULL) libusb_exit(be->ctx);
+            free(be);
+            return result;
+        }
+        result = CI_USB_CreateBackend(ci_libusb_exchange, be, ci_libusb_destroy, connection);
+        if (result != CI_USB_OK) { ci_libusb_destroy(be); return result; }
+        (*connection)->send = ci_libusb_send;   /* enable pipelined OUT/IN */
+        (*connection)->recv = ci_libusb_recv;
+        return result;
+    }
+#elif defined(__linux__)
     {
         char path[256];
         uint16_t packet;
@@ -320,7 +572,9 @@ int CI_USB_Open(const CI_USB_Options *options, CI_USB **connection)
         backend->timeout_ms = options->timeout_ms;
         backend->max_packet = packet;
         result = CI_USB_CreateBackend(usbfs_exchange, backend, usbfs_destroy, connection);
-        if (result != CI_USB_OK) usbfs_destroy(backend);
+        if (result != CI_USB_OK) { usbfs_destroy(backend); return result; }
+        (*connection)->send = usbfs_send;       /* enable pipelined OUT/IN */
+        (*connection)->recv = usbfs_recv;
         return result;
     }
 #else
